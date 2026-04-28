@@ -19,6 +19,7 @@ pub mod dialogs;
 pub mod icons;
 pub mod ids;
 pub mod main_window;
+pub mod settings;
 pub mod toolbar;
 
 use std::path::PathBuf;
@@ -76,9 +77,14 @@ pub fn run(default_profile_path: PathBuf) -> ExitCode {
         }
     };
 
+    let settings_path = settings::default_settings_path();
+    let settings = settings::Settings::load(&settings_path);
+
     let app = Box::new(App {
         profile: std::cell::RefCell::new(profile),
         profile_path: std::cell::RefCell::new(default_profile_path),
+        settings: std::cell::RefCell::new(settings),
+        settings_path: std::cell::RefCell::new(settings_path),
     });
 
     let hwnd = match main_window::create(app) {

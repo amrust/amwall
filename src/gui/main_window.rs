@@ -46,21 +46,22 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CreateMenu, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, HMENU,
-    IDC_ARROW, LoadCursorW, MF_POPUP, MF_SEPARATOR, MF_STRING, MoveWindow, RegisterClassExW,
-    SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SIZE,
-    WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
-    WS_VISIBLE,
+    AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetMenu,
+    GetWindowLongPtrW, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LoadCursorW, MB_ICONERROR,
+    MB_OK, MF_BYCOMMAND, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MessageBoxW,
+    MoveWindow, RegisterClassExW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
 use super::app::App;
 use super::ids::{
     IDC_APPS_PROFILE, IDC_APPS_SERVICE, IDC_APPS_UWP, IDC_LOG, IDC_NETWORK,
-    IDC_RULES_BLOCKLIST, IDC_RULES_CUSTOM, IDC_RULES_SYSTEM, IDC_STATUSBAR, IDC_TAB,
+    IDC_RULES_BLOCKLIST, IDC_RULES_CUSTOM, IDC_RULES_SYSTEM, IDC_SEARCH, IDC_STATUSBAR, IDC_TAB,
     IDM_ABOUT, IDM_ADD_FILE, IDM_ALWAYSONTOP_CHK, IDM_AUTOSIZECOLUMNS_CHK,
     IDM_BLOCKLIST_EXTRA_ALLOW, IDM_BLOCKLIST_EXTRA_BLOCK, IDM_BLOCKLIST_EXTRA_DISABLE,
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
@@ -488,11 +489,43 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     populate_apps_tab(state);
     populate_user_rules(state);
 
+    // Apply persisted UI settings: menu checks + always-on-top +
+    // search-bar visibility. After this the window mirrors what
+    // the user left set last time.
+    apply_initial_settings(hwnd, state);
+
     // Triggers on_size (which lays out children) and on_tab_change.
     on_size(hwnd);
     on_tab_change(hwnd);
 
     Ok(())
+}
+
+/// One-shot at startup: walk the persisted Settings, set the
+/// matching menu check marks, apply window-level effects
+/// (always-on-top, search-bar visibility).
+fn apply_initial_settings(hwnd: HWND, state: &WndState) {
+    let s = state.app.settings.borrow();
+    let pairs = [
+        (IDM_ALWAYSONTOP_CHK, s.always_on_top),
+        (IDM_AUTOSIZECOLUMNS_CHK, s.autosize_columns),
+        (IDM_SHOWSEARCHBAR_CHK, s.show_search_bar),
+        (IDM_SHOWFILENAMESONLY_CHK, s.show_filenames_only),
+        (IDM_USEDARKTHEME_CHK, s.use_dark_theme),
+        (IDM_LOADONSTARTUP_CHK, s.load_on_startup),
+        (IDM_STARTMINIMIZED_CHK, s.start_minimized),
+        (IDM_SKIPUACWARNING_CHK, s.skip_uac_warning),
+        (IDM_CHECKUPDATES_CHK, s.check_updates),
+    ];
+    for (id, v) in pairs {
+        set_menu_check(hwnd, id, v);
+    }
+    if s.always_on_top {
+        apply_always_on_top(hwnd, true);
+    }
+    if !s.show_search_bar {
+        apply_search_bar_visibility(hwnd, false);
+    }
 }
 
 /// `WM_SIZE`: lay out rebar + tab + status bar. The rebar pins to
@@ -701,7 +734,217 @@ fn on_command(hwnd: HWND, id: u32) {
         IDM_ABOUT => on_about(hwnd),
         IDM_WEBSITE => open_website(hwnd),
         IDM_CHECKUPDATES => open_releases_page(hwnd),
+
+        // Toggleable View / Settings menu items. Each handler
+        // flips the matching field in `state.app.settings`,
+        // persists, updates the menu's check mark, and applies
+        // any visible side-effect (e.g. always-on-top).
+        IDM_ALWAYSONTOP_CHK
+        | IDM_AUTOSIZECOLUMNS_CHK
+        | IDM_SHOWSEARCHBAR_CHK
+        | IDM_SHOWFILENAMESONLY_CHK
+        | IDM_USEDARKTHEME_CHK
+        | IDM_LOADONSTARTUP_CHK
+        | IDM_STARTMINIMIZED_CHK
+        | IDM_SKIPUACWARNING_CHK
+        | IDM_CHECKUPDATES_CHK => on_toggle(hwnd, id),
+
+        IDM_TRAY_START => on_enable_filters(hwnd),
+
         other => eprintln!("simplewall-rs: menu id {other} not yet wired up"),
+    }
+}
+
+/// Flip the `Settings` field tied to this menu id, persist, update
+/// the menu's check mark, apply any window-level side effect.
+fn on_toggle(hwnd: HWND, id: u16) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let new_value = {
+        let mut s = state.app.settings.borrow_mut();
+        let field = match id {
+            IDM_ALWAYSONTOP_CHK => &mut s.always_on_top,
+            IDM_AUTOSIZECOLUMNS_CHK => &mut s.autosize_columns,
+            IDM_SHOWSEARCHBAR_CHK => &mut s.show_search_bar,
+            IDM_SHOWFILENAMESONLY_CHK => &mut s.show_filenames_only,
+            IDM_USEDARKTHEME_CHK => &mut s.use_dark_theme,
+            IDM_LOADONSTARTUP_CHK => &mut s.load_on_startup,
+            IDM_STARTMINIMIZED_CHK => &mut s.start_minimized,
+            IDM_SKIPUACWARNING_CHK => &mut s.skip_uac_warning,
+            IDM_CHECKUPDATES_CHK => &mut s.check_updates,
+            _ => return,
+        };
+        *field = !*field;
+        *field
+    };
+
+    set_menu_check(hwnd, id, new_value);
+
+    // Persist immediately. A failure to write isn't user-visible
+    // beyond the stderr line — the in-memory state still reflects
+    // the toggle, just won't survive restart.
+    let path = state.app.settings_path.borrow().clone();
+    if let Err(e) = state.app.settings.borrow().save(&path) {
+        eprintln!(
+            "simplewall-rs: settings: save failed for {}: {e}",
+            path.display()
+        );
+    }
+
+    // Visual side effects.
+    match id {
+        IDM_ALWAYSONTOP_CHK => apply_always_on_top(hwnd, new_value),
+        IDM_SHOWSEARCHBAR_CHK => apply_search_bar_visibility(hwnd, new_value),
+        IDM_SHOWFILENAMESONLY_CHK => {
+            // Filename / full-path display affects Apps tab rendering.
+            populate_apps_tab(state);
+        }
+        IDM_AUTOSIZECOLUMNS_CHK => {
+            if new_value {
+                autosize_active_listview_columns(state);
+            }
+        }
+        // The remaining toggles are display-only at boot time
+        // (load_on_startup wires into the registry on a future
+        // commit; dark theme is M5.9; etc.) — flipping the menu
+        // check is the entire visible behaviour for now.
+        _ => {}
+    }
+}
+
+/// File → Toolbar Enable filters: install the current profile via
+/// the same `install_profile` path the CLI uses. Requires admin;
+/// if not elevated we surface a friendly error instead of crashing
+/// when WFP refuses the call.
+fn on_enable_filters(hwnd: HWND) {
+    use windows::Win32::UI::Shell::IsUserAnAdmin;
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    if !unsafe { IsUserAnAdmin() }.as_bool() {
+        let title = wide("Administrator required");
+        let body = wide(
+            "Filter management requires Administrator privileges.\n\n\
+             Close simplewall-rs and re-launch from an elevated shell\n\
+             (right-click \u{2192} \"Run as administrator\").",
+        );
+        unsafe {
+            MessageBoxW(
+                hwnd,
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+        return;
+    }
+
+    let engine = match crate::wfp::WfpEngine::open() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("simplewall-rs: WfpEngine::open failed: {e}");
+            set_status_text(state.status.get(), 0, "Failed to open WFP engine.");
+            return;
+        }
+    };
+    let report = match crate::install::install_profile(
+        &engine,
+        &state.app.profile.borrow(),
+        true, // persistent: reboots keep the filters
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("simplewall-rs: install_profile failed: {e}");
+            set_status_text(state.status.get(), 0, "Filter install failed.");
+            return;
+        }
+    };
+    set_status_text(state.status.get(), 0, "Filters are enabled.");
+    set_status_text(
+        state.status.get(),
+        1,
+        &format!(
+            "{} filter(s) installed, {} skipped.",
+            report.filters_added, report.rules_skipped
+        ),
+    );
+}
+
+/// Mark a menu item as checked or unchecked. We get the top-level
+/// menu via GetMenu(hwnd) and let CheckMenuItem walk the nested
+/// popups via MF_BYCOMMAND.
+fn set_menu_check(hwnd: HWND, id: u16, checked: bool) {
+    let menu = unsafe { GetMenu(hwnd) };
+    if menu.0 == 0 {
+        return;
+    }
+    let flag = if checked { MF_CHECKED } else { MF_UNCHECKED };
+    unsafe {
+        let _ = CheckMenuItem(menu, id as u32, (MF_BYCOMMAND | flag).0);
+    }
+}
+
+/// Toggle HWND_TOPMOST / HWND_NOTOPMOST without resizing or moving
+/// the window. SWP_NOMOVE | SWP_NOSIZE keeps the rect untouched.
+fn apply_always_on_top(hwnd: HWND, on: bool) {
+    let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    unsafe {
+        let _ = SetWindowPos(hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+/// Show or hide the rebar's search edit. Simplest visible
+/// behaviour for now; keeps the rebar band layout intact —
+/// upstream uses RB_SHOWBAND to collapse the band entirely, which
+/// can land later when we revisit search-bar polish.
+fn apply_search_bar_visibility(hwnd: HWND, visible: bool) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    // The search edit is a child of the rebar; its HWND is
+    // GetDlgItem(rebar, IDC_SEARCH). We look it up rather than
+    // caching because it's a one-off operation.
+    use windows::Win32::UI::WindowsAndMessaging::GetDlgItem;
+    let rebar = state.rebar.get();
+    if rebar.0 == 0 {
+        return;
+    }
+    let search = unsafe { GetDlgItem(rebar, IDC_SEARCH) };
+    if search.0 != 0 {
+        unsafe {
+            let _ = ShowWindow(search, if visible { SW_SHOW } else { SW_HIDE });
+        }
+    }
+}
+
+/// Auto-size every column on the currently-visible listview to
+/// fit its widest cell. LVSCW_AUTOSIZE = -1.
+fn autosize_active_listview_columns(state: &WndState) {
+    let tab = state.tab.get();
+    if tab.0 == 0 {
+        return;
+    }
+    let sel =
+        unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
+    let slot = if sel < 0 { 0 } else { sel as usize };
+    let lv = state.listviews[slot].get();
+    if lv.0 == 0 {
+        return;
+    }
+    // Cap at 8 columns — Apps/Rules/Network/Log all fit.
+    for col in 0..12 {
+        unsafe {
+            let _ = SendMessageW(
+                lv,
+                LVM_SETCOLUMNWIDTH,
+                WPARAM(col),
+                LPARAM(-1), // LVSCW_AUTOSIZE
+            );
+        }
     }
 }
 
