@@ -26,3 +26,7 @@ Desktop.ini
 .env
 .env.local
 *.local
+
+# Debug dumps left by `netsh wfp show filters` etc.
+/filters.xml
+/wfpstate.xml
