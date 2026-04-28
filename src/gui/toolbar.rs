@@ -76,7 +76,11 @@ pub struct Toolbar {
 pub fn create(parent: HWND, dpi: u32) -> Result<Toolbar, String> {
     let rebar = create_rebar(parent)?;
     let toolbar = create_toolbar(rebar)?;
-    populate_toolbar(toolbar)?;
+    // Build the imagelist *before* populating the toolbar so each
+    // TBBUTTON's iBitmap can resolve to the right index.
+    let icons = super::icons::build(dpi);
+    super::icons::attach_to_toolbar(toolbar, icons.himagelist);
+    populate_toolbar(toolbar, &icons)?;
     let search = create_search(rebar)?;
     insert_bands(rebar, toolbar, search, dpi)?;
     Ok(Toolbar {
@@ -195,31 +199,43 @@ fn create_toolbar(rebar: HWND) -> Result<HWND, String> {
     }
 }
 
-fn populate_toolbar(toolbar: HWND) -> Result<(), String> {
+fn populate_toolbar(toolbar: HWND, icons: &super::icons::IconSet) -> Result<(), String> {
     // Buttons in upstream's _app_toolbar_init order. iString is a
     // pointer to a static UTF-16 literal (via `w!`); pointers to
     // .rdata literals are 'static so toolbars can keep them
     // forever without lifetime concerns.
     //
-    // BTNS_BUTTON | BTNS_AUTOSIZE — same flags upstream uses.
-    // BTNS_SHOWTEXT isn't needed when iString is non-zero and the
-    // toolbar style includes TBSTYLE_LIST.
+    // BTNS_BUTTON | BTNS_AUTOSIZE | BTNS_SHOWTEXT — text *and*
+    // icon both visible (TBSTYLE_LIST puts text right-of-icon).
+    let lookup = |id: u16| super::icons::index_for(icons, id);
     let buttons: [TBBUTTON; 15] = [
-        button(IDM_TRAY_START, w!("Enable filters")),
+        button(IDM_TRAY_START, w!("Enable filters"), lookup(IDM_TRAY_START)),
         separator(),
-        button(IDM_OPENRULESEDITOR, w!("Create rule")),
+        button(IDM_OPENRULESEDITOR, w!("Create rule"), lookup(IDM_OPENRULESEDITOR)),
         separator(),
-        button(IDM_TRAY_ENABLENOTIFICATIONS_CHK, w!("Notifications")),
-        button(IDM_TRAY_ENABLELOG_CHK, w!("Log to file")),
-        button(IDM_TRAY_ENABLEUILOG_CHK, w!("Log UI")),
+        button(
+            IDM_TRAY_ENABLENOTIFICATIONS_CHK,
+            w!("Notifications"),
+            lookup(IDM_TRAY_ENABLENOTIFICATIONS_CHK),
+        ),
+        button(
+            IDM_TRAY_ENABLELOG_CHK,
+            w!("Log to file"),
+            lookup(IDM_TRAY_ENABLELOG_CHK),
+        ),
+        button(
+            IDM_TRAY_ENABLEUILOG_CHK,
+            w!("Log UI"),
+            lookup(IDM_TRAY_ENABLEUILOG_CHK),
+        ),
         separator(),
-        button(IDM_REFRESH, w!("Refresh")),
-        button(IDM_SETTINGS, w!("Settings")),
+        button(IDM_REFRESH, w!("Refresh"), lookup(IDM_REFRESH)),
+        button(IDM_SETTINGS, w!("Settings"), lookup(IDM_SETTINGS)),
         separator(),
-        button(IDM_TRAY_LOGSHOW, w!("Show log")),
-        button(IDM_TRAY_LOGCLEAR, w!("Clear log")),
+        button(IDM_TRAY_LOGSHOW, w!("Show log"), lookup(IDM_TRAY_LOGSHOW)),
+        button(IDM_TRAY_LOGCLEAR, w!("Clear log"), lookup(IDM_TRAY_LOGCLEAR)),
         separator(),
-        button(IDM_RELEASES, w!("Releases")),
+        button(IDM_RELEASES, w!("Releases"), lookup(IDM_RELEASES)),
     ];
     let res = unsafe {
         SendMessageW(
@@ -240,20 +256,20 @@ fn populate_toolbar(toolbar: HWND) -> Result<(), String> {
     Ok(())
 }
 
-fn button(id: u16, label: PCWSTR) -> TBBUTTON {
+fn button(id: u16, label: PCWSTR, image_index: i32) -> TBBUTTON {
     TBBUTTON {
-        iBitmap: I_IMAGENONE,
+        // image_index is the imagelist slot from `icons::build`,
+        // or `I_IMAGENONE` (-2) if that icon failed to decode —
+        // the toolbar then renders text-only for that button.
+        iBitmap: if image_index < 0 { I_IMAGENONE } else { image_index },
         idCommand: id as i32,
         fsState: TBSTATE_ENABLED as u8,
-        // BTNS_SHOWTEXT is mandatory under TBSTYLE_LIST: without it
-        // the toolbar auto-sizes the button to zero width when there's
-        // no icon, leaving the toolbar visually empty.
+        // BTNS_SHOWTEXT keeps the label visible alongside the
+        // icon under TBSTYLE_LIST. Without it the toolbar would
+        // hide text once we provided icons.
         fsStyle: (BTNS_BUTTON | BTNS_AUTOSIZE | BTNS_SHOWTEXT) as u8,
         bReserved: [0; 6],
         dwData: 0,
-        // PCWSTR.0 is *const u16; INT_PTR-cast into iString is the
-        // documented way to pass a literal label pointer instead of
-        // an index into the toolbar's string table.
         iString: label.0 as isize,
     }
 }

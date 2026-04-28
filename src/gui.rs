@@ -16,6 +16,7 @@
 
 pub mod app;
 pub mod dialogs;
+pub mod icons;
 pub mod ids;
 pub mod main_window;
 pub mod toolbar;

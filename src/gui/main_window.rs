@@ -39,8 +39,9 @@ use windows::Win32::UI::Controls::{
     LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVS_EX_CHECKBOXES,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR,
-    SBARS_TOOLTIPS, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, TCIF_TEXT, TCITEMW,
-    TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW, TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
+    NMTBGETINFOTIPW, SBARS_TOOLTIPS, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW,
+    TBN_GETINFOTIPW, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW,
+    TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -65,11 +66,13 @@ use super::ids::{
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
     IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK, IDM_BLOCKLIST_UPDATE_DISABLE,
     IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_EXIT, IDM_EXPORT, IDM_FONT, IDM_IMPORT,
-    IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_PURGE_TIMERS, IDM_PURGE_UNUSED, IDM_REFRESH,
-    IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK, IDM_RULE_ALLOWWINDOWSUPDATE,
-    IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SETTINGS, IDM_SHOWFILENAMESONLY_CHK,
-    IDM_SHOWSEARCHBAR_CHK, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_USEDARKTHEME_CHK,
-    IDM_WEBSITE, TAB_LISTVIEW_IDS,
+    IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_OPENRULESEDITOR, IDM_PURGE_TIMERS,
+    IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK,
+    IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SETTINGS,
+    IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SKIPUACWARNING_CHK,
+    IDM_STARTMINIMIZED_CHK, IDM_TRAY_ENABLELOG_CHK, IDM_TRAY_ENABLENOTIFICATIONS_CHK,
+    IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGSHOW, IDM_TRAY_START,
+    IDM_USEDARKTHEME_CHK, IDM_WEBSITE, TAB_LISTVIEW_IDS,
 };
 use super::dialogs;
 use super::toolbar::{self, Toolbar};
@@ -397,11 +400,18 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_NOTIFY => {
-            // TCN_SELCHANGE: user clicked a different tab. Show the
-            // matching listview, hide the others.
             let nmhdr = unsafe { &*(lparam.0 as *const NMHDR) };
+            // TCN_SELCHANGE: user clicked a different tab — show
+            // the matching listview, hide the others.
             if nmhdr.idFrom == IDC_TAB as usize && nmhdr.code == TCN_SELCHANGE {
                 on_tab_change(hwnd);
+            }
+            // TBN_GETINFOTIPW: toolbar wants tooltip text for a
+            // button. Fill in the NMTBGETINFOTIPW->pszText buffer
+            // with our hardcoded English description.
+            if nmhdr.code == TBN_GETINFOTIPW {
+                let info = unsafe { &mut *(lparam.0 as *mut NMTBGETINFOTIPW) };
+                fill_toolbar_tooltip(info);
             }
             LRESULT(0)
         }
@@ -804,6 +814,40 @@ fn on_refresh(hwnd: HWND) {
     populate_user_rules(state);
     on_tab_change(hwnd); // refresh status-bar item count
     set_status_text(state.status.get(), 0, "Profile reloaded.");
+}
+
+/// Fill in the tooltip text for a toolbar button. The toolbar
+/// notifies us with `TBN_GETINFOTIPW` carrying `iItem` (the
+/// button's command ID) and a writeable `pszText` / `cchTextMax`
+/// buffer. We copy the matching tooltip into the buffer; if the
+/// button isn't recognised we leave the buffer untouched (Win32
+/// then falls back to the button label).
+fn fill_toolbar_tooltip(info: &mut NMTBGETINFOTIPW) {
+    let text = match info.iItem as u16 {
+        IDM_TRAY_START => "Enable filters (Ctrl+T)",
+        IDM_OPENRULESEDITOR => "Create a new user rule",
+        IDM_TRAY_ENABLENOTIFICATIONS_CHK => "Enable notifications for blocked traffic",
+        IDM_TRAY_ENABLELOG_CHK => "Log blocked traffic to a file",
+        IDM_TRAY_ENABLEUILOG_CHK => "Show packets log in the UI",
+        IDM_REFRESH => "Reload the profile from disk (F5)",
+        IDM_SETTINGS => "Open Settings",
+        IDM_TRAY_LOGSHOW => "Open the packets log file",
+        IDM_TRAY_LOGCLEAR => "Clear the packets log",
+        IDM_RELEASES => "Open the GitHub releases page",
+        _ => return,
+    };
+    // Win32 caller already allocated the buffer; we just memcpy
+    // up to cchTextMax-1 wide chars + a trailing NUL.
+    if info.pszText.is_null() || info.cchTextMax <= 0 {
+        return;
+    }
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let max = (info.cchTextMax as usize).saturating_sub(1);
+    let n = wide.len().min(max);
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), info.pszText.0, n);
+        *info.pszText.0.add(n) = 0;
+    }
 }
 
 /// Open the project's main GitHub page (Help → Website).
