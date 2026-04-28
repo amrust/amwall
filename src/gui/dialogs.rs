@@ -161,3 +161,39 @@ unsafe fn pwstr_to_pathbuf(ptr: *mut u16) -> PathBuf {
 pub fn open_profile_or<P: AsRef<Path>>(parent: HWND, _fallback: P) -> Option<PathBuf> {
     open_profile(parent)
 }
+
+/// Open a "pick an executable" file dialog. Used by
+/// IDM_ADD_FILE → adds the picked .exe path to `profile.apps`.
+pub fn open_executable(parent: HWND) -> Option<PathBuf> {
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let opts = dialog.GetOptions().ok()?;
+        let _ = dialog.SetOptions(opts | FOS_FORCEFILESYSTEM);
+
+        let exe_name = wide_static("Executable (*.exe)");
+        let exe_spec = wide_static("*.exe");
+        let any_name = wide_static("All files (*.*)");
+        let any_spec = wide_static("*.*");
+        let filters = [
+            COMDLG_FILTERSPEC {
+                pszName: PCWSTR(exe_name.as_ptr()),
+                pszSpec: PCWSTR(exe_spec.as_ptr()),
+            },
+            COMDLG_FILTERSPEC {
+                pszName: PCWSTR(any_name.as_ptr()),
+                pszSpec: PCWSTR(any_spec.as_ptr()),
+            },
+        ];
+        let _ = dialog.SetFileTypes(&filters);
+        let _ = dialog.SetFileTypeIndex(1);
+
+        dialog.Show(parent).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let pwstr = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+
+        let path = pwstr_to_pathbuf(pwstr.0);
+        CoTaskMemFree(Some(pwstr.0 as *const _));
+        Some(path)
+    }
+}

@@ -31,12 +31,15 @@ use std::process::ExitCode;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, PostQuitMessage, TranslateMessage,
+    DispatchMessageW, GetMessageW, LoadAcceleratorsW, MSG, PostQuitMessage, TranslateAcceleratorW,
+    TranslateMessage,
 };
+use windows::core::PCWSTR;
 
 use crate::profile::{self, Profile};
 use app::App;
@@ -119,10 +122,26 @@ pub fn run(default_profile_path: PathBuf) -> ExitCode {
     // hwnd kept alive by Win32 until WM_DESTROY → PostQuitMessage.
     let _ = hwnd;
 
-    // Standard message loop. GetMessageW returns 0 on WM_QUIT.
+    // Load the accelerator table (Ctrl+T / Ctrl+P / F5 / etc.).
+    // Failure is non-fatal — the menu still works without
+    // shortcuts.
+    let haccel = unsafe {
+        let hi = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+        // IDR_MAIN_ACCEL = 300 in assets/simplewall-rs.rc.
+        LoadAcceleratorsW(hi, PCWSTR(300usize as *const u16)).unwrap_or_default()
+    };
+
+    // Standard message loop with accelerator translation. The
+    // accelerator translator runs first; if it consumed the
+    // keystroke (returns nonzero), skip the regular dispatch.
     let mut msg = MSG::default();
     unsafe {
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+            if !haccel.is_invalid()
+                && TranslateAcceleratorW(hwnd, haccel, &msg) != 0
+            {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

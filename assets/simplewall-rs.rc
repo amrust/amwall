@@ -79,6 +79,32 @@
 // Application manifest.
 1 24 "manifest.xml"
 
+// Keyboard accelerator table — loaded by gui::run via
+// LoadAcceleratorsW(IDR_MAIN_ACCEL) and translated in the
+// message loop before WM_KEYDOWN / WM_CHAR dispatch.
+//
+// IDM_* values (255-303) are the same ones the menu/toolbar
+// already handle in main_window::on_command, so the accelerator
+// just becomes a synthetic WM_COMMAND with that ID.
+
+#define IDR_MAIN_ACCEL 300
+
+// IDM_REFRESH = 260, IDM_TRAY_START = 305, IDM_SETTINGS = 251,
+// IDM_ADD_FILE = 252, IDM_IMPORT = 253, IDM_EXPORT = 254,
+// IDM_OPENRULESEDITOR = 323, IDM_EXIT = 255.
+
+IDR_MAIN_ACCEL ACCELERATORS
+BEGIN
+    VK_F5,  260, VIRTKEY                    // Refresh
+    "T",    305, VIRTKEY, CONTROL           // Enable filters
+    "P",    251, VIRTKEY, CONTROL           // Settings
+    "O",    252, VIRTKEY, CONTROL           // Add app
+    "I",    253, VIRTKEY, CONTROL           // Import profile
+    "E",    254, VIRTKEY, CONTROL           // Export profile
+    "R",    323, VIRTKEY, CONTROL           // Create rule
+    "Q",    255, VIRTKEY, CONTROL           // Quit (Exit)
+END
+
 // ---------------------------------------------------------------
 // Rule-editor dialog templates.
 //

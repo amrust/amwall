@@ -559,9 +559,13 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     Ok(())
 }
 
-/// One-shot at startup: walk the persisted Settings, set the
-/// matching menu check marks, apply window-level effects
-/// (always-on-top, search-bar visibility).
+/// Apply the persisted Settings to the live window: menu check
+/// marks, always-on-top, search-bar visibility, autosize-columns,
+/// and a repopulate of the Apps tab so `show_filenames_only` /
+/// path-display preferences kick in.
+///
+/// Called at startup (from on_create) and after Settings-dialog
+/// Save so toggles take effect without a restart.
 fn apply_initial_settings(hwnd: HWND, state: &WndState) {
     let s = state.app.settings.borrow();
     let pairs = [
@@ -578,11 +582,18 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
     for (id, v) in pairs {
         set_menu_check(hwnd, id, v);
     }
-    if s.always_on_top {
-        apply_always_on_top(hwnd, true);
-    }
-    if !s.show_search_bar {
-        apply_search_bar_visibility(hwnd, false);
+    apply_always_on_top(hwnd, s.always_on_top);
+    apply_search_bar_visibility(hwnd, s.show_search_bar);
+    let autosize = s.autosize_columns;
+    drop(s);
+
+    // Apps tab basename-vs-fullpath rendering depends on
+    // `show_filenames_only`, so refresh it on every settings
+    // apply. Other tabs aren't affected.
+    populate_apps_tab(state);
+
+    if autosize {
+        autosize_active_listview_columns(state);
     }
 }
 
@@ -829,6 +840,7 @@ fn on_command(hwnd: HWND, id: u32) {
         IDM_TRAY_START => on_enable_filters(hwnd),
         IDM_OPENRULESEDITOR => on_create_rule(hwnd),
         IDM_SETTINGS => on_open_settings(hwnd),
+        IDM_ADD_FILE => on_add_app(hwnd),
 
         other => eprintln!("simplewall-rs: menu id {other} not yet wired up"),
     }
@@ -1025,6 +1037,50 @@ fn autosize_active_listview_columns(state: &WndState) {
             );
         }
     }
+}
+
+/// File → Add app: pick an .exe path, append it to
+/// `profile.apps` (if not already present), persist + repopulate.
+fn on_add_app(hwnd: HWND) {
+    use crate::profile::App as ProfileApp;
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let path = match super::dialogs::open_executable(hwnd) {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Skip if the rule already references this exact path.
+    {
+        let profile = state.app.profile.borrow();
+        if profile.apps.iter().any(|a| a.path == path) {
+            set_status_text(state.status.get(), 0, "App already in profile.");
+            return;
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let new_app = ProfileApp {
+        path,
+        is_enabled: true,
+        is_silent: false,
+        is_undeletable: false,
+        timestamp: now,
+        timer: 0,
+        hash: None,
+        comment: None,
+    };
+    state.app.profile.borrow_mut().apps.push(new_app);
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+    set_status_text(state.status.get(), 0, "App added.");
 }
 
 /// File → Settings / toolbar Settings: open the multi-tab modal
@@ -1748,16 +1804,18 @@ fn populate_apps_tab(state: &WndState) {
     }
 
     let profile = state.app.profile.borrow();
+    let filenames_only = state.app.settings.borrow().show_filenames_only;
     for (idx, app) in profile.apps.iter().enumerate() {
-        // File name only by default — full path is too long for
-        // the column. View → Show filenames only is on by default
-        // upstream and we'll pick that up when settings persistence
-        // wires the toggle.
-        let display_name = app
-            .path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| app.path.display().to_string());
+        // View → Show filenames only chooses between basename and
+        // full path. Default-on matches upstream behaviour.
+        let display_name = if filenames_only {
+            app.path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| app.path.display().to_string())
+        } else {
+            app.path.display().to_string()
+        };
         let mut name_buf = wide(&display_name);
 
         // INDEXTOSTATEIMAGEMASK(2) = checked, (1) = unchecked.
