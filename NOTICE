@@ -13,7 +13,7 @@ Original project:
 
 This port:
   Name:    simplewall-rs
-  Source:  https://github.com/simplewall-rs/simplewall-rs
+  Source:  https://github.com/amrust/simplewall-rs
   License: GNU General Public License v3.0 (or later)
 
 As a derivative work of simplewall, simplewall-rs is distributed under

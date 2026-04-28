@@ -2,7 +2,7 @@
 
 A Rust port of [simplewall](https://github.com/henrypp/simplewall), a lightweight tool for configuring [Windows Filtering Platform (WFP)](https://learn.microsoft.com/en-us/windows/win32/fwp/windows-filtering-platform-start-page) — the kernel-level network filtering API that sits underneath Windows Firewall.
 
-> **Status:** Pre-alpha. Live progress is tracked in [issue #1](https://github.com/simplewall-rs/simplewall-rs/issues/1).
+> **Status:** Pre-alpha. Live progress is tracked in [issue #1](https://github.com/amrust/simplewall-rs/issues/1).
 
 ## Goal
 

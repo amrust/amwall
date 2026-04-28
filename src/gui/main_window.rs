@@ -1095,7 +1095,7 @@ fn fill_toolbar_tooltip(info: &mut NMTBGETINFOTIPW) {
 
 /// Open the project's main GitHub page (Help → Website).
 fn open_website(hwnd: HWND) {
-    shell_open_url(hwnd, w!("https://github.com/simplewall-rs/simplewall-rs"));
+    shell_open_url(hwnd, w!("https://github.com/amrust/simplewall-rs"));
 }
 
 /// Help → About: modern TaskDialog with version, copyright, GPL
@@ -1121,8 +1121,8 @@ fn on_about(hwnd: HWND) {
             "\n",
             "Original simplewall \u{00A9} 2016\u{2013}2026 Henry++.\n",
             "\n",
-            "<a href=\"https://github.com/simplewall-rs/simplewall-rs\">",
-            "github.com/simplewall-rs/simplewall-rs</a>",
+            "<a href=\"https://github.com/amrust/simplewall-rs\">",
+            "github.com/amrust/simplewall-rs</a>",
         ),
         version = version,
     );
@@ -1177,13 +1177,13 @@ unsafe extern "system" fn about_dialog_callback(
     windows::core::HRESULT(0) // S_OK
 }
 
-/// Open https://github.com/simplewall-rs/simplewall-rs/releases in
+/// Open https://github.com/amrust/simplewall-rs/releases in
 /// the system's default browser. Replaces upstream's PayPal donate
 /// flow — same toolbar slot, friendlier action.
 fn open_releases_page(hwnd: HWND) {
     shell_open_url(
         hwnd,
-        w!("https://github.com/simplewall-rs/simplewall-rs/releases"),
+        w!("https://github.com/amrust/simplewall-rs/releases"),
     );
 }
 

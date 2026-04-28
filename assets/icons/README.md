@@ -43,7 +43,7 @@ Attribution is required and is provided in the repo-root `NOTICE` file.
 
 - `paypal_fulllogo.png` — PayPal's registered trademark, not GPL-clearable.
   simplewall-rs replaces upstream's "Donate" toolbar button with a
-  "Releases" button that opens `github.com/simplewall-rs/simplewall-rs/releases`.
+  "Releases" button that opens `github.com/amrust/simplewall-rs/releases`.
 - `search_dark.png`, `search_light.png`, `search.png` — unclear origin
   in upstream (no attribution, sizes inconsistent with Silk). We'll
   generate replacements if/when M5.9 wires search-box decoration.
