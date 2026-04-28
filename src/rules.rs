@@ -35,7 +35,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 pub use parse::{parse_clause, parse_str, ParseError};
 
 #[cfg(windows)]
-pub use compile::{compile, CompileError, Side};
+pub use compile::{compile, Side};
 
 /// One semicolon-separated clause from a rule string. Either
 /// `addr` or `port` is present (or both); a clause with both

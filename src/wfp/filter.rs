@@ -341,4 +341,48 @@ mod tests {
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
         engine.cleanup_provider(&prov.key()).expect("cleanup_provider failed");
     }
+
+    /// Live admin-only smoke test: filter using `FWP_RANGE0` for both
+    /// a port range and an IPv4 address range. Validates that the
+    /// `Box<FWP_RANGE0>` storage in `CompiledConditions` survives
+    /// through `FwpmFilterAdd0` and the kernel accepts the
+    /// `FWP_MATCH_RANGE` matchType + `FWP_RANGE_TYPE` value
+    /// combination. Uses unreachable test ports + TEST-NET-2 to
+    /// keep the filter inert on real traffic.
+    #[test]
+    #[ignore = "requires elevated shell to call FwpmFilterAdd0"]
+    fn add_filter_with_range_conditions_admin_smoke() {
+        let engine = WfpEngine::open().expect("engine open failed");
+        let prov = provider::add(&engine, "simplewall-rs test", "test provider")
+            .expect("provider add failed");
+        let sub = sublayer::add(
+            &engine,
+            "simplewall-rs range test sublayer",
+            "test sublayer",
+            0x4000,
+            Some(&prov.key()),
+        )
+        .expect("sublayer add failed");
+        let conds = [
+            FilterCondition::Protocol(IpProto::Tcp),
+            FilterCondition::RemotePortRange(65530, 65535),
+            FilterCondition::RemoteAddrV4Range(
+                Ipv4Addr::new(198, 51, 100, 0),
+                Ipv4Addr::new(198, 51, 100, 255),
+            ),
+        ];
+        let f = add(
+            &engine,
+            "simplewall-rs range test filter",
+            "permit tcp:198.51.100.0/24:65530-65535",
+            &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            &sub.key(),
+            Some(&prov.key()),
+            &conds,
+            FilterAction::Permit,
+        )
+        .expect("FwpmFilterAdd0 with range conditions failed");
+        assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
+        engine.cleanup_provider(&prov.key()).expect("cleanup_provider failed");
+    }
 }

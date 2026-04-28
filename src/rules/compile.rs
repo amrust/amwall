@@ -6,10 +6,9 @@
 // between the profile-on-disk format and the kernel-side filter
 // installation.
 //
-// Range forms (`PortSpec::Range`, `AddrSpec::Ipv4Range`) error as
-// `CompileError::UnsupportedRange` until M3.3 extends
-// `wfp::condition::FilterCondition` with `FWP_RANGE0`-backed range
-// variants. Single + CIDR + IPv6 compile cleanly.
+// Range forms compile to `FWP_RANGE0`-backed `FilterCondition::*Range`
+// variants (M3.3); single + CIDR + IPv6 compile to single-value
+// conditions (M3.2).
 //
 // Windows-only because `FilterCondition` is windows-only — see
 // `src/rules.rs` for the cfg-gating.
@@ -28,26 +27,6 @@ pub enum Side {
     Remote,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum CompileError {
-    /// A clause used a range form (port range or IPv4 address range)
-    /// that the current `FilterCondition` enum doesn't model.
-    /// Lifted in M3.3 once `FWP_RANGE0` is wired through.
-    UnsupportedRange(&'static str),
-}
-
-impl std::fmt::Display for CompileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnsupportedRange(what) => {
-                write!(f, "unsupported range condition: {what} (needs M3.3)")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CompileError {}
-
 /// Compile a list of clauses into a flat `Vec<FilterCondition>`.
 ///
 /// Each clause may produce one or two conditions: one for the
@@ -59,62 +38,57 @@ impl std::error::Error for CompileError {}
 /// single filter ANDing them all). Callers that want one filter
 /// per clause should call `compile` once per clause, not once with
 /// the full list.
-pub fn compile(
-    side: Side,
-    clauses: &[RuleClause],
-) -> Result<Vec<FilterCondition>, CompileError> {
+///
+/// Infallible: every parser-produced AST variant maps to a
+/// `FilterCondition`. There is no error path.
+pub fn compile(side: Side, clauses: &[RuleClause]) -> Vec<FilterCondition> {
     let mut out = Vec::with_capacity(clauses.len() * 2);
     for clause in clauses {
-        compile_clause_into(side, clause, &mut out)?;
-    }
-    Ok(out)
-}
-
-fn compile_clause_into(
-    side: Side,
-    clause: &RuleClause,
-    out: &mut Vec<FilterCondition>,
-) -> Result<(), CompileError> {
-    if let Some(addr) = &clause.addr {
-        out.push(compile_addr(side, addr)?);
-    }
-    if let Some(port) = clause.port {
-        out.push(compile_port(side, port)?);
-    }
-    Ok(())
-}
-
-fn compile_addr(side: Side, addr: &AddrSpec) -> Result<FilterCondition, CompileError> {
-    match *addr {
-        AddrSpec::Ipv4(a) => Ok(match side {
-            Side::Local => FilterCondition::LocalAddrV4 { addr: a, prefix: None },
-            Side::Remote => FilterCondition::RemoteAddrV4 { addr: a, prefix: None },
-        }),
-        AddrSpec::Ipv4Cidr(a, p) => Ok(match side {
-            Side::Local => FilterCondition::LocalAddrV4 { addr: a, prefix: Some(p) },
-            Side::Remote => FilterCondition::RemoteAddrV4 { addr: a, prefix: Some(p) },
-        }),
-        AddrSpec::Ipv6(a) => Ok(match side {
-            Side::Local => FilterCondition::LocalAddrV6 { addr: a, prefix: None },
-            Side::Remote => FilterCondition::RemoteAddrV6 { addr: a, prefix: None },
-        }),
-        AddrSpec::Ipv6Cidr(a, p) => Ok(match side {
-            Side::Local => FilterCondition::LocalAddrV6 { addr: a, prefix: Some(p) },
-            Side::Remote => FilterCondition::RemoteAddrV6 { addr: a, prefix: Some(p) },
-        }),
-        AddrSpec::Ipv4Range(_, _) => {
-            Err(CompileError::UnsupportedRange("IPv4 address range"))
+        if let Some(addr) = &clause.addr {
+            out.push(compile_addr(side, addr));
+        }
+        if let Some(port) = clause.port {
+            out.push(compile_port(side, port));
         }
     }
+    out
 }
 
-fn compile_port(side: Side, port: PortSpec) -> Result<FilterCondition, CompileError> {
+fn compile_addr(side: Side, addr: &AddrSpec) -> FilterCondition {
+    match *addr {
+        AddrSpec::Ipv4(a) => match side {
+            Side::Local => FilterCondition::LocalAddrV4 { addr: a, prefix: None },
+            Side::Remote => FilterCondition::RemoteAddrV4 { addr: a, prefix: None },
+        },
+        AddrSpec::Ipv4Cidr(a, p) => match side {
+            Side::Local => FilterCondition::LocalAddrV4 { addr: a, prefix: Some(p) },
+            Side::Remote => FilterCondition::RemoteAddrV4 { addr: a, prefix: Some(p) },
+        },
+        AddrSpec::Ipv4Range(lo, hi) => match side {
+            Side::Local => FilterCondition::LocalAddrV4Range(lo, hi),
+            Side::Remote => FilterCondition::RemoteAddrV4Range(lo, hi),
+        },
+        AddrSpec::Ipv6(a) => match side {
+            Side::Local => FilterCondition::LocalAddrV6 { addr: a, prefix: None },
+            Side::Remote => FilterCondition::RemoteAddrV6 { addr: a, prefix: None },
+        },
+        AddrSpec::Ipv6Cidr(a, p) => match side {
+            Side::Local => FilterCondition::LocalAddrV6 { addr: a, prefix: Some(p) },
+            Side::Remote => FilterCondition::RemoteAddrV6 { addr: a, prefix: Some(p) },
+        },
+    }
+}
+
+fn compile_port(side: Side, port: PortSpec) -> FilterCondition {
     match port {
-        PortSpec::Single(p) => Ok(match side {
+        PortSpec::Single(p) => match side {
             Side::Local => FilterCondition::LocalPort(p),
             Side::Remote => FilterCondition::RemotePort(p),
-        }),
-        PortSpec::Range(_, _) => Err(CompileError::UnsupportedRange("port range")),
+        },
+        PortSpec::Range(lo, hi) => match side {
+            Side::Local => FilterCondition::LocalPortRange(lo, hi),
+            Side::Remote => FilterCondition::RemotePortRange(lo, hi),
+        },
     }
 }
 
@@ -126,7 +100,7 @@ mod tests {
 
     fn one(side: Side, s: &str) -> Vec<FilterCondition> {
         let clause = parse_clause(s).unwrap();
-        compile(side, &[clause]).unwrap()
+        compile(side, &[clause])
     }
 
     #[test]
@@ -202,7 +176,7 @@ mod tests {
     #[test]
     fn multi_clause_flattens_conditions() {
         let parsed = crate::rules::parse_str("80; 443; 192.168.0.0/16").unwrap();
-        let conds = compile(Side::Remote, &parsed).unwrap();
+        let conds = compile(Side::Remote, &parsed);
         // Three clauses → three conditions: two ports + one address.
         assert_eq!(conds.len(), 3);
         assert!(matches!(conds[0], FilterCondition::RemotePort(80)));
@@ -214,34 +188,30 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_range_returns_unsupported_error() {
-        let clause = parse_clause("10.0.0.1-10.0.0.10").unwrap();
-        let err = compile(Side::Remote, &[clause]).unwrap_err();
-        match err {
-            CompileError::UnsupportedRange(what) => {
-                assert!(what.contains("IPv4"));
+    fn ipv4_range_compiles_to_addr_range() {
+        let conds = one(Side::Remote, "10.0.0.1-10.0.0.10");
+        assert_eq!(conds.len(), 1);
+        match &conds[0] {
+            FilterCondition::RemoteAddrV4Range(lo, hi) => {
+                assert_eq!(*lo, Ipv4Addr::new(10, 0, 0, 1));
+                assert_eq!(*hi, Ipv4Addr::new(10, 0, 0, 10));
             }
+            other => panic!("unexpected condition: {other:?}"),
         }
     }
 
     #[test]
-    fn port_range_returns_unsupported_error() {
-        let clause = parse_clause("20-21").unwrap();
-        let err = compile(Side::Remote, &[clause]).unwrap_err();
-        match err {
-            CompileError::UnsupportedRange(what) => {
-                assert!(what.contains("port"));
-            }
-        }
+    fn port_range_compiles_to_port_range() {
+        let conds = one(Side::Local, "20-21");
+        assert_eq!(conds.len(), 1);
+        assert!(matches!(conds[0], FilterCondition::LocalPortRange(20, 21)));
     }
 
-    /// A multi-clause string where one clause is a range and the
-    /// rest are not should error on the range — partial compile is
-    /// not surfaced.
     #[test]
-    fn one_range_clause_in_a_list_fails_the_whole_compile() {
-        let parsed = crate::rules::parse_str("80; 20-21; 443").unwrap();
-        let err = compile(Side::Remote, &parsed).unwrap_err();
-        assert!(matches!(err, CompileError::UnsupportedRange(_)));
+    fn ipv4_range_with_port_emits_two_range_conditions() {
+        let conds = one(Side::Remote, "10.0.0.0-10.0.0.255:443");
+        assert_eq!(conds.len(), 2);
+        assert!(matches!(conds[0], FilterCondition::RemoteAddrV4Range(_, _)));
+        assert!(matches!(conds[1], FilterCondition::RemotePort(443)));
     }
 }

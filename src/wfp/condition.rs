@@ -19,8 +19,9 @@ use std::path::{Path, PathBuf};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_BYTE_ARRAY16, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0,
     FWP_CONDITION_VALUE0_0, FWP_DIRECTION, FWP_DIRECTION_INBOUND, FWP_DIRECTION_OUTBOUND,
-    FWP_MATCH_EQUAL, FWP_UINT8, FWP_UINT16, FWP_UINT32, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK,
-    FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_DIRECTION,
+    FWP_MATCH_EQUAL, FWP_MATCH_RANGE, FWP_RANGE0, FWP_RANGE_TYPE, FWP_UINT8, FWP_UINT16,
+    FWP_UINT32, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK,
+    FWP_VALUE0, FWP_VALUE0_0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_DIRECTION,
     FWPM_CONDITION_IP_LOCAL_ADDRESS, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
     FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER_CONDITION0,
     FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
@@ -96,8 +97,16 @@ pub enum FilterCondition {
     Protocol(IpProto),
     LocalPort(u16),
     RemotePort(u16),
+    /// Inclusive port range, compiled to `FWP_RANGE0` over
+    /// `FWP_UINT16` values with `FWP_MATCH_RANGE`.
+    LocalPortRange(u16, u16),
+    RemotePortRange(u16, u16),
     LocalAddrV4 { addr: Ipv4Addr, prefix: Option<u8> },
     RemoteAddrV4 { addr: Ipv4Addr, prefix: Option<u8> },
+    /// Inclusive IPv4 address range, compiled to `FWP_RANGE0` over
+    /// `FWP_UINT32` values (host byte order) with `FWP_MATCH_RANGE`.
+    LocalAddrV4Range(Ipv4Addr, Ipv4Addr),
+    RemoteAddrV4Range(Ipv4Addr, Ipv4Addr),
     LocalAddrV6 { addr: Ipv6Addr, prefix: Option<u8> },
     RemoteAddrV6 { addr: Ipv6Addr, prefix: Option<u8> },
     Direction(Direction),
@@ -127,6 +136,7 @@ pub(super) fn compile(
         v6_masks: Vec::with_capacity(conditions.len()),
         v6_addrs: Vec::with_capacity(conditions.len()),
         app_id_blobs: Vec::new(),
+        ranges: Vec::new(),
         natives: Vec::with_capacity(conditions.len()),
     };
 
@@ -138,6 +148,20 @@ pub(super) fn compile(
 
             FilterCondition::LocalPort(port) => fc_uint16(FWPM_CONDITION_IP_LOCAL_PORT, *port),
             FilterCondition::RemotePort(port) => fc_uint16(FWPM_CONDITION_IP_REMOTE_PORT, *port),
+
+            FilterCondition::LocalPortRange(lo, hi) => {
+                storage.fc_port_range(FWPM_CONDITION_IP_LOCAL_PORT, *lo, *hi)
+            }
+            FilterCondition::RemotePortRange(lo, hi) => {
+                storage.fc_port_range(FWPM_CONDITION_IP_REMOTE_PORT, *lo, *hi)
+            }
+
+            FilterCondition::LocalAddrV4Range(lo, hi) => {
+                storage.fc_v4_range(FWPM_CONDITION_IP_LOCAL_ADDRESS, *lo, *hi)
+            }
+            FilterCondition::RemoteAddrV4Range(lo, hi) => {
+                storage.fc_v4_range(FWPM_CONDITION_IP_REMOTE_ADDRESS, *lo, *hi)
+            }
 
             FilterCondition::LocalAddrV4 { addr, prefix: None } => {
                 fc_uint32(FWPM_CONDITION_IP_LOCAL_ADDRESS, u32::from(*addr))
@@ -207,6 +231,10 @@ pub(super) struct CompiledConditions {
     /// (NOT Rust's heap) and must be released via `FwpmFreeMemory0`
     /// in `Drop`.
     app_id_blobs: Vec<*mut FWP_BYTE_BLOB>,
+    /// Heap-allocated `FWP_RANGE0` structs (each holds
+    /// `valueLow`/`valueHigh` of `FWP_VALUE0`) referenced by
+    /// `rangeValue` pointers in compiled range conditions.
+    ranges: Vec<Box<FWP_RANGE0>>,
     /// The compiled native conditions, in the same order as the
     /// input slice. Pointers within these reference into the three
     /// `Box` vecs above and into the WFP-heap blobs.
@@ -265,6 +293,70 @@ impl CompiledConditions {
             conditionValue: FWP_CONDITION_VALUE0 {
                 r#type: FWP_V6_ADDR_MASK,
                 Anonymous: FWP_CONDITION_VALUE0_0 { v6AddrMask: raw_ptr },
+            },
+        }
+    }
+
+    /// Build a `FWP_RANGE0`-backed port range condition.
+    /// `valueLow` / `valueHigh` are `FWP_UINT16` (inline u16, no
+    /// pointer indirection).
+    fn fc_port_range(
+        &mut self,
+        field: GUID,
+        lo: u16,
+        hi: u16,
+    ) -> FWPM_FILTER_CONDITION0 {
+        let range = Box::new(FWP_RANGE0 {
+            valueLow: FWP_VALUE0 {
+                r#type: FWP_UINT16,
+                Anonymous: FWP_VALUE0_0 { uint16: lo },
+            },
+            valueHigh: FWP_VALUE0 {
+                r#type: FWP_UINT16,
+                Anonymous: FWP_VALUE0_0 { uint16: hi },
+            },
+        });
+        let raw_ptr: *mut FWP_RANGE0 = range.as_ref() as *const _ as *mut _;
+        self.ranges.push(range);
+        FWPM_FILTER_CONDITION0 {
+            fieldKey: field,
+            matchType: FWP_MATCH_RANGE,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_RANGE_TYPE,
+                Anonymous: FWP_CONDITION_VALUE0_0 { rangeValue: raw_ptr },
+            },
+        }
+    }
+
+    /// Build a `FWP_RANGE0`-backed IPv4 address range condition.
+    /// `valueLow` / `valueHigh` are `FWP_UINT32` carrying the
+    /// addresses in **host byte order** (matching the same
+    /// convention used by `fc_v4_mask` and the upstream MSDN
+    /// IP-filter sample).
+    fn fc_v4_range(
+        &mut self,
+        field: GUID,
+        lo: Ipv4Addr,
+        hi: Ipv4Addr,
+    ) -> FWPM_FILTER_CONDITION0 {
+        let range = Box::new(FWP_RANGE0 {
+            valueLow: FWP_VALUE0 {
+                r#type: FWP_UINT32,
+                Anonymous: FWP_VALUE0_0 { uint32: u32::from(lo) },
+            },
+            valueHigh: FWP_VALUE0 {
+                r#type: FWP_UINT32,
+                Anonymous: FWP_VALUE0_0 { uint32: u32::from(hi) },
+            },
+        });
+        let raw_ptr: *mut FWP_RANGE0 = range.as_ref() as *const _ as *mut _;
+        self.ranges.push(range);
+        FWPM_FILTER_CONDITION0 {
+            fieldKey: field,
+            matchType: FWP_MATCH_RANGE,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_RANGE_TYPE,
+                Anonymous: FWP_CONDITION_VALUE0_0 { rangeValue: raw_ptr },
             },
         }
     }
@@ -435,6 +527,25 @@ mod tests {
         ];
         let compiled = compile(&conds).expect("compile failed");
         assert_eq!(compiled.as_native_slice().len(), 4);
+    }
+
+    /// Range conditions allocate exactly one `FWP_RANGE0` box per
+    /// range — both port-range and v4-addr-range live in the same
+    /// `ranges` storage Vec.
+    #[test]
+    fn compile_range_storage_count() {
+        let conds = [
+            FilterCondition::RemotePortRange(20, 21),
+            FilterCondition::RemoteAddrV4Range(
+                Ipv4Addr::new(10, 0, 0, 1),
+                Ipv4Addr::new(10, 0, 0, 10),
+            ),
+        ];
+        let compiled = compile(&conds).expect("compile failed");
+        assert_eq!(compiled.ranges.len(), 2);
+        // Each range condition emits one native FWPM_FILTER_CONDITION0,
+        // not two — the range struct holds both endpoints.
+        assert_eq!(compiled.as_native_slice().len(), 2);
     }
 
     /// CIDR-form v4 conditions allocate exactly one
