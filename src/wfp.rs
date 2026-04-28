@@ -76,7 +76,7 @@ pub enum WfpError {
     /// isn't readable by the current user.
     AppIdFromFileName(u32),
     /// `FwpmFilterDeleteByKey0` returned a non-zero Win32 error.
-    /// Common: 0x80320005 (`FWP_E_FILTER_NOT_FOUND`) when the
+    /// Common: 0x80320003 (`FWP_E_FILTER_NOT_FOUND`) when the
     /// filter was already removed, 5 (`ERROR_ACCESS_DENIED`) on a
     /// non-elevated process.
     FilterDelete(u32),
@@ -89,8 +89,10 @@ pub enum WfpError {
     /// `FwpmSubLayerDeleteByKey0` returned a non-zero Win32 error.
     SubLayerDelete(u32),
     /// `FwpmProviderDeleteByKey0` returned a non-zero Win32 error.
-    /// Common: 0x80320001 (`FWP_E_NOT_FOUND`) when the provider
-    /// was already removed.
+    /// Common: 0x80320005 (`FWP_E_PROVIDER_NOT_FOUND`) when the
+    /// provider was already removed — `cleanup_provider` swallows
+    /// that specific code as the idempotent path, so callers only
+    /// see `ProviderDelete(...)` for genuine errors.
     ProviderDelete(u32),
 }
 
@@ -267,14 +269,18 @@ impl WfpEngine {
         let filters_deleted = self.delete_filters_for_provider(provider_key)?;
         let sublayers_deleted = self.delete_sublayers_for_provider(provider_key)?;
 
-        // Best-effort provider delete. FWP_E_NOT_FOUND means it was
-        // already gone (idempotent path), which we surface as
-        // `provider_deleted = false` rather than an error.
+        // Best-effort provider delete. FWP_E_PROVIDER_NOT_FOUND
+        // means it was already gone (idempotent path), which we
+        // surface as `provider_deleted = false` rather than an
+        // error. FWP_E_NOT_FOUND (0x80320008) is the generic
+        // not-found; FwpmProviderDeleteByKey0 specifically returns
+        // FWP_E_PROVIDER_NOT_FOUND (0x80320005) — pinning that
+        // exactly so a future generic-not-found mishap surfaces
+        // instead of being silently swallowed.
         let status = unsafe { FwpmProviderDeleteByKey0(self.handle, provider_key) };
         let provider_deleted = match status {
             ERROR_SUCCESS => true,
-            // 0x80320001 = FWP_E_NOT_FOUND
-            0x8032_0001 => false,
+            0x8032_0005 => false, // FWP_E_PROVIDER_NOT_FOUND
             other => return Err(WfpError::ProviderDelete(other)),
         };
 
