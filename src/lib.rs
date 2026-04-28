@@ -15,6 +15,8 @@ pub mod profile;
 pub mod rules;
 
 #[cfg(windows)]
+pub mod gui;
+#[cfg(windows)]
 pub mod install;
 #[cfg(windows)]
 pub mod wfp;

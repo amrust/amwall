@@ -41,7 +41,9 @@ mod cli {
     /// rolled argparse + this enum is leaner than pulling in `clap`.
     #[derive(Debug, PartialEq, Eq)]
     pub enum Command {
-        /// `-h` / `--help` (or no args at all).
+        /// No arguments — launch the GUI.
+        Gui,
+        /// `-h` / `--help` — print usage and exit 0.
         Help,
         /// `-install [path] [-temp] [-silent]`.
         Install {
@@ -66,7 +68,7 @@ mod cli {
     pub fn parse_args(args: Vec<String>) -> Command {
         // args[0] is the program name; subcommand is args[1].
         if args.len() < 2 {
-            return Command::Help;
+            return Command::Gui;
         }
         match args[1].as_str() {
             "-h" | "--help" => Command::Help,
@@ -125,6 +127,11 @@ mod cli {
 
     pub fn run(args: Vec<String>) -> ExitCode {
         match parse_args(args) {
+            // No CLI subcommand → launch the GUI. The GUI doesn't
+            // require admin to start (admin is only needed for the
+            // install/uninstall actions, which the GUI routes
+            // through the same code paths the CLI uses).
+            Command::Gui => simplewall_rs::gui::run(default_profile_path()),
             Command::Help => {
                 print_usage();
                 ExitCode::from(0)
@@ -284,8 +291,8 @@ mod cli {
         }
 
         #[test]
-        fn no_args_is_help() {
-            assert_eq!(parse_args(args(&[])), Command::Help);
+        fn no_args_launches_gui() {
+            assert_eq!(parse_args(args(&[])), Command::Gui);
         }
 
         #[test]
