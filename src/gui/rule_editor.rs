@@ -40,7 +40,7 @@
 use std::cell::{Cell, RefCell};
 
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::HBRUSH;
+use windows::Win32::Graphics::Gdi::{CreateFontIndirectW, DeleteObject, HBRUSH, HFONT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     BST_CHECKED, BST_UNCHECKED, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCOLUMNW,
@@ -58,12 +58,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, ES_AUTOVSCROLL,
     ES_MULTILINE, ES_READONLY, GWLP_USERDATA, GetDlgItem, GetMessageW, GetWindowLongPtrW,
     GetWindowRect, GetWindowTextW, HMENU, IDCANCEL, IDC_ARROW, IDOK, IsDialogMessageW, IsWindow,
-    LoadCursorW, MSG, MoveWindow, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW,
-    SendMessageW, SetWindowLongPtrW, ShowWindow, TranslateMessage,
+    LoadCursorW, MSG, MoveWindow, NONCLIENTMETRICSW, PostQuitMessage, RegisterClassExW,
+    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SendMessageW, SetWindowLongPtrW, ShowWindow, SystemParametersInfoW, TranslateMessage,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_DLGMODALFRAME, WS_GROUP, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_DLGMODALFRAME, WS_GROUP, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -108,9 +110,10 @@ const CLASS_NAME: PCWSTR = w!("SimplewallRsRuleEditor");
 const SUB_CLASS_NAME: PCWSTR = w!("SimplewallRsAddRuleEntry");
 
 // Logical 96-DPI dimensions, roughly translated from upstream's
-// dialog units (1 du ≈ 1.5 px for 8pt MS Shell Dlg).
-const LOGICAL_W: i32 = 460;
-const LOGICAL_H: i32 = 360;
+// dialog units (1 du ≈ 1.85 px for 8pt MS Shell Dlg). Window is
+// resizable; this is the default + minimum-readable size.
+const LOGICAL_W: i32 = 540;
+const LOGICAL_H: i32 = 520;
 
 /// Boxed dialog state. Pointer parked in the parent window's
 /// GWLP_USERDATA, reclaimed in `open` after the modal pump exits.
@@ -126,6 +129,13 @@ struct DialogState {
 
     // Bottom-of-parent controls.
     enable_chk: Cell<HWND>,
+
+    /// Cached HFONT for the system message font (Segoe UI 9pt
+    /// with ClearType on Windows 10+). Loaded once at WM_CREATE
+    /// and broadcast to every child via WM_SETFONT — that's what
+    /// gets us anti-aliased text without going through the full
+    /// dialog-template machinery. Deleted on WM_NCDESTROY.
+    font: Cell<HFONT>,
 
     // The full app list (from caller's profile) so the Apps tab
     // can render every app with its check state. Display name is
@@ -186,6 +196,7 @@ pub fn open(parent: HWND, initial: Option<&Rule>, available_apps: &[ProfileApp])
             page_rule: Cell::new(HWND::default()),
             page_apps: Cell::new(HWND::default()),
             enable_chk: Cell::new(HWND::default()),
+            font: Cell::new(HFONT::default()),
             apps_paths,
         });
         let state_ptr = Box::into_raw(state) as *mut std::ffi::c_void;
@@ -204,7 +215,16 @@ pub fn open(parent: HWND, initial: Option<&Rule>, available_apps: &[ProfileApp])
 
         let (x, y) = center_over_parent(parent, LOGICAL_W, LOGICAL_H);
 
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+        // Resizable like upstream (WS_THICKFRAME = sizing border;
+        // WS_MAXIMIZEBOX / WS_MINIMIZEBOX add the title-bar buttons).
+        let style = WS_OVERLAPPED
+            | WS_CAPTION
+            | WS_SYSMENU
+            | WS_THICKFRAME
+            | WS_MINIMIZEBOX
+            | WS_MAXIMIZEBOX
+            | WS_CLIPSIBLINGS
+            | WS_CLIPCHILDREN;
         let dlg = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             CLASS_NAME,
@@ -316,6 +336,13 @@ unsafe extern "system" fn parent_proc(
         WM_NCDESTROY => {
             if let Some(s) = unsafe { state_ref(hwnd) } {
                 s.finished.set(true);
+                let f = s.font.get();
+                if !f.is_invalid() {
+                    unsafe {
+                        let _ = DeleteObject(f);
+                    }
+                    s.font.set(HFONT::default());
+                }
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
@@ -453,6 +480,14 @@ fn on_parent_create(hwnd: HWND) -> Result<(), String> {
     on_parent_size(hwnd);
     on_tab_change(hwnd);
 
+    // Apply the system message font (Segoe UI 9pt + ClearType on
+    // Windows 10/11) to every control we created. Without this,
+    // the entire dialog renders in the legacy bitmap "System"
+    // font with no anti-aliasing.
+    let font = load_message_font();
+    state.font.set(font);
+    apply_font_recursive(hwnd, font);
+
     // Focus the Name field on open.
     let name_edit = unsafe { GetDlgItem(pane_general, ID_NAME_EDIT) };
     unsafe {
@@ -460,6 +495,52 @@ fn on_parent_create(hwnd: HWND) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Load the system "Message" font (the one Win32 dialog manager
+/// uses for new-style themed dialogs). Falls back to a default
+/// HFONT if SystemParametersInfoW fails for any reason — Win32
+/// will use the system default font on null/0 anyway.
+fn load_message_font() -> HFONT {
+    let mut metrics = NONCLIENTMETRICSW {
+        cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETNONCLIENTMETRICS,
+            std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+            Some(&mut metrics as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    if ok.is_err() {
+        return HFONT::default();
+    }
+    unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }
+}
+
+/// Walk the entire window tree under `root` and broadcast
+/// WM_SETFONT to each window. The (HFONT) wParam is the new
+/// font; lParam = TRUE asks for an immediate repaint.
+fn apply_font_recursive(root: HWND, font: HFONT) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_CHILD, GW_HWNDNEXT};
+    if font.is_invalid() {
+        return;
+    }
+    unsafe {
+        SendMessageW(
+            root,
+            WM_SETFONT,
+            WPARAM(font.0 as usize),
+            LPARAM(1), // redraw immediately
+        );
+    }
+    let mut current = unsafe { GetWindow(root, GW_CHILD) };
+    while current.0 != 0 {
+        apply_font_recursive(current, font);
+        current = unsafe { GetWindow(current, GW_HWNDNEXT) };
+    }
 }
 
 fn create_pane(parent: HWND, hi: HMODULE) -> HWND {
@@ -529,15 +610,34 @@ fn on_parent_size(hwnd: HWND) {
     let cw = content.right - content.left;
     let ch = content.bottom - content.top;
 
-    for &pane in &[
-        state.page_general.get(),
-        state.page_rule.get(),
-        state.page_apps.get(),
-    ] {
-        if pane.0 != 0 {
-            unsafe {
-                let _ = MoveWindow(pane, content.left, content.top, cw, ch, true);
-            }
+    let panes = [
+        (state.page_general.get(), 0),
+        (state.page_rule.get(), 1),
+        (state.page_apps.get(), 2),
+    ];
+    for (pane, kind) in panes {
+        if pane.0 == 0 {
+            continue;
+        }
+        unsafe {
+            let _ = MoveWindow(pane, content.left, content.top, cw, ch, true);
+        }
+        match kind {
+            0 => layout_general_pane(pane, cw, ch),
+            1 => layout_rule_pane(pane, cw, ch),
+            2 => layout_apps_pane(pane, cw, ch),
+            _ => {}
+        }
+        // After children move, force a full repaint of the pane
+        // *and* its descendants. Without this Windows leaves
+        // stale chunks of the previous layout visible until
+        // something else triggers a paint (e.g. tab switch).
+        unsafe {
+            use windows::Win32::Graphics::Gdi::{
+                InvalidateRect, RDW_ALLCHILDREN, RDW_INVALIDATE, RedrawWindow,
+            };
+            let _ = RedrawWindow(pane, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
+            let _ = InvalidateRect(pane, None, true);
         }
     }
 
@@ -680,52 +780,51 @@ fn on_save(hwnd: HWND) {
 // General pane — Name / Comments / Protocol+Family / Direction / Action.
 // ===========================================================================
 
-fn populate_general_pane(pane: HWND, hi: HMODULE, initial: &Rule) -> Result<(), String> {
-    let row_h = 38;
-    let mut y = 8;
-    let pane_w = 444; // approximate; pane is resized later
+/// Layout constants for the General pane. Captured here so both
+/// the create-time builder and the resize-time relayout use
+/// identical math; the sizes match upstream's dialog-unit ratios
+/// scaled to logical 96-DPI pixels.
+const GP_PAD: i32 = 12;       // outer padding
+const GP_GAP: i32 = 12;       // vertical gap between groupboxes
+const GP_GROUP_H: i32 = 64;   // groupbox height for label+edit/combo rows
+const GP_CTL_TOP: i32 = 24;   // y offset of the inner control inside a groupbox
+const GP_CTL_H: i32 = 26;     // inner control height
 
-    // Name groupbox + edit
-    add_groupbox(pane, hi, "Name:", 6, y, pane_w - 12, 32);
+fn populate_general_pane(pane: HWND, hi: HMODULE, initial: &Rule) -> Result<(), String> {
+    // Initial pane width is approximate; layout_general_pane is
+    // called from on_parent_size to reflow against the actual
+    // current pane size. Same math runs here at create time so
+    // the controls are visible immediately.
+    let pane_w = 520;
+    let pane_h = 440;
+
+    add_groupbox(pane, hi, "Name:", 0, 0, 0, 0);
     add_edit(
         pane,
         hi,
         ID_NAME_EDIT,
-        12,
-        y + 14,
-        pane_w - 24,
-        16,
+        0,
+        0,
+        0,
+        0,
         &initial.name,
         false,
     );
-    y += row_h;
-
-    // Comments groupbox + edit
-    add_groupbox(pane, hi, "Comments:", 6, y, pane_w - 12, 32);
+    add_groupbox(pane, hi, "Comments:", 0, 0, 0, 0);
     add_edit(
         pane,
         hi,
         ID_COMMENTS_EDIT,
-        12,
-        y + 14,
-        pane_w - 24,
-        16,
+        0,
+        0,
+        0,
+        0,
         initial.comment.as_deref().unwrap_or(""),
         false,
     );
-    y += row_h;
 
-    // Protocol + Family side-by-side
-    let half_w = (pane_w - 18) / 2;
-    add_groupbox(pane, hi, "Protocol:", 6, y, half_w, 36);
-    let proto_combo = add_combo(
-        pane,
-        hi,
-        ID_PROTOCOL_COMBO,
-        12,
-        y + 14,
-        half_w - 12,
-    );
+    add_groupbox(pane, hi, "Protocol:", 0, 0, 0, 0);
+    let proto_combo = add_combo(pane, hi, ID_PROTOCOL_COMBO, 0, 0, 0);
     populate_combo(proto_combo, &["Any", "TCP", "UDP", "ICMP", "ICMPv6"]);
     let proto_idx = match initial.protocol {
         None => 0,
@@ -739,15 +838,8 @@ fn populate_general_pane(pane: HWND, hi: HMODULE, initial: &Rule) -> Result<(), 
         SendMessageW(proto_combo, CB_SETCURSEL, WPARAM(proto_idx), LPARAM(0));
     }
 
-    add_groupbox(pane, hi, "Family (ports only):", 12 + half_w, y, half_w, 36);
-    let family_combo = add_combo(
-        pane,
-        hi,
-        ID_FAMILY_COMBO,
-        18 + half_w,
-        y + 14,
-        half_w - 12,
-    );
+    add_groupbox(pane, hi, "Family (ports only):", 0, 0, 0, 0);
+    let family_combo = add_combo(pane, hi, ID_FAMILY_COMBO, 0, 0, 0);
     populate_combo(family_combo, &["Any", "IPv4", "IPv6"]);
     let family_idx = match initial.address_family {
         None => 0,
@@ -758,11 +850,9 @@ fn populate_general_pane(pane: HWND, hi: HMODULE, initial: &Rule) -> Result<(), 
     unsafe {
         SendMessageW(family_combo, CB_SETCURSEL, WPARAM(family_idx), LPARAM(0));
     }
-    y += 42;
 
-    // Direction
-    add_groupbox(pane, hi, "Direction:", 6, y, pane_w - 12, 36);
-    let dir_combo = add_combo(pane, hi, ID_DIRECTION_COMBO, 12, y + 14, pane_w - 24);
+    add_groupbox(pane, hi, "Direction:", 0, 0, 0, 0);
+    let dir_combo = add_combo(pane, hi, ID_DIRECTION_COMBO, 0, 0, 0);
     populate_combo(dir_combo, &["Outbound", "Inbound", "Both"]);
     let dir_idx = match initial.direction {
         Direction::Outbound => 0,
@@ -773,11 +863,9 @@ fn populate_general_pane(pane: HWND, hi: HMODULE, initial: &Rule) -> Result<(), 
     unsafe {
         SendMessageW(dir_combo, CB_SETCURSEL, WPARAM(dir_idx), LPARAM(0));
     }
-    y += 42;
 
-    // Action
-    add_groupbox(pane, hi, "Action:", 6, y, pane_w - 12, 36);
-    let action_combo = add_combo(pane, hi, ID_ACTION_COMBO, 12, y + 14, pane_w - 24);
+    add_groupbox(pane, hi, "Action:", 0, 0, 0, 0);
+    let action_combo = add_combo(pane, hi, ID_ACTION_COMBO, 0, 0, 0);
     populate_combo(action_combo, &["Allow", "Block"]);
     let action_idx = match initial.action {
         Action::Permit => 0,
@@ -787,59 +875,221 @@ fn populate_general_pane(pane: HWND, hi: HMODULE, initial: &Rule) -> Result<(), 
         SendMessageW(action_combo, CB_SETCURSEL, WPARAM(action_idx), LPARAM(0));
     }
 
+    layout_general_pane(pane, pane_w, pane_h);
     Ok(())
+}
+
+/// Reflow the General pane's children to fill width `w`. Each row
+/// (Name / Comments / Protocol+Family / Direction / Action) keeps
+/// a fixed height — only the horizontal extent grows with the pane.
+fn layout_general_pane(pane: HWND, w: i32, _h: i32) {
+    let inner_w = (w - 2 * GP_PAD).max(50);
+    let mut y = GP_PAD;
+
+    // Name (idx 0), Comments (idx 1) — full-width rows.
+    place_full_row(pane, 0, ID_NAME_EDIT, inner_w, y);
+    y += GP_GROUP_H + GP_GAP;
+    place_full_row(pane, 1, ID_COMMENTS_EDIT, inner_w, y);
+    y += GP_GROUP_H + GP_GAP;
+
+    // Protocol + Family side-by-side (groupbox indices 2 and 3).
+    let half = (inner_w - 8) / 2;
+    position_nth_groupbox(pane, 2, GP_PAD, y, half, GP_GROUP_H);
+    move_child(pane, ID_PROTOCOL_COMBO, GP_PAD + 6, y + GP_CTL_TOP, half - 12, GP_CTL_H);
+    position_nth_groupbox(pane, 3, GP_PAD + half + 8, y, half, GP_GROUP_H);
+    move_child(
+        pane,
+        ID_FAMILY_COMBO,
+        GP_PAD + half + 14,
+        y + GP_CTL_TOP,
+        half - 12,
+        GP_CTL_H,
+    );
+    y += GP_GROUP_H + GP_GAP;
+
+    place_full_row(pane, 4, ID_DIRECTION_COMBO, inner_w, y);
+    y += GP_GROUP_H + GP_GAP;
+    place_full_row(pane, 5, ID_ACTION_COMBO, inner_w, y);
+}
+
+fn place_full_row(pane: HWND, gb_idx: usize, ctl_id: i32, inner_w: i32, y: i32) {
+    position_nth_groupbox(pane, gb_idx, GP_PAD, y, inner_w, GP_GROUP_H);
+    move_child(pane, ctl_id, GP_PAD + 6, y + GP_CTL_TOP, inner_w - 12, GP_CTL_H);
+}
+
+/// Find the `n`-th groupbox child (Button class with BS_GROUPBOX
+/// style) of `pane` in z-order and reposition it. Used by
+/// layout_general_pane / layout_rule_pane / layout_apps_pane to
+/// avoid having to track each groupbox HWND individually — they
+/// don't have control IDs assigned at creation, so GetDlgItem
+/// can't fish them out.
+fn position_nth_groupbox(pane: HWND, n: usize, x: i32, y: i32, w: i32, h: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindow, GW_CHILD, GW_HWNDNEXT, GetClassNameW, GetWindowLongW, GWL_STYLE,
+    };
+    let mut current = unsafe { GetWindow(pane, GW_CHILD) };
+    let mut found = 0usize;
+    while current.0 != 0 {
+        let mut buf = [0u16; 32];
+        let len = unsafe { GetClassNameW(current, &mut buf) } as usize;
+        let class = String::from_utf16_lossy(&buf[..len]);
+        if class.eq_ignore_ascii_case("Button") {
+            let style = unsafe { GetWindowLongW(current, GWL_STYLE) } as u32;
+            if (style & 0x7) == BS_GROUPBOX as u32 {
+                if found == n {
+                    unsafe {
+                        let _ = MoveWindow(current, x, y, w, h, true);
+                    }
+                    return;
+                }
+                found += 1;
+            }
+        }
+        current = unsafe { GetWindow(current, GW_HWNDNEXT) };
+    }
 }
 
 // ===========================================================================
 // Rule pane — Remote and Local rule-entry listviews + Add/Edit/Delete.
 // ===========================================================================
 
-fn populate_rule_pane(pane: HWND, hi: HMODULE, initial: &Rule) -> Result<(), String> {
-    let pane_w = 444;
-    let mut y = 8;
+const RP_BTN_W: i32 = 80;
+const RP_BTN_H: i32 = 26;
 
-    // Remote group
-    add_groupbox(pane, hi, "Remote:", 6, y, pane_w - 12, 100);
-    let remote_lv = add_rule_listview(pane, hi, ID_REMOTE_LV, 12, y + 14, pane_w - 100, 80);
-    add_button(pane, hi, ID_REMOTE_ADD, "Add", pane_w - 80, y + 14, 70, 22);
-    add_button(pane, hi, ID_REMOTE_EDIT, "Edit", pane_w - 80, y + 40, 70, 22);
-    add_button(pane, hi, ID_REMOTE_DELETE, "Delete", pane_w - 80, y + 66, 70, 22);
+fn populate_rule_pane(pane: HWND, hi: HMODULE, initial: &Rule) -> Result<(), String> {
+    add_groupbox(pane, hi, "Remote:", 0, 0, 0, 0);
+    let remote_lv = add_rule_listview(pane, hi, ID_REMOTE_LV, 0, 0, 0, 0);
+    add_button(pane, hi, ID_REMOTE_ADD, "Add", 0, 0, 0, 0);
+    add_button(pane, hi, ID_REMOTE_EDIT, "Edit", 0, 0, 0, 0);
+    add_button(pane, hi, ID_REMOTE_DELETE, "Delete", 0, 0, 0, 0);
     if let Some(s) = initial.remote.as_deref() {
         for entry in split_rule_entries(s) {
             insert_listview_row(remote_lv, &entry);
         }
     }
-    y += 110;
-
-    // Local group
-    add_groupbox(pane, hi, "Local:", 6, y, pane_w - 12, 100);
-    let local_lv = add_rule_listview(pane, hi, ID_LOCAL_LV, 12, y + 14, pane_w - 100, 80);
-    add_button(pane, hi, ID_LOCAL_ADD, "Add", pane_w - 80, y + 14, 70, 22);
-    add_button(pane, hi, ID_LOCAL_EDIT, "Edit", pane_w - 80, y + 40, 70, 22);
-    add_button(pane, hi, ID_LOCAL_DELETE, "Delete", pane_w - 80, y + 66, 70, 22);
+    add_groupbox(pane, hi, "Local:", 0, 0, 0, 0);
+    let local_lv = add_rule_listview(pane, hi, ID_LOCAL_LV, 0, 0, 0, 0);
+    add_button(pane, hi, ID_LOCAL_ADD, "Add", 0, 0, 0, 0);
+    add_button(pane, hi, ID_LOCAL_EDIT, "Edit", 0, 0, 0, 0);
+    add_button(pane, hi, ID_LOCAL_DELETE, "Delete", 0, 0, 0, 0);
     if let Some(s) = initial.local.as_deref() {
         for entry in split_rule_entries(s) {
             insert_listview_row(local_lv, &entry);
         }
     }
-    y += 110;
-
-    // Hint
     let hint = "If you leave the lists blank, the rule applies to any address and port.";
-    add_static(pane, hi, hint, 6, y, pane_w - 12, 30);
+    add_static(pane, hi, hint, 0, 0, 0, 0);
 
+    layout_rule_pane(pane, 520, 440);
     Ok(())
 }
 
+/// Reflow Rule pane. Listviews + groupboxes share the height
+/// equally above a 50-px hint footer; the Add / Edit / Delete
+/// buttons stack vertically on the right side of each listview.
+fn layout_rule_pane(pane: HWND, w: i32, h: i32) {
+    let inner_w = (w - 2 * GP_PAD).max(80);
+    let hint_h = 50;
+    let group_h = ((h - hint_h - GP_PAD * 2 - GP_GAP) / 2).max(120);
+
+    let lv_w = (inner_w - RP_BTN_W - 24).max(80);
+    let mut y = GP_PAD;
+
+    // Remote (groupbox idx 0).
+    position_nth_groupbox(pane, 0, GP_PAD, y, inner_w, group_h);
+    move_child(pane, ID_REMOTE_LV, GP_PAD + 6, y + GP_CTL_TOP, lv_w, group_h - GP_CTL_TOP - 8);
+    let btn_x = GP_PAD + 6 + lv_w + 8;
+    move_child(pane, ID_REMOTE_ADD, btn_x, y + GP_CTL_TOP, RP_BTN_W, RP_BTN_H);
+    move_child(
+        pane,
+        ID_REMOTE_EDIT,
+        btn_x,
+        y + GP_CTL_TOP + RP_BTN_H + 4,
+        RP_BTN_W,
+        RP_BTN_H,
+    );
+    move_child(
+        pane,
+        ID_REMOTE_DELETE,
+        btn_x,
+        y + GP_CTL_TOP + 2 * (RP_BTN_H + 4),
+        RP_BTN_W,
+        RP_BTN_H,
+    );
+    y += group_h + GP_GAP;
+
+    // Local (groupbox idx 1).
+    position_nth_groupbox(pane, 1, GP_PAD, y, inner_w, group_h);
+    move_child(pane, ID_LOCAL_LV, GP_PAD + 6, y + GP_CTL_TOP, lv_w, group_h - GP_CTL_TOP - 8);
+    move_child(pane, ID_LOCAL_ADD, btn_x, y + GP_CTL_TOP, RP_BTN_W, RP_BTN_H);
+    move_child(
+        pane,
+        ID_LOCAL_EDIT,
+        btn_x,
+        y + GP_CTL_TOP + RP_BTN_H + 4,
+        RP_BTN_W,
+        RP_BTN_H,
+    );
+    move_child(
+        pane,
+        ID_LOCAL_DELETE,
+        btn_x,
+        y + GP_CTL_TOP + 2 * (RP_BTN_H + 4),
+        RP_BTN_W,
+        RP_BTN_H,
+    );
+    y += group_h + GP_GAP;
+
+    // Hint static — last child after the groupboxes + listviews +
+    // buttons in z-order. Find it as the last GW_HWNDLAST child.
+    move_last_static(pane, GP_PAD, y, inner_w, hint_h);
+}
+
+fn move_child(parent: HWND, id: i32, x: i32, y: i32, w: i32, h: i32) {
+    let c = unsafe { GetDlgItem(parent, id) };
+    if c.0 != 0 {
+        unsafe {
+            let _ = MoveWindow(c, x, y, w, h, true);
+        }
+    }
+}
+
+/// Position the *last* static child of a pane (used for the hint
+/// text at the bottom of the Rule and Apps panes — the static is
+/// added last so z-order's last element is always it).
+fn move_last_static(pane: HWND, x: i32, y: i32, w: i32, h: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindow, GW_CHILD, GW_HWNDNEXT, GetClassNameW,
+    };
+    let mut current = unsafe { GetWindow(pane, GW_CHILD) };
+    let mut last = HWND::default();
+    while current.0 != 0 {
+        let mut buf = [0u16; 32];
+        let len = unsafe { GetClassNameW(current, &mut buf) } as usize;
+        if String::from_utf16_lossy(&buf[..len]).eq_ignore_ascii_case("Static") {
+            last = current;
+        }
+        current = unsafe { GetWindow(current, GW_HWNDNEXT) };
+    }
+    if last.0 != 0 {
+        unsafe {
+            let _ = MoveWindow(last, x, y, w, h, true);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn add_rule_listview(parent: HWND, hi: HMODULE, id: i32, x: i32, y: i32, w: i32, h: i32) -> HWND {
     let hwnd = unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE(WS_BORDER.0),
+            WINDOW_EX_STYLE(0),
             WC_LISTVIEWW,
             PCWSTR::null(),
             WS_CHILD
                 | WS_VISIBLE
                 | WS_TABSTOP
+                | WS_BORDER
+                | WS_CLIPSIBLINGS
                 | WS_VSCROLL
                 | WINDOW_STYLE(LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHOWSELALWAYS),
             x,
@@ -961,23 +1211,28 @@ fn populate_apps_pane(
     initial: &Rule,
     paths: &[String],
 ) -> Result<(), String> {
-    let pane_w = 444;
-    add_edit(pane, hi, ID_APPS_SEARCH, 0, 0, pane_w, 18, "", false);
+    add_edit(pane, hi, ID_APPS_SEARCH, 0, 0, 0, 0, "", false);
 
+    // Apps listview keeps its column header (no LVS_NOCOLUMNHEADER)
+    // so users can click it to sort. The Remote/Local single-column
+    // listviews on the Rule pane do hide the header — they don't
+    // benefit from sorting.
     let lv = unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE(WS_BORDER.0),
+            WINDOW_EX_STYLE(0),
             WC_LISTVIEWW,
             PCWSTR::null(),
             WS_CHILD
                 | WS_VISIBLE
                 | WS_TABSTOP
+                | WS_BORDER
+                | WS_CLIPSIBLINGS
                 | WS_VSCROLL
-                | WINDOW_STYLE(LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHOWSELALWAYS),
+                | WINDOW_STYLE(LVS_REPORT | LVS_SHOWSELALWAYS),
             0,
-            22,
-            pane_w,
-            220,
+            0,
+            0,
+            0,
             pane,
             HMENU(ID_APPS_LV as isize),
             hi,
@@ -994,11 +1249,11 @@ fn populate_apps_pane(
             ),
         );
     }
-    let mut buf = wide("App");
+    let mut buf = wide("Application");
     let col = LVCOLUMNW {
         mask: LVCF_TEXT | LVCF_WIDTH,
         fmt: LVCFMT_LEFT,
-        cx: pane_w - 24,
+        cx: 400, // resized by layout_apps_pane
         pszText: PWSTR(buf.as_mut_ptr()),
         ..Default::default()
     };
@@ -1044,9 +1299,39 @@ fn populate_apps_pane(
     }
 
     let hint = "If no apps are selected, the rule applies to all apps.";
-    add_static(pane, hi, hint, 0, 250, pane_w, 30);
+    add_static(pane, hi, hint, 0, 0, 0, 0);
 
+    layout_apps_pane(pane, 520, 440);
     Ok(())
+}
+
+/// Reflow Apps pane. Search edit at top (full width, 22 tall);
+/// listview fills the middle; hint text at the bottom.
+fn layout_apps_pane(pane: HWND, w: i32, h: i32) {
+    use windows::Win32::UI::Controls::LVM_SETCOLUMNWIDTH;
+    let inner_w = (w - 2 * GP_PAD).max(80);
+    let hint_h = 30;
+    let search_h = 24;
+
+    move_child(pane, ID_APPS_SEARCH, GP_PAD, GP_PAD, inner_w, search_h);
+
+    let lv_y = GP_PAD + search_h + 8;
+    let hint_h_local = if h < 200 { 30 } else { hint_h };
+    let lv_h = (h - lv_y - hint_h_local - GP_PAD * 2).max(60);
+    move_child(pane, ID_APPS_LV, GP_PAD, lv_y, inner_w, lv_h);
+    let lv = unsafe { GetDlgItem(pane, ID_APPS_LV) };
+    if lv.0 != 0 {
+        unsafe {
+            SendMessageW(
+                lv,
+                LVM_SETCOLUMNWIDTH,
+                WPARAM(0),
+                LPARAM((inner_w - 24) as isize),
+            );
+        }
+    }
+
+    move_last_static(pane, GP_PAD, h - hint_h - GP_PAD, inner_w, hint_h);
 }
 
 fn collect_checked_apps(pane: HWND, paths: &[String]) -> String {
@@ -1342,12 +1627,20 @@ fn on_rule_entry_delete(hwnd: HWND, lv_id: i32) {
 
 fn add_groupbox(parent: HWND, hi: HMODULE, label: &str, x: i32, y: i32, w: i32, h: i32) -> HWND {
     let buf = wide(label);
+    // WS_CLIPSIBLINGS prevents the groupbox's frame paint from
+    // overlapping the edit/combo we draw inside it. Without this,
+    // the groupbox paints last (since it's lowest in z-order)
+    // and visually erases the inner control.
     unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("Button"),
             PCWSTR(buf.as_ptr()),
-            WS_CHILD | WS_VISIBLE | WS_GROUP | WINDOW_STYLE(BS_GROUPBOX as u32),
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_GROUP
+                | WS_CLIPSIBLINGS
+                | WINDOW_STYLE(BS_GROUPBOX as u32),
             x,
             y,
             w,
@@ -1373,10 +1666,21 @@ fn add_edit(
     multiline_readonly: bool,
 ) -> HWND {
     let buf = wide(initial);
-    let mut style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
+    // WS_BORDER is a regular style — putting it in WS_EX_* did
+    // nothing; that's why edits looked invisible / unfocusable.
+    // WS_CLIPSIBLINGS keeps the adjacent groupbox from painting
+    // on top of us.
+    let mut style = WS_CHILD
+        | WS_VISIBLE
+        | WS_TABSTOP
+        | WS_BORDER
+        | WS_CLIPSIBLINGS
+        | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
     if multiline_readonly {
         style = WS_CHILD
             | WS_VISIBLE
+            | WS_BORDER
+            | WS_CLIPSIBLINGS
             | WS_VSCROLL
             | WINDOW_STYLE(ES_MULTILINE as u32)
             | WINDOW_STYLE(ES_AUTOVSCROLL as u32)
@@ -1384,7 +1688,7 @@ fn add_edit(
     }
     unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE(WS_BORDER.0),
+            WINDOW_EX_STYLE(0),
             w!("Edit"),
             PCWSTR(buf.as_ptr()),
             style,
@@ -1408,7 +1712,12 @@ fn add_combo(parent: HWND, hi: HMODULE, id: i32, x: i32, y: i32, w: i32) -> HWND
             WINDOW_EX_STYLE(0),
             WC_COMBOBOXW,
             PCWSTR::null(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST),
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_TABSTOP
+                | WS_VSCROLL
+                | WS_CLIPSIBLINGS
+                | WINDOW_STYLE(CBS_DROPDOWNLIST),
             x,
             y,
             w,
@@ -1438,7 +1747,11 @@ fn add_button(parent: HWND, hi: HMODULE, id: i32, label: &str, x: i32, y: i32, w
             WINDOW_EX_STYLE(0),
             w!("Button"),
             PCWSTR(buf.as_ptr()),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_TABSTOP
+                | WS_CLIPSIBLINGS
+                | WINDOW_STYLE(BS_PUSHBUTTON as u32),
             x,
             y,
             w,
@@ -1458,7 +1771,7 @@ fn add_static(parent: HWND, hi: HMODULE, label: &str, x: i32, y: i32, w: i32, h:
             WINDOW_EX_STYLE(0),
             w!("Static"),
             PCWSTR(buf.as_ptr()),
-            WS_CHILD | WS_VISIBLE,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             x,
             y,
             w,
