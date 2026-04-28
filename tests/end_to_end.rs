@@ -28,6 +28,13 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_LAYER_ALE_
 ///   - both Permit and Block actions
 ///   - `protocol` attribute resolution
 ///
+/// This test predates the `install::install_profile` module from
+/// M4.2 and instead manually loops `wfp::filter::add` with a
+/// hardcoded layer. It deliberately doesn't go through
+/// `install_profile` so the M4.4 layer-selection fan-out doesn't
+/// apply here — that's tested separately in
+/// `install::tests::install_profile_then_uninstall_admin_smoke`.
+///
 /// Uses TEST-NET-2 (`198.51.100.0/24`, RFC 5737) and reserved-high
 /// ports so the installed filters can't fire on real traffic.
 const PROFILE_XML: &str = r#"<?xml version="1.0" ?>
