@@ -3,6 +3,14 @@
 // shape we get back. This is the end-to-end "does it actually parse
 // production-shaped data" check on top of profile::parse's unit
 // tests.
+//
+// Also covers the parse → serialize → parse semantic round-trip
+// against the same fixture. We don't claim BYTE-equivalent
+// round-trip on profile_internal.xml because that file is hand-
+// edited upstream and contains attributes (`is_services`,
+// `os_version`) plus pre-root `<!-- ... -->` comments that
+// upstream's writer doesn't emit. Byte-equivalence is asserted on
+// USER-shape profiles (see profile::serialize::tests).
 
 use simplewall_rs::profile::{self, Action, Direction, ProfileKind};
 
@@ -70,4 +78,25 @@ fn parses_upstream_profile_internal_xml() {
         "expected >100 blocklist rules, got {}",
         p.blocklist_rules.len()
     );
+}
+
+/// parse → serialize → parse: every collection's contents survive a
+/// full round-trip through the writer + reader. Asserts structural
+/// equality on every Vec, not byte equality on the XML output (the
+/// internal-profile fixture has hand-authored attributes and
+/// comments upstream's writer doesn't emit).
+#[test]
+fn upstream_profile_internal_xml_semantic_round_trip() {
+    let original = profile::parse_str(PROFILE_INTERNAL).expect("first parse failed");
+    let written = profile::to_string(&original);
+    let reparsed = profile::parse_str(&written).expect("second parse failed");
+
+    assert_eq!(original.timestamp, reparsed.timestamp);
+    assert_eq!(original.kind, reparsed.kind);
+    assert_eq!(original.version, reparsed.version);
+    assert_eq!(original.apps, reparsed.apps);
+    assert_eq!(original.rule_configs, reparsed.rule_configs);
+    assert_eq!(original.system_rules, reparsed.system_rules);
+    assert_eq!(original.custom_rules, reparsed.custom_rules);
+    assert_eq!(original.blocklist_rules, reparsed.blocklist_rules);
 }

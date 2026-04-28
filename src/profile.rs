@@ -35,10 +35,12 @@
 // shape.
 
 pub mod parse;
+pub mod serialize;
 
 use std::path::PathBuf;
 
 pub use parse::{parse_str, ParseError};
+pub use serialize::to_string;
 
 /// Top-level profile — the deserialized form of one `<root>` element.
 #[derive(Debug, Clone, PartialEq)]
