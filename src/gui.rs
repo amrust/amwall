@@ -15,6 +15,7 @@
 #![cfg(windows)]
 
 pub mod app;
+pub mod connections;
 pub mod dialogs;
 pub mod icons;
 pub mod ids;

@@ -48,13 +48,13 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetMenu,
-    GetWindowLongPtrW, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LoadCursorW, MB_ICONERROR,
-    MB_OK, MF_BYCOMMAND, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MessageBoxW,
-    MoveWindow, RegisterClassExW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    GetWindowLongPtrW, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW,
+    MB_ICONERROR, MB_OK, MF_BYCOMMAND, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
+    MessageBoxW, MoveWindow, RegisterClassExW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -82,6 +82,15 @@ use super::{post_quit, wide};
 /// Window class name. Win32 uses this string to look up our class
 /// registration.
 const CLASS_NAME: PCWSTR = w!("SimplewallRsMainWindow");
+
+/// Win32 timer id used to drive Connections-tab live refresh.
+/// Distinct from any IDC_* control id since Win32 routes timers
+/// through the same WM_TIMER queue.
+const TIMER_CONNECTIONS_REFRESH: usize = 9001;
+
+/// Refresh interval for the Connections tab in milliseconds.
+/// 2 seconds matches upstream's `_app_network_refresh_timer`.
+const CONNECTIONS_REFRESH_MS: u32 = 2000;
 
 /// Reference DPI (96 DPI = 100% scaling). Windows reports actual DPI
 /// via `GetDpiForWindow`; we scale our hardcoded pixel values by
@@ -424,6 +433,14 @@ unsafe extern "system" fn wnd_proc(
             on_dpi_changed(hwnd, wparam, lparam);
             LRESULT(0)
         }
+        WM_TIMER => {
+            if wparam.0 == TIMER_CONNECTIONS_REFRESH {
+                if let Some(state) = unsafe { state_ref(hwnd) } {
+                    populate_connections_tab(state);
+                }
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
             post_quit(0);
             LRESULT(0)
@@ -686,6 +703,8 @@ fn rescale_listview_columns(lv: HWND, id: i32, dpi: u32) {
 
 /// Show the listview matching the currently-selected tab; hide the
 /// rest. Called once at startup and from WM_NOTIFY/TCN_SELCHANGE.
+/// Also starts/stops the Connections-tab refresh timer so we only
+/// poll IP Helper when the user is actually looking at it.
 fn on_tab_change(hwnd: HWND) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
@@ -706,6 +725,23 @@ fn on_tab_change(hwnd: HWND) {
         }
         unsafe {
             let _ = ShowWindow(lv, if slot == sel_slot { SW_SHOW } else { SW_HIDE });
+        }
+    }
+
+    // Index 6 in TAB_LISTVIEW_IDS is IDC_NETWORK (Connections tab).
+    let on_network = sel_slot == 6;
+    if on_network {
+        // Populate immediately so the user doesn't wait for the
+        // first timer tick, then arm the periodic refresh.
+        populate_connections_tab(state);
+        unsafe {
+            SetTimer(hwnd, TIMER_CONNECTIONS_REFRESH, CONNECTIONS_REFRESH_MS, None);
+        }
+    } else {
+        // Stop polling when the user navigates away — avoids
+        // hammering IP Helper for tabs the user can't see.
+        unsafe {
+            let _ = KillTimer(hwnd, TIMER_CONNECTIONS_REFRESH);
         }
     }
 
@@ -1572,6 +1608,63 @@ fn format_timestamp_local(unix_ts: i64) -> String {
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond,
     )
+}
+
+/// Populate the Connections tab (`IDC_NETWORK`) from a fresh
+/// IP Helper enumeration. Each row covers the 9 columns set up
+/// in `configure_listview` for IDC_NETWORK:
+///   Name | Address(Source) | Host(Source) | Port(Source) |
+///   Address(Destination) | Host(Destination) | Port(Destination) |
+///   Protocol | State
+/// Host(Source) / Host(Destination) are blank for now — DNS
+/// reverse-resolution is async and would block the UI thread.
+fn populate_connections_tab(state: &WndState) {
+    // Index 6 in TAB_LISTVIEW_IDS is IDC_NETWORK.
+    let lv = state.listviews[6].get();
+    if lv.0 == 0 {
+        return;
+    }
+    let conns = super::connections::enumerate();
+
+    unsafe {
+        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
+    }
+    for (idx, c) in conns.iter().enumerate() {
+        let mut name_buf = wide(&c.process);
+        let item = LVITEMW {
+            mask: LVIF_TEXT,
+            iItem: idx as i32,
+            iSubItem: 0,
+            pszText: PWSTR(name_buf.as_mut_ptr()),
+            ..Default::default()
+        };
+        let _ = unsafe {
+            SendMessageW(
+                lv,
+                LVM_INSERTITEMW,
+                WPARAM(0),
+                LPARAM(&item as *const _ as isize),
+            )
+        };
+        set_subitem(lv, idx as i32, 1, &c.local.ip.to_string());
+        // col 2 (Host source) intentionally empty — see fn doc.
+        set_subitem(lv, idx as i32, 3, &c.local.port.to_string());
+        let remote_addr = if c.remote.ip.is_unspecified() {
+            String::new()
+        } else {
+            c.remote.ip.to_string()
+        };
+        set_subitem(lv, idx as i32, 4, &remote_addr);
+        // col 5 (Host destination) intentionally empty.
+        let remote_port = if c.remote.port == 0 {
+            String::new()
+        } else {
+            c.remote.port.to_string()
+        };
+        set_subitem(lv, idx as i32, 6, &remote_port);
+        set_subitem(lv, idx as i32, 7, c.protocol.label());
+        set_subitem(lv, idx as i32, 8, c.state);
+    }
 }
 
 /// Populate one of the two internal-profile listviews
