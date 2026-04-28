@@ -121,5 +121,22 @@ pub const IDM_BLOCKLIST_EXTRA_BLOCK: u16 = 299;
 // Help
 pub const IDM_WEBSITE: u16 = 300;
 pub const IDM_CHECKUPDATES: u16 = 301;
-pub const IDM_DONATE: u16 = 302;
+/// Replaces upstream's `IDM_DONATE` (PayPal). simplewall-rs's
+/// toolbar opens our GitHub releases page instead — same numeric
+/// slot, different action. See `main_window::on_command`.
+pub const IDM_RELEASES: u16 = 302;
 pub const IDM_ABOUT: u16 = 303;
+
+// Tray menu IDs upstream uses for filter / log / notification
+// toggles in main.c. Reused by our toolbar buttons since the
+// toolbar mirrors the tray menu's "enable filters / packets log /
+// notifications" set.
+pub const IDM_TRAY_START: u16 = 305;
+pub const IDM_TRAY_ENABLENOTIFICATIONS_CHK: u16 = 306;
+pub const IDM_TRAY_ENABLELOG_CHK: u16 = 310;
+pub const IDM_TRAY_ENABLEUILOG_CHK: u16 = 311;
+pub const IDM_TRAY_LOGSHOW: u16 = 312;
+pub const IDM_TRAY_LOGCLEAR: u16 = 313;
+
+// Listview-context-menu IDM upstream uses for "Create rule".
+pub const IDM_OPENRULESEDITOR: u16 = 323;

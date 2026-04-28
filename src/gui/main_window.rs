@@ -32,7 +32,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{HBRUSH, UpdateWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
+    ICC_BAR_CLASSES, ICC_COOL_CLASSES, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
     LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER,
@@ -41,14 +41,15 @@ use windows::Win32::UI::Controls::{
     TCM_INSERTITEMW, TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CreateMenu, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, HMENU,
-    IDC_ARROW, LoadCursorW, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MoveWindow, RegisterClassExW, SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW,
-    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    IDC_ARROW, LoadCursorW, MF_POPUP, MF_SEPARATOR, MF_STRING, MoveWindow, RegisterClassExW,
+    SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetWindowLongPtrW, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -62,11 +63,12 @@ use super::ids::{
     IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK, IDM_BLOCKLIST_UPDATE_DISABLE,
     IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_EXIT, IDM_EXPORT, IDM_FONT, IDM_IMPORT,
     IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_PURGE_TIMERS, IDM_PURGE_UNUSED, IDM_REFRESH,
-    IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK, IDM_RULE_ALLOWWINDOWSUPDATE,
+    IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK, IDM_RULE_ALLOWWINDOWSUPDATE,
     IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SETTINGS, IDM_SHOWFILENAMESONLY_CHK,
     IDM_SHOWSEARCHBAR_CHK, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_USEDARKTHEME_CHK,
     IDM_WEBSITE, TAB_LISTVIEW_IDS,
 };
+use super::toolbar::{self, Toolbar};
 use super::{post_quit, wide};
 
 /// Window class name. Win32 uses this string to look up our class
@@ -118,10 +120,13 @@ const LOG_COL_WIDTHS: &[i32] = &[
 
 /// Per-window state pointed to from `GWLP_USERDATA`. Holds the App
 /// (heap-allocated by `gui::run`) plus cached child HWNDs and the
-/// last-known DPI. We cache the listview/status HWNDs to avoid
-/// `GetDlgItem` lookups on every WM_SIZE.
+/// last-known DPI. We cache the toolbar/listview/status HWNDs to
+/// avoid `GetDlgItem` lookups on every WM_SIZE.
 struct WndState {
     app: Box<App>,
+    /// HWND of the rebar (toolbar + search edit container). Cached
+    /// so WM_SIZE can forward height queries without `GetDlgItem`.
+    rebar: Cell<HWND>,
     /// HWND of the tab control. `Cell` because we set it in WM_CREATE
     /// from a `&WndState` (`GWLP_USERDATA` only hands us a `*const`).
     tab: Cell<HWND>,
@@ -138,6 +143,7 @@ impl WndState {
     fn new(app: Box<App>) -> Self {
         Self {
             app,
+            rebar: Cell::new(HWND::default()),
             tab: Cell::new(HWND::default()),
             listviews: [
                 Cell::new(HWND::default()),
@@ -160,13 +166,19 @@ impl WndState {
 /// `GWLP_USERDATA` and reclaimed on `WM_NCDESTROY`.
 pub fn create(app: Box<App>) -> Result<HWND, String> {
     unsafe {
-        // ComCtl32 v6: tab control, listview, status bar all live in
+        // ComCtl32 v6: tab/listview/status/toolbar/rebar all live in
         // comctl32 and need this initialiser before first use. The
         // application manifest pulls in v6 visual styles; this call
-        // wakes the classes up.
+        // wakes each class up. Rebar (the M5.3 toolbar container) is
+        // gated behind ICC_COOL_CLASSES, separate from ICC_BAR_CLASSES
+        // which only covers toolbar/status/trackbar — easy to miss
+        // until RB_INSERTBANDW silently fails.
         let icc = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES,
+            dwICC: ICC_LISTVIEW_CLASSES
+                | ICC_TAB_CLASSES
+                | ICC_BAR_CLASSES
+                | ICC_COOL_CLASSES,
         };
         if !InitCommonControlsEx(&icc).as_bool() {
             return Err("InitCommonControlsEx failed".into());
@@ -423,7 +435,13 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     state.dpi.set(if dpi == 0 { REFERENCE_DPI } else { dpi });
 
-    // Tab control first — listviews are siblings, not children.
+    // Rebar with toolbar + search edit lives at the top, just under
+    // the menu bar. Created before the tab control so its HWND is
+    // available when the layout pass needs the rebar height.
+    let Toolbar { rebar, .. } = toolbar::create(hwnd, state.dpi.get())?;
+    state.rebar.set(rebar);
+
+    // Tab control — listviews are siblings, not children.
     let tab = create_tab_control(hwnd)?;
     state.tab.set(tab);
     insert_tabs(tab)?;
@@ -453,9 +471,10 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     Ok(())
 }
 
-/// `WM_SIZE`: lay out tab + status bar. The tab control gets the
-/// client area minus the status bar's height; the status bar pins to
-/// the bottom and auto-positions itself when sent WM_SIZE.
+/// `WM_SIZE`: lay out rebar + tab + status bar. The rebar pins to
+/// the top, the status bar to the bottom, and the tab control fills
+/// the space between. The status bar and rebar self-size when
+/// forwarded WM_SIZE.
 fn on_size(hwnd: HWND) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
@@ -469,8 +488,21 @@ fn on_size(hwnd: HWND) {
     let total_w = client.right - client.left;
     let total_h = client.bottom - client.top;
 
-    // Status bar self-sizes when forwarded WM_SIZE. We size it after
-    // forwarding to read its actual height.
+    // Rebar self-sizes on forwarded WM_SIZE. Read its height back
+    // afterwards so the tab control knows where to start.
+    let rebar = state.rebar.get();
+    let mut rebar_h = 0;
+    if rebar.0 != 0 {
+        unsafe {
+            // Forward WM_SIZE; the rebar uses lParam packed width
+            // (LOWORD) and height (HIWORD) but tolerates 0 here.
+            let _ = SendMessageW(rebar, WM_SIZE, WPARAM(0), LPARAM(0));
+            let _ = MoveWindow(rebar, 0, 0, total_w, 0, true);
+        }
+        rebar_h = toolbar::rebar_height(rebar);
+    }
+
+    // Status bar pins to bottom and self-sizes too.
     let status = state.status.get();
     let mut status_h = 0;
     if status.0 != 0 {
@@ -488,17 +520,18 @@ fn on_size(hwnd: HWND) {
     if tab.0 == 0 {
         return;
     }
-    let tab_h = (total_h - status_h).max(0);
+    let tab_y = rebar_h;
+    let tab_h = (total_h - rebar_h - status_h).max(0);
     unsafe {
-        let _ = MoveWindow(tab, 0, 0, total_w, tab_h, true);
+        let _ = MoveWindow(tab, 0, tab_y, total_w, tab_h, true);
     }
 
     // Per-tab listviews fill the tab control's content area.
     let mut content = RECT {
         left: 0,
-        top: 0,
+        top: tab_y,
         right: total_w,
-        bottom: tab_h,
+        bottom: tab_y + tab_h,
     };
     unsafe {
         // TCM_ADJUSTRECT with wParam=0 = "shrink rect to content area".
@@ -562,18 +595,37 @@ fn on_tab_change(hwnd: HWND) {
     }
 }
 
-/// `WM_COMMAND` dispatch. M5.2 only handles File → Exit; the rest
-/// log a TODO line and return. Real handlers ship with their
+/// `WM_COMMAND` dispatch. M5.3 wires File → Exit and the toolbar's
+/// Releases button (which opens our GitHub releases page in the
+/// default browser); the rest log a TODO line and ship with their
 /// feature milestones.
 fn on_command(hwnd: HWND, id: u32) {
     let id = id as u16;
-    if id == IDM_EXIT {
-        unsafe {
+    match id {
+        IDM_EXIT => unsafe {
             let _ = DestroyWindow(hwnd);
-        }
-        return;
+        },
+        IDM_RELEASES => open_releases_page(hwnd),
+        other => eprintln!("simplewall-rs: menu id {other} not yet wired up"),
     }
-    eprintln!("simplewall-rs: menu id {id} not yet wired up");
+}
+
+/// Open https://github.com/simplewall-rs/simplewall-rs/releases in
+/// the system's default browser. Replaces upstream's PayPal donate
+/// flow — same toolbar slot, friendlier action.
+fn open_releases_page(hwnd: HWND) {
+    // ShellExecuteW returns a HINSTANCE > 32 on success; <= 32 is
+    // an error code. We don't surface failure beyond a stderr line
+    // because the user-visible failure mode (browser doesn't open)
+    // is already self-explanatory.
+    let url = w!("https://github.com/simplewall-rs/simplewall-rs/releases");
+    let verb = w!("open");
+    let result = unsafe {
+        ShellExecuteW(hwnd, verb, url, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
+    };
+    if result.0 as usize <= 32 {
+        eprintln!("simplewall-rs: ShellExecuteW(releases) failed: code {}", result.0);
+    }
 }
 
 // ---- tab control ----

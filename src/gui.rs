@@ -17,6 +17,7 @@
 pub mod app;
 pub mod ids;
 pub mod main_window;
+pub mod toolbar;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
