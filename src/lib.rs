@@ -12,6 +12,7 @@
 // library. `profile` is pure-Rust XML I/O and compiles on every host.
 
 pub mod profile;
+pub mod rules;
 
 #[cfg(windows)]
 pub mod wfp;
