@@ -7,12 +7,11 @@
 // integration tests in `tests/` and unit tests inside each module can
 // exercise it without the full main flow.
 //
-// Modules are Windows-only by definition (the project targets the
-// Windows Filtering Platform). They're gated with `#[cfg(windows)]`
-// at this level so a non-Windows `cargo check` or `cargo doc` still
-// produces an empty-but-valid library rather than a hard error,
-// keeping cross-platform tooling like rust-analyzer-on-Linux happy
-// for prose / Cargo.toml work.
+// `wfp` is Windows-only (uses `windows-rs`), gated at this level so a
+// non-Windows `cargo check` or `cargo doc` still produces a valid
+// library. `profile` is pure-Rust XML I/O and compiles on every host.
+
+pub mod profile;
 
 #[cfg(windows)]
 pub mod wfp;
