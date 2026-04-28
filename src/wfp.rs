@@ -11,6 +11,10 @@
 // `lib.rs` (`#[cfg(windows)] pub mod wfp;`), so this file does not
 // repeat the cfg attribute.
 
+pub mod filter;
+pub mod provider;
+pub mod sublayer;
+
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWPM_DISPLAY_DATA0, FWPM_SESSION0, FwpmEngineClose0, FwpmEngineOpen0,
@@ -18,7 +22,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, UuidCreate};
 use windows::core::{GUID, PWSTR};
 
-const ERROR_SUCCESS: u32 = 0;
+pub(super) const ERROR_SUCCESS: u32 = 0;
 
 /// Display name shown in `netsh wfp show state` and similar tools when
 /// the WFP session is enumerated. Matches upstream's `_r_app_getname()`.
@@ -51,6 +55,16 @@ pub enum WfpError {
     /// system can't get a MAC address, and even then it falls back to
     /// a pseudo-random GUID and returns `RPC_S_UUID_LOCAL_ONLY`.
     UuidCreate(i32),
+    /// `FwpmProviderAdd0` returned a non-zero Win32 error. Common: 5
+    /// (ERROR_ACCESS_DENIED) when the calling process is not running
+    /// as administrator.
+    ProviderAdd(u32),
+    /// `FwpmSubLayerAdd0` returned a non-zero Win32 error. Same
+    /// admin-elevation requirement as `ProviderAdd`.
+    SubLayerAdd(u32),
+    /// `FwpmFilterAdd0` returned a non-zero Win32 error. Same
+    /// admin-elevation requirement as `ProviderAdd`.
+    FilterAdd(u32),
 }
 
 impl std::fmt::Display for WfpError {
@@ -58,6 +72,9 @@ impl std::fmt::Display for WfpError {
         match self {
             Self::Open(s) => write!(f, "FwpmEngineOpen0 failed (Win32 error {s:#010x})"),
             Self::UuidCreate(s) => write!(f, "UuidCreate failed (RPC status {s})"),
+            Self::ProviderAdd(s) => write!(f, "FwpmProviderAdd0 failed (Win32 error {s:#010x})"),
+            Self::SubLayerAdd(s) => write!(f, "FwpmSubLayerAdd0 failed (Win32 error {s:#010x})"),
+            Self::FilterAdd(s) => write!(f, "FwpmFilterAdd0 failed (Win32 error {s:#010x})"),
         }
     }
 }
