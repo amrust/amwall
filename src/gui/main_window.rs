@@ -806,6 +806,7 @@ fn on_command(hwnd: HWND, id: u32) {
 
         IDM_TRAY_START => on_enable_filters(hwnd),
         IDM_OPENRULESEDITOR => on_create_rule(hwnd),
+        IDM_SETTINGS => on_open_settings(hwnd),
 
         other => eprintln!("simplewall-rs: menu id {other} not yet wired up"),
     }
@@ -1002,6 +1003,32 @@ fn autosize_active_listview_columns(state: &WndState) {
             );
         }
     }
+}
+
+/// File → Settings / toolbar Settings: open the multi-tab modal
+/// Settings dialog. On Save, replace the in-memory Settings,
+/// persist to disk, and re-apply window-level effects (always-
+/// on-top, search-bar visibility, menu check marks).
+fn on_open_settings(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let snapshot = state.app.settings.borrow().clone();
+    let updated = match super::settings_dialog::open(hwnd, &snapshot) {
+        Some(s) => s,
+        None => return, // Close
+    };
+    state.app.settings.replace(updated.clone());
+    let path = state.app.settings_path.borrow().clone();
+    if let Err(e) = updated.save(&path) {
+        eprintln!(
+            "simplewall-rs: settings: save failed for {}: {e}",
+            path.display()
+        );
+    }
+    // Re-apply effects whose window state we manage directly.
+    apply_initial_settings(hwnd, state);
 }
 
 /// Toolbar "Create rule" / Edit menu equivalent: open the rule

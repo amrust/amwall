@@ -25,33 +25,103 @@
 
 use std::path::{Path, PathBuf};
 
+/// Three-way blocklist toggle — matches upstream's tri-state
+/// radio groups on the Settings → Blocklist page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlocklistMode {
+    #[default]
+    Disable,
+    Allow,
+    Block,
+}
+
+impl BlocklistMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlocklistMode::Disable => "disable",
+            BlocklistMode::Allow => "allow",
+            BlocklistMode::Block => "block",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "disable" => Some(Self::Disable),
+            "allow" => Some(Self::Allow),
+            "block" => Some(Self::Block),
+            _ => None,
+        }
+    }
+}
+
 /// All persistent UI settings. Defaults match upstream simplewall's
 /// defaults so a user coming from upstream sees the same window on
 /// first launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
+    // ---- View menu / window state ----
     /// View → Always on top.
     pub always_on_top: bool,
-    /// View → Autosize columns. When on, listview columns expand
-    /// to fit their content on each repopulate.
+    /// View → Autosize columns.
     pub autosize_columns: bool,
-    /// View → Show search bar. Toggles the search edit band's
-    /// visibility on the rebar.
+    /// View → Show search bar.
     pub show_search_bar: bool,
-    /// View → Show filenames only. Apps tab shows basename instead
-    /// of full path.
+    /// View → Show filenames only.
     pub show_filenames_only: bool,
-    /// View → Use dark theme. Cosmetic; wires up later when
-    /// theming lands.
+    /// View → Use dark theme.
     pub use_dark_theme: bool,
-    /// Settings → Load on system startup.
+
+    // ---- Settings → General ----
     pub load_on_startup: bool,
-    /// Settings → Start minimized.
     pub start_minimized: bool,
-    /// Settings → Skip UAC warning.
     pub skip_uac_warning: bool,
-    /// Settings → Check for updates periodically.
     pub check_updates: bool,
+    /// Selected language code (e.g. "en", "ru"). Empty = system default.
+    pub language: String,
+
+    // ---- Settings → Interface (confirmations + tray) ----
+    pub confirm_exit: bool,
+    pub confirm_exit_timer: bool,
+    pub confirm_log_clear: bool,
+    pub confirm_allow: bool,
+    pub tray_single_click: bool,
+
+    // ---- Settings → Rules ----
+    pub rule_block_outbound: bool,
+    pub rule_block_inbound: bool,
+    pub rule_allow_loopback: bool,
+    pub rule_allow_6to4: bool,
+    pub use_stealth_mode: bool,
+    pub install_boottime_filters: bool,
+    pub use_certificates: bool,
+    pub use_hashes: bool,
+    pub use_network_resolution: bool,
+
+    // ---- Settings → Blocklist (tri-state radio groups) ----
+    pub blocklist_spy: BlocklistMode,
+    pub blocklist_update: BlocklistMode,
+    pub blocklist_extra: BlocklistMode,
+
+    // ---- Settings → Notifications ----
+    pub enable_notifications: bool,
+    pub notification_sound: bool,
+    pub notification_fullscreen_silent: bool,
+    pub notification_on_tray: bool,
+    /// Seconds between similar notifications.
+    pub notification_timeout: u32,
+
+    // ---- Settings → Logging ----
+    pub enable_log: bool,
+    pub log_path: String,
+    /// Maximum log size in kilobytes.
+    pub log_size_limit: u32,
+    pub log_viewer: String,
+    pub enable_ui_log: bool,
+
+    // ---- Settings → Exclude ----
+    pub exclude_blocklist: bool,
+    pub exclude_custom: bool,
+    pub exclude_stealth: bool,
+    pub exclude_classify_allow: bool,
 }
 
 impl Default for Settings {
@@ -66,6 +136,38 @@ impl Default for Settings {
             start_minimized: false,
             skip_uac_warning: false,
             check_updates: true,
+            language: String::new(),
+            confirm_exit: true,
+            confirm_exit_timer: true,
+            confirm_log_clear: true,
+            confirm_allow: true,
+            tray_single_click: false,
+            rule_block_outbound: false,
+            rule_block_inbound: false,
+            rule_allow_loopback: true,
+            rule_allow_6to4: false,
+            use_stealth_mode: false,
+            install_boottime_filters: false,
+            use_certificates: false,
+            use_hashes: false,
+            use_network_resolution: false,
+            blocklist_spy: BlocklistMode::default(),
+            blocklist_update: BlocklistMode::default(),
+            blocklist_extra: BlocklistMode::default(),
+            enable_notifications: true,
+            notification_sound: true,
+            notification_fullscreen_silent: false,
+            notification_on_tray: false,
+            notification_timeout: 30,
+            enable_log: false,
+            log_path: String::new(),
+            log_size_limit: 4096,
+            log_viewer: String::new(),
+            enable_ui_log: false,
+            exclude_blocklist: false,
+            exclude_custom: false,
+            exclude_stealth: false,
+            exclude_classify_allow: false,
         }
     }
 }
@@ -124,11 +226,94 @@ impl Settings {
         kv(&mut buf, "start_minimized", self.start_minimized);
         kv(&mut buf, "skip_uac_warning", self.skip_uac_warning);
         kv(&mut buf, "check_updates", self.check_updates);
+        kv_str(&mut buf, "language", &self.language);
+        kv(&mut buf, "confirm_exit", self.confirm_exit);
+        kv(&mut buf, "confirm_exit_timer", self.confirm_exit_timer);
+        kv(&mut buf, "confirm_log_clear", self.confirm_log_clear);
+        kv(&mut buf, "confirm_allow", self.confirm_allow);
+        kv(&mut buf, "tray_single_click", self.tray_single_click);
+        kv(&mut buf, "rule_block_outbound", self.rule_block_outbound);
+        kv(&mut buf, "rule_block_inbound", self.rule_block_inbound);
+        kv(&mut buf, "rule_allow_loopback", self.rule_allow_loopback);
+        kv(&mut buf, "rule_allow_6to4", self.rule_allow_6to4);
+        kv(&mut buf, "use_stealth_mode", self.use_stealth_mode);
+        kv(&mut buf, "install_boottime_filters", self.install_boottime_filters);
+        kv(&mut buf, "use_certificates", self.use_certificates);
+        kv(&mut buf, "use_hashes", self.use_hashes);
+        kv(&mut buf, "use_network_resolution", self.use_network_resolution);
+        kv_str(&mut buf, "blocklist_spy", self.blocklist_spy.as_str());
+        kv_str(&mut buf, "blocklist_update", self.blocklist_update.as_str());
+        kv_str(&mut buf, "blocklist_extra", self.blocklist_extra.as_str());
+        kv(&mut buf, "enable_notifications", self.enable_notifications);
+        kv(&mut buf, "notification_sound", self.notification_sound);
+        kv(
+            &mut buf,
+            "notification_fullscreen_silent",
+            self.notification_fullscreen_silent,
+        );
+        kv(&mut buf, "notification_on_tray", self.notification_on_tray);
+        kv_u32(&mut buf, "notification_timeout", self.notification_timeout);
+        kv(&mut buf, "enable_log", self.enable_log);
+        kv_str(&mut buf, "log_path", &self.log_path);
+        kv_u32(&mut buf, "log_size_limit", self.log_size_limit);
+        kv_str(&mut buf, "log_viewer", &self.log_viewer);
+        kv(&mut buf, "enable_ui_log", self.enable_ui_log);
+        kv(&mut buf, "exclude_blocklist", self.exclude_blocklist);
+        kv(&mut buf, "exclude_custom", self.exclude_custom);
+        kv(&mut buf, "exclude_stealth", self.exclude_stealth);
+        kv(&mut buf, "exclude_classify_allow", self.exclude_classify_allow);
         std::fs::write(path, buf)
     }
 }
 
 fn apply_kv(s: &mut Settings, key: &str, value: &str) {
+    // String / numeric / enum keys first; they don't go through
+    // parse_bool so handle before the bool branch.
+    match key {
+        "language" => {
+            s.language = value.to_string();
+            return;
+        }
+        "blocklist_spy" => {
+            if let Some(m) = BlocklistMode::parse(value) {
+                s.blocklist_spy = m;
+            }
+            return;
+        }
+        "blocklist_update" => {
+            if let Some(m) = BlocklistMode::parse(value) {
+                s.blocklist_update = m;
+            }
+            return;
+        }
+        "blocklist_extra" => {
+            if let Some(m) = BlocklistMode::parse(value) {
+                s.blocklist_extra = m;
+            }
+            return;
+        }
+        "notification_timeout" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.notification_timeout = n;
+            }
+            return;
+        }
+        "log_path" => {
+            s.log_path = value.to_string();
+            return;
+        }
+        "log_size_limit" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.log_size_limit = n;
+            }
+            return;
+        }
+        "log_viewer" => {
+            s.log_viewer = value.to_string();
+            return;
+        }
+        _ => {}
+    }
     let b = match parse_bool(value) {
         Some(b) => b,
         None => {
@@ -146,6 +331,30 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
         "start_minimized" => s.start_minimized = b,
         "skip_uac_warning" => s.skip_uac_warning = b,
         "check_updates" => s.check_updates = b,
+        "confirm_exit" => s.confirm_exit = b,
+        "confirm_exit_timer" => s.confirm_exit_timer = b,
+        "confirm_log_clear" => s.confirm_log_clear = b,
+        "confirm_allow" => s.confirm_allow = b,
+        "tray_single_click" => s.tray_single_click = b,
+        "rule_block_outbound" => s.rule_block_outbound = b,
+        "rule_block_inbound" => s.rule_block_inbound = b,
+        "rule_allow_loopback" => s.rule_allow_loopback = b,
+        "rule_allow_6to4" => s.rule_allow_6to4 = b,
+        "use_stealth_mode" => s.use_stealth_mode = b,
+        "install_boottime_filters" => s.install_boottime_filters = b,
+        "use_certificates" => s.use_certificates = b,
+        "use_hashes" => s.use_hashes = b,
+        "use_network_resolution" => s.use_network_resolution = b,
+        "enable_notifications" => s.enable_notifications = b,
+        "notification_sound" => s.notification_sound = b,
+        "notification_fullscreen_silent" => s.notification_fullscreen_silent = b,
+        "notification_on_tray" => s.notification_on_tray = b,
+        "enable_log" => s.enable_log = b,
+        "enable_ui_log" => s.enable_ui_log = b,
+        "exclude_blocklist" => s.exclude_blocklist = b,
+        "exclude_custom" => s.exclude_custom = b,
+        "exclude_stealth" => s.exclude_stealth = b,
+        "exclude_classify_allow" => s.exclude_classify_allow = b,
         // Forward-compat: silently ignore unknown keys.
         _ => {}
     }
@@ -160,6 +369,16 @@ fn parse_bool(s: &str) -> Option<bool> {
 }
 
 fn kv(buf: &mut String, key: &str, value: bool) {
+    use std::fmt::Write;
+    let _ = writeln!(buf, "{key}={value}");
+}
+
+fn kv_str(buf: &mut String, key: &str, value: &str) {
+    use std::fmt::Write;
+    let _ = writeln!(buf, "{key}={value}");
+}
+
+fn kv_u32(buf: &mut String, key: &str, value: u32) {
     use std::fmt::Write;
     let _ = writeln!(buf, "{key}={value}");
 }

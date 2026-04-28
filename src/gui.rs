@@ -22,6 +22,7 @@ pub mod ids;
 pub mod main_window;
 pub mod rule_editor;
 pub mod settings;
+pub mod settings_dialog;
 pub mod toolbar;
 
 use std::path::PathBuf;

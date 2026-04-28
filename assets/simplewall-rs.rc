@@ -173,6 +173,247 @@ BEGIN
                     IDC_RULE_APPS_HINT, 6, 180, 286, 14
 END
 
+// ---------------------------------------------------------------
+// Settings dialog templates.
+//
+// Parent IDD_SETTINGS hosts a tab control + Save/Close. Each tab
+// is a child dialog (IDD_SETTINGS_*). Layouts mirror upstream's
+// resource.rc:368-523 — same controls in the same positions, just
+// with the strings hardcoded English (M8 will route through a
+// localization layer).
+// ---------------------------------------------------------------
+
+#define IDD_SETTINGS                    200
+#define IDD_SETTINGS_GENERAL            201
+#define IDD_SETTINGS_INTERFACE          202
+#define IDD_SETTINGS_HIGHLIGHTING       203
+#define IDD_SETTINGS_RULES              204
+#define IDD_SETTINGS_BLOCKLIST          205
+#define IDD_SETTINGS_NOTIFICATIONS      206
+#define IDD_SETTINGS_LOGGING            207
+#define IDD_SETTINGS_EXCLUDE            208
+
+#define IDC_SETTINGS_TAB                700
+#define IDC_SETTINGS_SAVE               1
+#define IDC_SETTINGS_CLOSE              2
+
+// General page checkboxes
+#define IDC_ALWAYSONTOP_CHK             720
+#define IDC_LOADONSTARTUP_CHK           721
+#define IDC_STARTMINIMIZED_CHK          722
+#define IDC_SKIPUACWARNING_CHK          723
+#define IDC_CHECKUPDATES_CHK            724
+#define IDC_LANGUAGE                    725
+
+// Interface page
+#define IDC_CONFIRMEXIT_CHK             730
+#define IDC_CONFIRMEXITTIMER_CHK        731
+#define IDC_CONFIRMLOGCLEAR_CHK         732
+#define IDC_CONFIRMALLOW_CHK            733
+#define IDC_TRAYICONSINGLECLICK_CHK     734
+
+// Highlighting page (single listview)
+#define IDC_COLORS                      740
+
+// Rules page
+#define IDC_S_RULE_BLOCKOUTBOUND        750
+#define IDC_S_RULE_BLOCKINBOUND         751
+#define IDC_S_RULE_ALLOWLOOPBACK        752
+#define IDC_S_RULE_ALLOW6TO4            753
+#define IDC_USESTEALTHMODE_CHK          754
+#define IDC_INSTALLBOOTTIMEFILTERS_CHK  755
+#define IDC_USECERTIFICATES_CHK         756
+#define IDC_USEHASHES_CHK               757
+#define IDC_USENETWORKRESOLUTION_CHK    758
+
+// Blocklist page (3 radio groups, 3 buttons each)
+#define IDC_S_BLOCKLIST_SPY_DISABLE     760
+#define IDC_S_BLOCKLIST_SPY_ALLOW       761
+#define IDC_S_BLOCKLIST_SPY_BLOCK       762
+#define IDC_S_BLOCKLIST_UPDATE_DISABLE  770
+#define IDC_S_BLOCKLIST_UPDATE_ALLOW    771
+#define IDC_S_BLOCKLIST_UPDATE_BLOCK    772
+#define IDC_S_BLOCKLIST_EXTRA_DISABLE   780
+#define IDC_S_BLOCKLIST_EXTRA_ALLOW     781
+#define IDC_S_BLOCKLIST_EXTRA_BLOCK     782
+
+// Notifications page
+#define IDC_ENABLENOTIFICATIONS_CHK     790
+#define IDC_NOTIFICATIONSOUND_CHK       791
+#define IDC_NOTIF_FULLSCREEN_CHK        792
+#define IDC_NOTIFICATIONONTRAY_CHK      793
+#define IDC_NOTIFICATIONTIMEOUT_CTRL    794
+
+// Logging page
+#define IDC_ENABLELOG_CHK               800
+#define IDC_LOGPATH                     801
+#define IDC_LOGPATH_BTN                 802
+#define IDC_LOGSIZELIMIT_CTRL           803
+#define IDC_LOGVIEWER                   804
+#define IDC_LOGVIEWER_BTN               805
+#define IDC_ENABLEUILOG_CHK             806
+
+// Exclude page
+#define IDC_EXCLUDEBLOCKLIST_CHK        810
+#define IDC_EXCLUDECUSTOM_CHK           811
+#define IDC_EXCLUDESTEALTH_CHK          812
+#define IDC_EXCLUDECLASSIFYALLOW_CHK    813
+
+// ---- Settings parent dialog (resizable, tab control + buttons) ----
+IDD_SETTINGS DIALOGEX 0, 0, 280, 220
+STYLE WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_POPUP | WS_VISIBLE | WS_BORDER | WS_SYSMENU | WS_CAPTION | WS_THICKFRAME | DS_SHELLFONT | DS_MODALFRAME
+EXSTYLE WS_EX_APPWINDOW | WS_EX_CONTROLPARENT
+CAPTION "Settings"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_SETTINGS_TAB, "SysTabControl32", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP, 0, 0, 280, 196
+    DEFPUSHBUTTON   "Save",  IDC_SETTINGS_SAVE,  170, 202, 50, 14, WS_TABSTOP
+    PUSHBUTTON      "Close", IDC_SETTINGS_CLOSE, 224, 202, 50, 14, WS_TABSTOP
+END
+
+// ---- General ----
+IDD_SETTINGS_GENERAL DIALOGEX 0, 0, 270, 184
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "General configuration", -1, 4, 4, 262, 90, WS_GROUP
+    AUTOCHECKBOX    "Always on top",                    IDC_ALWAYSONTOP_CHK,    12, 16, 246, 12
+    AUTOCHECKBOX    "Load on system startup",           IDC_LOADONSTARTUP_CHK,  12, 30, 246, 12
+    AUTOCHECKBOX    "Start minimized",                  IDC_STARTMINIMIZED_CHK, 12, 44, 246, 12
+    AUTOCHECKBOX    "Skip ""User Account Control"" prompt warning", IDC_SKIPUACWARNING_CHK, 12, 58, 246, 12
+    AUTOCHECKBOX    "Periodically check for updates (recommended)", IDC_CHECKUPDATES_CHK, 12, 72, 246, 12
+
+    GROUPBOX        "Language",   -1, 4, 100, 262, 38, WS_GROUP
+    LTEXT           "Select language:", -1, 12, 116, 100, 12, SS_CENTERIMAGE
+    COMBOBOX        IDC_LANGUAGE, 116, 114, 142, 80, CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+END
+
+// ---- Interface (confirmations + tray) ----
+IDD_SETTINGS_INTERFACE DIALOGEX 0, 0, 270, 184
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Confirmations", -1, 4, 4, 262, 76, WS_GROUP
+    AUTOCHECKBOX    "Show confirmation dialog on exit",                     IDC_CONFIRMEXIT_CHK,      12, 16, 246, 12
+    AUTOCHECKBOX    "Show confirmation dialog on exit when timers active",  IDC_CONFIRMEXITTIMER_CHK, 12, 30, 246, 12
+    AUTOCHECKBOX    "Confirm when clearing the log file",                   IDC_CONFIRMLOGCLEAR_CHK,  12, 44, 246, 12
+    AUTOCHECKBOX    "Confirm allowing previously-blocked traffic",          IDC_CONFIRMALLOW_CHK,     12, 58, 246, 12
+
+    GROUPBOX        "Tray icon", -1, 4, 86, 262, 32, WS_GROUP
+    AUTOCHECKBOX    "Single click on tray icon to open", IDC_TRAYICONSINGLECLICK_CHK, 12, 100, 246, 12
+END
+
+// ---- Highlighting (color list — view-only for now) ----
+IDD_SETTINGS_HIGHLIGHTING DIALOGEX 0, 0, 270, 184
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Highlighting", -1, 4, 4, 262, 176, WS_GROUP
+    CONTROL         "", IDC_COLORS, "SysListView32",
+                    LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHAREIMAGELISTS | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP | WS_VSCROLL,
+                    12, 16, 246, 144
+    LTEXT           "Double-click an item to change it.", -1, 12, 162, 246, 12, SS_CENTERIMAGE
+END
+
+// ---- Rules ----
+IDD_SETTINGS_RULES DIALOGEX 0, 0, 270, 184
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Connections", -1, 4, 4, 262, 76, WS_GROUP
+    AUTOCHECKBOX    "Block outbound connections for all", IDC_S_RULE_BLOCKOUTBOUND, 12, 16, 246, 12
+    AUTOCHECKBOX    "Block inbound connections for all",  IDC_S_RULE_BLOCKINBOUND,  12, 30, 246, 12
+    AUTOCHECKBOX    "Allow loopback connections for all", IDC_S_RULE_ALLOWLOOPBACK, 12, 44, 246, 12
+    AUTOCHECKBOX    "Allow IPv6 redirections (6to4) for all", IDC_S_RULE_ALLOW6TO4,  12, 58, 246, 12
+
+    GROUPBOX        "Security", -1, 4, 86, 262, 46, WS_GROUP
+    AUTOCHECKBOX    "Prevent port scanning (stealth mode)",       IDC_USESTEALTHMODE_CHK,        12, 98, 246, 12
+    AUTOCHECKBOX    "Enable boot-time filters",                   IDC_INSTALLBOOTTIMEFILTERS_CHK,12, 112, 246, 12
+
+    GROUPBOX        "Advanced", -1, 4, 138, 262, 60, WS_GROUP
+    AUTOCHECKBOX    "Check apps for digital signatures",          IDC_USECERTIFICATES_CHK,       12, 150, 246, 12
+    AUTOCHECKBOX    "Use file hashes for app identification",     IDC_USEHASHES_CHK,             12, 164, 246, 12
+    AUTOCHECKBOX    "Resolve network addresses",                  IDC_USENETWORKRESOLUTION_CHK,  12, 178, 246, 12
+END
+
+// ---- Blocklist ----
+IDD_SETTINGS_BLOCKLIST DIALOGEX 0, 0, 270, 184
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Microsoft spying and telemetry", -1, 4, 4, 262, 56, WS_GROUP
+    AUTORADIOBUTTON "Disable", IDC_S_BLOCKLIST_SPY_DISABLE, 12, 16, 246, 12, WS_GROUP
+    AUTORADIOBUTTON "Allow",   IDC_S_BLOCKLIST_SPY_ALLOW,   12, 30, 246, 12
+    AUTORADIOBUTTON "Block",   IDC_S_BLOCKLIST_SPY_BLOCK,   12, 44, 246, 12
+
+    GROUPBOX        "Microsoft Update", -1, 4, 64, 262, 56, WS_GROUP
+    AUTORADIOBUTTON "Disable", IDC_S_BLOCKLIST_UPDATE_DISABLE, 12, 76, 246, 12, WS_GROUP
+    AUTORADIOBUTTON "Allow",   IDC_S_BLOCKLIST_UPDATE_ALLOW,   12, 90, 246, 12
+    AUTORADIOBUTTON "Block",   IDC_S_BLOCKLIST_UPDATE_BLOCK,   12, 104, 246, 12
+
+    GROUPBOX        "Microsoft applications", -1, 4, 124, 262, 56, WS_GROUP
+    AUTORADIOBUTTON "Disable", IDC_S_BLOCKLIST_EXTRA_DISABLE, 12, 136, 246, 12, WS_GROUP
+    AUTORADIOBUTTON "Allow",   IDC_S_BLOCKLIST_EXTRA_ALLOW,   12, 150, 246, 12
+    AUTORADIOBUTTON "Block",   IDC_S_BLOCKLIST_EXTRA_BLOCK,   12, 164, 246, 12
+END
+
+// ---- Notifications ----
+IDD_SETTINGS_NOTIFICATIONS DIALOGEX 0, 0, 270, 184
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Notifications", -1, 4, 4, 262, 92, WS_GROUP
+    AUTOCHECKBOX    "Enable packets notifications",                  IDC_ENABLENOTIFICATIONS_CHK,   12, 16, 246, 12
+    AUTOCHECKBOX    "Enable notifications sound",                    IDC_NOTIFICATIONSOUND_CHK,     12, 30, 246, 12
+    AUTOCHECKBOX    "Enable silent-mode when full-screen app in foreground", IDC_NOTIF_FULLSCREEN_CHK, 12, 44, 246, 12
+    AUTOCHECKBOX    "Show notification window on tray",              IDC_NOTIFICATIONONTRAY_CHK,    12, 58, 246, 12
+
+    LTEXT           "Timeout between similar notifications (sec.):", -1, 12, 76, 196, 12, SS_CENTERIMAGE
+    EDITTEXT        IDC_NOTIFICATIONTIMEOUT_CTRL, 212, 76, 44, 12, ES_AUTOHSCROLL | ES_NUMBER
+END
+
+// ---- Logging ----
+IDD_SETTINGS_LOGGING DIALOGEX 0, 0, 270, 184
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Packets log", -1, 4, 4, 262, 76, WS_GROUP
+    AUTOCHECKBOX    "Enable packets logging to a file", IDC_ENABLELOG_CHK, 12, 16, 246, 12
+    EDITTEXT        IDC_LOGPATH,     12, 30, 220, 12, ES_AUTOHSCROLL
+    PUSHBUTTON      "...",           IDC_LOGPATH_BTN, 236, 30, 24, 12, WS_TABSTOP
+    LTEXT           "Maximum log size (kB):", -1, 12, 48, 196, 12, SS_CENTERIMAGE
+    EDITTEXT        IDC_LOGSIZELIMIT_CTRL, 212, 48, 44, 12, ES_AUTOHSCROLL | ES_NUMBER
+
+    GROUPBOX        "Log viewer", -1, 4, 86, 262, 36, WS_GROUP
+    EDITTEXT        IDC_LOGVIEWER,     12, 100, 220, 12, ES_AUTOHSCROLL
+    PUSHBUTTON      "...",             IDC_LOGVIEWER_BTN, 236, 100, 24, 12, WS_TABSTOP
+
+    GROUPBOX        "Interface", -1, 4, 128, 262, 32, WS_GROUP
+    AUTOCHECKBOX    "Enable packets logging in the UI", IDC_ENABLEUILOG_CHK, 12, 142, 246, 12
+END
+
+// ---- Exclude ----
+IDD_SETTINGS_EXCLUDE DIALOGEX 0, 0, 270, 184
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Notifications: do not notify about ...", -1, 4, 4, 262, 46, WS_GROUP
+    AUTOCHECKBOX    "blocklist",   IDC_EXCLUDEBLOCKLIST_CHK, 12, 16, 246, 12
+    AUTOCHECKBOX    "user rules",  IDC_EXCLUDECUSTOM_CHK,    12, 30, 246, 12
+
+    GROUPBOX        "Logging: do not log ...", -1, 4, 56, 262, 46, WS_GROUP
+    AUTOCHECKBOX    "port scanner connections", IDC_EXCLUDESTEALTH_CHK,        12, 68, 246, 12
+    AUTOCHECKBOX    "allowed connections",      IDC_EXCLUDECLASSIFYALLOW_CHK,  12, 82, 246, 12
+END
+
 // Add/edit-one-rule-fragment sub-dialog.
 IDD_EDITOR_ADDRULE DIALOGEX 0, 0, 280, 156
 STYLE WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_POPUP | WS_VISIBLE | WS_BORDER | WS_SYSMENU | WS_CAPTION | DS_SHELLFONT | DS_MODALFRAME
