@@ -1,0 +1,28 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Windows
+Thumbs.db
+Desktop.ini
+*.pdb
+
+# Build artifacts
+*.exe
+*.dll
+*.lib
+*.exp
+*.obj
+
+# Local config / secrets
+.env
+.env.local
+*.local

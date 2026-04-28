@@ -1,0 +1,25 @@
+simplewall-rs
+=============
+
+This project is a Rust port of simplewall, originally written in C by
+Henry++ and contributors.
+
+Original project:
+  Name:    simplewall
+  Author:  Henry++ (https://github.com/henrypp)
+  Source:  https://github.com/henrypp/simplewall
+  License: GNU General Public License v3.0 (or later)
+  Copyright (C) 2016-2026 Henry++
+
+This port:
+  Name:    simplewall-rs
+  Source:  https://github.com/simplewall-rs/simplewall-rs
+  License: GNU General Public License v3.0 (or later)
+
+As a derivative work of simplewall, simplewall-rs is distributed under
+the same license (GPL-3.0-or-later) as required by section 5 of the GPL.
+The full license text is in the LICENSE file.
+
+simplewall-rs is an independent reimplementation. It is not affiliated
+with, endorsed by, or sponsored by Henry++ or the original simplewall
+project.

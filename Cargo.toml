@@ -1,0 +1,12 @@
+[package]
+name = "simplewall-rs"
+version = "0.0.1"
+edition = "2024"
+description = "Rust port of simplewall, a Windows Filtering Platform (WFP) firewall"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/simplewall-rs/simplewall-rs"
+readme = "README.md"
+authors = ["simplewall-rs contributors"]
+rust-version = "1.85"
+
+[dependencies]
