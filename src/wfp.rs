@@ -71,6 +71,11 @@ pub enum WfpError {
     /// exist, 5 (`ERROR_ACCESS_DENIED`) when the path exists but
     /// isn't readable by the current user.
     AppIdFromFileName(u32),
+    /// `FwpmFilterDeleteByKey0` returned a non-zero Win32 error.
+    /// Common: 0x80320005 (`FWP_E_FILTER_NOT_FOUND`) when the
+    /// filter was already removed, 5 (`ERROR_ACCESS_DENIED`) on a
+    /// non-elevated process.
+    FilterDelete(u32),
 }
 
 impl std::fmt::Display for WfpError {
@@ -83,6 +88,9 @@ impl std::fmt::Display for WfpError {
             Self::FilterAdd(s) => write!(f, "FwpmFilterAdd0 failed (Win32 error {s:#010x})"),
             Self::AppIdFromFileName(s) => {
                 write!(f, "FwpmGetAppIdFromFileName0 failed (Win32 error {s:#010x})")
+            }
+            Self::FilterDelete(s) => {
+                write!(f, "FwpmFilterDeleteByKey0 failed (Win32 error {s:#010x})")
             }
         }
     }

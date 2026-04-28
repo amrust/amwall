@@ -9,7 +9,7 @@
 
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWPM_ACTION0, FWPM_DISPLAY_DATA0,
-    FWPM_FILTER0, FwpmFilterAdd0,
+    FWPM_FILTER0, FwpmFilterAdd0, FwpmFilterDeleteByKey0,
 };
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows::Win32::System::Rpc::UuidCreate;
@@ -38,6 +38,22 @@ impl Filter {
     /// vs `*ById` style.
     pub fn runtime_id(&self) -> u64 {
         self.runtime_id
+    }
+
+    /// Remove this filter from the engine via `FwpmFilterDeleteByKey0`.
+    ///
+    /// Volatile filters are removed automatically when the engine
+    /// session ends, so explicit deletion is only required for
+    /// surgical removal (e.g. tearing down one rule out of many)
+    /// or when the engine handle is going to outlive the rule. The
+    /// kernel returns `FWP_E_FILTER_NOT_FOUND` (0x80320005) if the
+    /// filter is already gone — surfaced as `WfpError::FilterDelete`.
+    pub fn delete(&self, engine: &WfpEngine) -> Result<(), WfpError> {
+        let status = unsafe { FwpmFilterDeleteByKey0(engine.raw(), &self.key) };
+        if status != ERROR_SUCCESS {
+            return Err(WfpError::FilterDelete(status));
+        }
+        Ok(())
     }
 }
 
@@ -231,6 +247,50 @@ mod tests {
         )
         .expect("FwpmFilterAdd0 with AppPath failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
+    }
+
+    /// Live admin-only smoke test: full install → delete cycle.
+    /// Validates the explicit cleanup path on top of M1.4/M1.5's
+    /// install-and-let-engine-clean-up path. After delete, a second
+    /// delete returns `FWP_E_FILTER_NOT_FOUND` (0x80320005) which
+    /// we surface as `WfpError::FilterDelete` — asserted here so
+    /// double-delete behavior is locked in.
+    #[test]
+    #[ignore = "requires elevated shell"]
+    fn install_then_delete_admin_smoke() {
+        let engine = WfpEngine::open().expect("engine open failed");
+        let prov = provider::add(&engine, "simplewall-rs test", "test provider")
+            .expect("provider add failed");
+        let sub = sublayer::add(
+            &engine,
+            "simplewall-rs delete test sublayer",
+            "test sublayer",
+            0x4000,
+            Some(&prov.key()),
+        )
+        .expect("sublayer add failed");
+        let f = add(
+            &engine,
+            "simplewall-rs delete test filter",
+            "permit-all at ALE_AUTH_CONNECT_V4",
+            &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            &sub.key(),
+            Some(&prov.key()),
+            &[],
+            FilterAction::Permit,
+        )
+        .expect("filter add failed");
+
+        f.delete(&engine).expect("first delete failed");
+
+        // Second delete must fail with FilterDelete(*) — proves the
+        // first delete actually removed the filter rather than
+        // succeeding by no-op.
+        match f.delete(&engine) {
+            Err(WfpError::FilterDelete(_)) => {} // expected: FWP_E_FILTER_NOT_FOUND
+            Err(e) => panic!("expected FilterDelete error on double-delete, got {e:?}"),
+            Ok(()) => panic!("double-delete unexpectedly succeeded"),
+        }
     }
 
     /// Live admin-only smoke test: filter with TCP-protocol +
