@@ -35,8 +35,9 @@ use windows::Win32::UI::Controls::{
     ICC_BAR_CLASSES, ICC_COOL_CLASSES, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
     LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, SBARS_TOOLTIPS, SB_SETPARTS,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVS_EX_CHECKBOXES,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR,
+    SBARS_TOOLTIPS, SB_SETPARTS,
     SB_SETTEXTW, STATUSCLASSNAMEW, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL,
     TCM_INSERTITEMW, TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
 };
@@ -46,10 +47,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CreateMenu, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, HMENU,
     IDC_ARROW, LoadCursorW, MF_POPUP, MF_SEPARATOR, MF_STRING, MoveWindow, RegisterClassExW,
-    SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetWindowLongPtrW, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND,
+    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SIZE,
+    WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
+    WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -204,6 +206,12 @@ pub fn create(app: Box<App>) -> Result<HWND, String> {
             return Err("RegisterClassExW failed".into());
         }
 
+        // Build the title string from the profile path *before*
+        // moving App into WndState — once we Box::into_raw the
+        // state, we can't easily reach back into it from this
+        // synchronous code.
+        let title = wide(&format_window_title(&app.profile_path));
+
         // Wrap the App in WndState and pass the raw pointer through
         // CreateWindowExW. Consumed by WM_NCCREATE; reclaimed by
         // WM_NCDESTROY.
@@ -211,7 +219,6 @@ pub fn create(app: Box<App>) -> Result<HWND, String> {
         let state_ptr = Box::into_raw(state) as *mut std::ffi::c_void;
 
         let menu = build_main_menu().ok_or("build_main_menu failed")?;
-        let title = wide("simplewall-rs");
         // Initial size in logical pixels — Win32 will create the
         // window at system DPI. We re-apply per-monitor DPI scaling
         // in WM_CREATE/WM_SIZE.
@@ -404,6 +411,10 @@ unsafe extern "system" fn wnd_proc(
             on_command(hwnd, wparam.0 as u32 & 0xFFFF);
             LRESULT(0)
         }
+        WM_DPICHANGED => {
+            on_dpi_changed(hwnd, wparam, lparam);
+            LRESULT(0)
+        }
         WM_DESTROY => {
             post_quit(0);
             LRESULT(0)
@@ -551,6 +562,74 @@ fn on_size(hwnd: HWND) {
         }
         unsafe {
             let _ = MoveWindow(lv, content.left, content.top, cw, ch, true);
+        }
+    }
+}
+
+/// `WM_DPICHANGED`: user dragged the window onto a monitor with a
+/// different scaling factor. Win32 hands us:
+///   - LOWORD(wparam) = new X DPI (Y matches; we use X).
+///   - lparam = pointer to RECT with the suggested new window
+///     position+size preserving the window's logical size on the
+///     new monitor.
+///
+/// We update the cached DPI, move the window to the suggested rect,
+/// then re-issue the column-width scaling so the listview content
+/// stays readable at the new ratio. WM_SIZE fires automatically off
+/// SetWindowPos and re-lays out the children.
+fn on_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let new_dpi = (wparam.0 & 0xFFFF) as u32;
+    let new_dpi = if new_dpi == 0 { REFERENCE_DPI } else { new_dpi };
+    state.dpi.set(new_dpi);
+
+    let suggested = unsafe { &*(lparam.0 as *const RECT) };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            suggested.left,
+            suggested.top,
+            suggested.right - suggested.left,
+            suggested.bottom - suggested.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+
+    // Re-scale all per-tab listview columns to the new DPI so the
+    // content doesn't end up squished or stretched.
+    for (slot, &id) in TAB_LISTVIEW_IDS.iter().enumerate() {
+        let lv = state.listviews[slot].get();
+        if lv.0 == 0 {
+            continue;
+        }
+        rescale_listview_columns(lv, id, new_dpi);
+    }
+}
+
+/// Re-issue LVM_SETCOLUMNWIDTH for every column on this listview
+/// using the new DPI. Mirrors the per-tab column-width tables used
+/// by `configure_listview`.
+fn rescale_listview_columns(lv: HWND, id: i32, dpi: u32) {
+    let widths: &[i32] = match id {
+        IDC_APPS_PROFILE | IDC_APPS_SERVICE | IDC_APPS_UWP => APPS_COL_WIDTHS,
+        IDC_RULES_BLOCKLIST | IDC_RULES_SYSTEM | IDC_RULES_CUSTOM => RULES_COL_WIDTHS,
+        IDC_NETWORK => NETWORK_COL_WIDTHS,
+        IDC_LOG => LOG_COL_WIDTHS,
+        _ => return,
+    };
+    for (i, &logical) in widths.iter().enumerate() {
+        let pixels = scale_dpi(logical, dpi);
+        unsafe {
+            let _ = SendMessageW(
+                lv,
+                LVM_SETCOLUMNWIDTH,
+                WPARAM(i),
+                LPARAM(pixels as isize),
+            );
         }
     }
 }
@@ -941,6 +1020,29 @@ fn create_status_bar(parent: HWND) -> Result<HWND, String> {
             return Err("CreateWindowExW(STATUSCLASSNAME) failed".into());
         }
         Ok(hwnd)
+    }
+}
+
+/// Build the main-window title string from the loaded profile's
+/// path: `simplewall-rs — <path>`. Em-dash (U+2014) for the
+/// separator, matching upstream's title-bar style. The path goes
+/// through `Path::display()` so non-UTF-8 path components (rare on
+/// Windows but possible) round-trip lossily without panicking.
+fn format_window_title(path: &std::path::Path) -> String {
+    format!("simplewall-rs \u{2014} {}", path.display())
+}
+
+/// Replace the main window's title, e.g. after Open Profile…
+/// switches the loaded profile. Public-in-module so other
+/// handlers (Open / Save As / future Refresh) can call it.
+#[allow(dead_code)]
+pub(super) fn set_window_title(hwnd: HWND, path: &std::path::Path) {
+    let title = wide(&format_window_title(path));
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+            hwnd,
+            PCWSTR(title.as_ptr()),
+        );
     }
 }
 
