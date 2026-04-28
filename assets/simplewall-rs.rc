@@ -1,23 +1,189 @@
 // simplewall-rs — Win32 resource script.
 // Copyright (C) 2026  simplewall-rs contributors. Licensed GPL-3.0-or-later.
 //
-// Compiled by build.rs via the `embed-resource` crate. Two
-// resources for now: the application icon (so Explorer / taskbar
-// show the simplewall icon, not the default Rust binary icon) and
-// the application manifest (ComCtl32 v6 + DPI awareness — see
-// manifest.xml for the rationale).
-//
-// Resource IDs match upstream simplewall's resource.h where it
-// matters. `1 ICON` is the standard "main application icon" slot
-// Windows looks at for the .exe's display icon.
+// Compiled by build.rs via the `embed-resource` crate. Holds:
+//   - Application icon (shown by Explorer / taskbar / Alt-Tab).
+//   - Application manifest (ComCtl32 v6 + DPI awareness — see
+//     manifest.xml for the rationale).
+//   - Modal dialog templates (rules editor + sub-dialogs). Each
+//     template shape mirrors upstream simplewall's same-named
+//     IDD_EDITOR* resources from src/resource.rc:250-366. Loaded
+//     at runtime via DialogBoxParamW / CreateDialogParamW from
+//     gui/rule_editor.rs.
 
 #include <winres.h>
+
+// ---------------------------------------------------------------
+// Resource IDs.
+//
+// Numeric values match upstream's src/resource.h where possible,
+// to keep both sources line-up against one another. Rust-side
+// duplicates live in gui/ids.rs (control IDs) and gui/dlg_ids.rs
+// (dialog-template IDs); manually hand-synced.
+// ---------------------------------------------------------------
+
+#define IDD_EDITOR              102
+#define IDD_EDITOR_GENERAL      103
+#define IDD_EDITOR_RULE         104
+#define IDD_EDITOR_APPS         105
+#define IDD_EDITOR_ADDRULE      106
+
+#define IDC_TAB                 105
+#define IDC_ENABLE_CHK          250
+#define IDC_SAVE                1
+#define IDC_CLOSE               2
+
+// General-tab controls.
+#define IDC_RULE_NAME           208
+#define IDC_RULE_NAME_ID        210
+#define IDC_RULE_COMMENT        212
+#define IDC_RULE_COMMENT_ID     214
+#define IDC_RULE_PROTOCOL       216
+#define IDC_RULE_PROTOCOL_ID    217
+#define IDC_RULE_VERSION        218
+#define IDC_RULE_VERSION_ID     219
+#define IDC_RULE_DIRECTION      220
+#define IDC_RULE_DIRECTION_ID   201
+#define IDC_RULE_ACTION         260
+#define IDC_RULE_ACTION_ID      261
+
+// Rule-tab controls.
+#define IDC_RULE_REMOTE         221
+#define IDC_RULE_REMOTE_ID      222
+#define IDC_RULE_REMOTE_ADD     223
+#define IDC_RULE_REMOTE_EDIT    224
+#define IDC_RULE_REMOTE_DELETE  225
+#define IDC_RULE_LOCAL          226
+#define IDC_RULE_LOCAL_ID       227
+#define IDC_RULE_LOCAL_ADD      228
+#define IDC_RULE_LOCAL_EDIT     229
+#define IDC_RULE_LOCAL_DELETE   230
+#define IDC_RULE_HINT           239
+
+// Apps-tab controls.
+#define IDC_SEARCH              104
+#define IDC_RULE_APPS_ID        231
+#define IDC_RULE_APPS_HINT      232
+
+// AddRule sub-dialog.
+#define IDC_RULE_ID             221
+#define IDC_RULE_ID_HINT        239
+
+// ---------------------------------------------------------------
+// Top-level resources.
+// ---------------------------------------------------------------
 
 // Main application icon.
 1 ICON "icons/100.ico"
 
-// Application manifest (CREATEPROCESS_MANIFEST_RESOURCE_ID = 1,
-// RT_MANIFEST = 24). Embedding here means Windows reads the
-// manifest before our process starts up, which is required for
-// ComCtl32 v6 binding.
+// Application manifest.
 1 24 "manifest.xml"
+
+// ---------------------------------------------------------------
+// Rule-editor dialog templates.
+//
+// Sizes / positions are in dialog units; Windows scales them to
+// pixels via the chosen font (DS_SHELLFONT below picks Segoe UI
+// on Windows 10/11). This is exactly the dance dialog templates
+// were designed for — the editor doesn't need our own DPI math
+// for the layout itself, just for any custom child controls
+// (toolbars / etc.) added at runtime.
+// ---------------------------------------------------------------
+
+// Parent dialog: tab control + Enable rule + Save / Close.
+IDD_EDITOR DIALOGEX 0, 0, 300, 230
+STYLE WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_POPUP | WS_VISIBLE | WS_BORDER | WS_SYSMENU | WS_CAPTION | WS_THICKFRAME | DS_SHELLFONT | DS_MODALFRAME
+EXSTYLE WS_EX_APPWINDOW | WS_EX_CONTROLPARENT
+CAPTION "Rule editor"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_TAB, "SysTabControl32", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP, 0, 0, 300, 200
+
+    AUTOCHECKBOX    "Enable rule", IDC_ENABLE_CHK, 8, 207, 100, 14, BS_VCENTER | WS_TABSTOP
+
+    DEFPUSHBUTTON   "Save",  IDC_SAVE,  188, 207, 50, 14, WS_TABSTOP
+    PUSHBUTTON      "Close", IDC_CLOSE, 242, 207, 50, 14, WS_TABSTOP
+END
+
+// General tab page.
+IDD_EDITOR_GENERAL DIALOGEX 0, 0, 300, 200
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Name:",     IDC_RULE_NAME,         6, 4, 286, 30, WS_GROUP
+    EDITTEXT                     IDC_RULE_NAME_ID,     12, 16, 274, 14, WS_TABSTOP | ES_AUTOHSCROLL
+
+    GROUPBOX        "Comments:", IDC_RULE_COMMENT,      6, 38, 286, 30, WS_GROUP
+    EDITTEXT                     IDC_RULE_COMMENT_ID,  12, 50, 274, 14, WS_TABSTOP | ES_AUTOHSCROLL
+
+    GROUPBOX        "Protocol:",            IDC_RULE_PROTOCOL,    6, 72, 140, 32, WS_GROUP
+    COMBOBOX                                IDC_RULE_PROTOCOL_ID,12, 84, 128, 80, CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+
+    GROUPBOX        "Family (ports only):", IDC_RULE_VERSION,    152, 72, 140, 32, WS_GROUP
+    COMBOBOX                                IDC_RULE_VERSION_ID, 158, 84, 128, 80, CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+
+    GROUPBOX        "Direction:", IDC_RULE_DIRECTION,    6, 108, 286, 32, WS_GROUP
+    COMBOBOX                      IDC_RULE_DIRECTION_ID,12, 120, 274, 80, CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+
+    GROUPBOX        "Action:",    IDC_RULE_ACTION,       6, 144, 286, 32, WS_GROUP
+    COMBOBOX                      IDC_RULE_ACTION_ID,   12, 156, 274, 80, CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+END
+
+// Rule tab page (remote + local rule fragments).
+IDD_EDITOR_RULE DIALOGEX 0, 0, 300, 200
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Remote:", IDC_RULE_REMOTE, 6, 4, 286, 70, WS_GROUP
+    CONTROL         "", IDC_RULE_REMOTE_ID, "SysListView32",
+                    LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHAREIMAGELISTS | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP | WS_VSCROLL,
+                    14, 16, 220, 50
+
+    PUSHBUTTON      "Add",    IDC_RULE_REMOTE_ADD,    240, 16, 46, 14, WS_TABSTOP
+    PUSHBUTTON      "Edit",   IDC_RULE_REMOTE_EDIT,   240, 34, 46, 14, WS_TABSTOP
+    PUSHBUTTON      "Delete", IDC_RULE_REMOTE_DELETE, 240, 52, 46, 14, WS_TABSTOP
+
+    GROUPBOX        "Local:", IDC_RULE_LOCAL, 6, 78, 286, 70, WS_GROUP
+    CONTROL         "", IDC_RULE_LOCAL_ID, "SysListView32",
+                    LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHAREIMAGELISTS | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP | WS_VSCROLL,
+                    14, 90, 220, 50
+
+    PUSHBUTTON      "Add",    IDC_RULE_LOCAL_ADD,    240, 90, 46, 14, WS_TABSTOP
+    PUSHBUTTON      "Edit",   IDC_RULE_LOCAL_EDIT,   240, 108, 46, 14, WS_TABSTOP
+    PUSHBUTTON      "Delete", IDC_RULE_LOCAL_DELETE, 240, 126, 46, 14, WS_TABSTOP
+
+    LTEXT           "If you leave the lists blank, the rule applies to any address and port.",
+                    IDC_RULE_HINT, 6, 154, 286, 22
+END
+
+// Apps tab page (search + checkbox listview).
+IDD_EDITOR_APPS DIALOGEX 0, 0, 300, 200
+STYLE WS_CHILD | WS_SYSMENU | WS_TABSTOP | WS_GROUP | DS_SHELLFONT | DS_CONTROL
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    EDITTEXT        IDC_SEARCH, 4, 4, 292, 14, WS_TABSTOP | ES_AUTOHSCROLL
+    CONTROL         "", IDC_RULE_APPS_ID, "SysListView32",
+                    LVS_REPORT | LVS_SHAREIMAGELISTS | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP | WS_VSCROLL,
+                    4, 22, 292, 154
+
+    LTEXT           "If no apps are selected, the rule applies to all apps.",
+                    IDC_RULE_APPS_HINT, 6, 180, 286, 14
+END
+
+// Add/edit-one-rule-fragment sub-dialog.
+IDD_EDITOR_ADDRULE DIALOGEX 0, 0, 280, 156
+STYLE WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_POPUP | WS_VISIBLE | WS_BORDER | WS_SYSMENU | WS_CAPTION | DS_SHELLFONT | DS_MODALFRAME
+CAPTION "Rule entry"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    EDITTEXT        IDC_RULE_ID,      8, 8, 264, 14, WS_TABSTOP | ES_AUTOHSCROLL
+
+    EDITTEXT        IDC_RULE_ID_HINT, 8, 28, 264, 96,
+                    WS_VSCROLL | NOT WS_TABSTOP | ES_AUTOVSCROLL | ES_READONLY | ES_MULTILINE
+
+    DEFPUSHBUTTON   "Save",  IDC_SAVE,  166, 132, 50, 14, WS_TABSTOP
+    PUSHBUTTON      "Close", IDC_CLOSE, 220, 132, 50, 14, WS_TABSTOP
+END
