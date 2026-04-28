@@ -20,6 +20,7 @@ pub mod dialogs;
 pub mod icons;
 pub mod ids;
 pub mod main_window;
+pub mod rule_editor;
 pub mod settings;
 pub mod toolbar;
 

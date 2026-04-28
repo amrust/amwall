@@ -36,14 +36,16 @@ use windows::Win32::UI::Controls::{
     ICC_BAR_CLASSES, ICC_COOL_CLASSES, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
     LVCFMT_RIGHT, LVCOLUMNW, LVIF_STATE, LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW,
-    LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVS_EX_CHECKBOXES,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR,
+    LVM_DELETEALLITEMS, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVN_KEYDOWN,
+    LVNI_SELECTED, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT,
+    LVS_SHOWSELALWAYS, NM_DBLCLK, NMHDR, NMLVKEYDOWN,
     NMTBGETINFOTIPW, SBARS_TOOLTIPS, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW,
     TBN_GETINFOTIPW, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW,
     TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu,
@@ -423,6 +425,19 @@ unsafe extern "system" fn wnd_proc(
                 let info = unsafe { &mut *(lparam.0 as *mut NMTBGETINFOTIPW) };
                 fill_toolbar_tooltip(info);
             }
+            // NM_DBLCLK on the User rules listview opens the rule
+            // editor for the clicked row.
+            if nmhdr.idFrom == IDC_RULES_CUSTOM as usize && nmhdr.code == NM_DBLCLK {
+                on_edit_selected_rule(hwnd);
+            }
+            // Delete key on the User rules listview removes the
+            // selected row (with confirm).
+            if nmhdr.idFrom == IDC_RULES_CUSTOM as usize && nmhdr.code == LVN_KEYDOWN {
+                let kd = unsafe { &*(lparam.0 as *const NMLVKEYDOWN) };
+                if kd.wVKey == VK_DELETE.0 {
+                    on_delete_selected_rule(hwnd);
+                }
+            }
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -790,6 +805,7 @@ fn on_command(hwnd: HWND, id: u32) {
         | IDM_CHECKUPDATES_CHK => on_toggle(hwnd, id),
 
         IDM_TRAY_START => on_enable_filters(hwnd),
+        IDM_OPENRULESEDITOR => on_create_rule(hwnd),
 
         other => eprintln!("simplewall-rs: menu id {other} not yet wired up"),
     }
@@ -985,6 +1001,153 @@ fn autosize_active_listview_columns(state: &WndState) {
                 LPARAM(-1), // LVSCW_AUTOSIZE
             );
         }
+    }
+}
+
+/// Toolbar "Create rule" / Edit menu equivalent: open the rule
+/// editor on a fresh blank rule. On OK, append to
+/// `profile.custom_rules`, persist, repopulate the User rules tab.
+fn on_create_rule(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let new_rule = match super::rule_editor::open(hwnd, None) {
+        Some(r) => r,
+        None => return, // Cancel
+    };
+    state.app.profile.borrow_mut().custom_rules.push(new_rule);
+    save_profile_to_disk(state);
+    populate_user_rules(state);
+    on_tab_change(hwnd);
+    set_status_text(state.status.get(), 0, "Rule added.");
+}
+
+/// Double-click handler for the User rules listview — opens the
+/// editor pre-filled with the clicked row's rule. On OK, swap the
+/// rule in place; persist and repopulate.
+fn on_edit_selected_rule(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let lv = state.listviews[5].get(); // index 5 = IDC_RULES_CUSTOM
+    if lv.0 == 0 {
+        return;
+    }
+    let idx = unsafe {
+        SendMessageW(
+            lv,
+            LVM_GETNEXTITEM,
+            WPARAM(usize::MAX), // -1 = start from before first item
+            LPARAM(LVNI_SELECTED as isize),
+        )
+    }
+    .0;
+    if idx < 0 {
+        return;
+    }
+    let idx = idx as usize;
+
+    // Clone for the editor — we need the borrow to drop before
+    // calling open() (which pumps Win32 messages and could
+    // re-entrantly touch the profile).
+    let existing = match state.app.profile.borrow().custom_rules.get(idx) {
+        Some(r) => r.clone(),
+        None => return,
+    };
+
+    let updated = match super::rule_editor::open(hwnd, Some(&existing)) {
+        Some(r) => r,
+        None => return,
+    };
+    if let Some(slot) = state.app.profile.borrow_mut().custom_rules.get_mut(idx) {
+        *slot = updated;
+    }
+    save_profile_to_disk(state);
+    populate_user_rules(state);
+    on_tab_change(hwnd);
+    set_status_text(state.status.get(), 0, "Rule updated.");
+}
+
+/// Delete-key handler for the User rules listview — confirm,
+/// then remove the selected row. Persist + repopulate.
+fn on_delete_selected_rule(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONQUESTION, MB_YESNO, IDYES};
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let lv = state.listviews[5].get();
+    if lv.0 == 0 {
+        return;
+    }
+    let idx = unsafe {
+        SendMessageW(
+            lv,
+            LVM_GETNEXTITEM,
+            WPARAM(usize::MAX),
+            LPARAM(LVNI_SELECTED as isize),
+        )
+    }
+    .0;
+    if idx < 0 {
+        return;
+    }
+    let idx = idx as usize;
+
+    let title = wide("Delete rule");
+    let rule_name = state
+        .app
+        .profile
+        .borrow()
+        .custom_rules
+        .get(idx)
+        .map(|r| r.name.clone())
+        .unwrap_or_default();
+    let body = wide(&format!("Delete the rule \"{rule_name}\"?"));
+    let answer = unsafe {
+        MessageBoxW(
+            hwnd,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    };
+    if answer != IDYES {
+        return;
+    }
+
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        if idx < profile.custom_rules.len() {
+            profile.custom_rules.remove(idx);
+        }
+    }
+    save_profile_to_disk(state);
+    populate_user_rules(state);
+    on_tab_change(hwnd);
+    set_status_text(state.status.get(), 0, "Rule deleted.");
+}
+
+/// Serialise the current in-memory profile back to its source
+/// path. Used after every Add/Edit/Delete so changes survive a
+/// restart even before the user explicitly hits Save / Export.
+/// Failures log to stderr + status bar; the in-memory edit
+/// stands either way (the user can still re-save via
+/// File > Export).
+fn save_profile_to_disk(state: &WndState) {
+    let path = state.app.profile_path.borrow().clone();
+    let xml = crate::profile::to_string(&state.app.profile.borrow());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, xml) {
+        eprintln!(
+            "simplewall-rs: profile auto-save failed for {}: {e}",
+            path.display()
+        );
+        set_status_text(state.status.get(), 0, "Auto-save failed.");
     }
 }
 
