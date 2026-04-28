@@ -15,6 +15,7 @@ use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows::Win32::System::Rpc::UuidCreate;
 use windows::core::{GUID, PWSTR};
 
+use super::condition::{self, FilterCondition};
 use super::{ERROR_SUCCESS, WfpEngine, WfpError};
 
 /// Handle to an installed WFP filter. Volatile — removed when the
@@ -59,11 +60,11 @@ impl FilterAction {
     }
 }
 
-/// Register a new volatile filter at `layer_key` under `sublayer_key`,
-/// taking the given action on every match.
+/// Register a new volatile filter at `layer_key` under `sublayer_key`.
 ///
-/// M1.4: zero filter conditions — the filter matches all traffic at
-/// the chosen layer. M1.5 adds the conditions parameter.
+/// `conditions` describes the match clauses combined with AND
+/// semantics — a filter matches a packet only when every condition
+/// matches. An empty slice means "match all traffic at this layer."
 ///
 /// Requires admin. Returns the filter key (GUID) and runtime id.
 #[allow(clippy::too_many_arguments)]
@@ -74,6 +75,7 @@ pub fn add(
     layer_key: &GUID,
     sublayer_key: &GUID,
     provider_key: Option<&GUID>,
+    conditions: &[FilterCondition],
     action: FilterAction,
 ) -> Result<Filter, WfpError> {
     let mut key = GUID::zeroed();
@@ -88,6 +90,13 @@ pub fn add(
         .chain(std::iter::once(0))
         .collect();
 
+    // Compile conditions into FWPM_FILTER_CONDITION0 + backing
+    // pointer storage. `compiled` must outlive the FwpmFilterAdd0
+    // call below — every pointer in compiled.as_native_slice()
+    // references into its `Box`-owned storage.
+    let compiled = condition::compile(conditions);
+    let cond_slice = compiled.as_native_slice();
+
     let mut filter: FWPM_FILTER0 = unsafe { std::mem::zeroed() };
     filter.filterKey = key;
     filter.displayData = FWPM_DISPLAY_DATA0 {
@@ -97,8 +106,13 @@ pub fn add(
     filter.layerKey = *layer_key;
     filter.subLayerKey = *sublayer_key;
     // weight stays FWP_EMPTY (zero-init) — kernel auto-assigns weight
-    // in the sublayer. M1.5+ may expose explicit uint64 weight.
-    // numFilterConditions=0, filterCondition=NULL — match all traffic.
+    // in the sublayer. Explicit uint64 weight may be exposed later.
+    filter.numFilterConditions = cond_slice.len() as u32;
+    if !cond_slice.is_empty() {
+        // FWPM_FILTER0::filterCondition is `*mut FWPM_FILTER_CONDITION0`.
+        // The kernel reads but does not write through this pointer.
+        filter.filterCondition = cond_slice.as_ptr() as *mut _;
+    }
     filter.action = FWPM_ACTION0 {
         r#type: action.to_fwp(),
         ..unsafe { std::mem::zeroed() }
@@ -129,15 +143,19 @@ pub fn add(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
+    use crate::wfp::condition::{FilterCondition, IpProto};
     use crate::wfp::{provider, sublayer};
     use windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_LAYER_ALE_AUTH_CONNECT_V4;
 
     /// Live admin-only smoke test: end-to-end provider → sublayer →
     /// filter chain at the IPv4 outbound-connect ALE layer with a
-    /// permit action. Uses Permit (not Block) so even if the engine
-    /// session somehow leaks the filter, it doesn't cut network
-    /// access — fail-open beats fail-closed for a test.
+    /// permit action and zero conditions (matches all traffic at the
+    /// layer). Uses Permit (not Block) so even if the engine session
+    /// somehow leaks the filter, it doesn't cut network access —
+    /// fail-open beats fail-closed for a test.
     ///
     /// Run with `cargo test -- --ignored` from an elevated shell.
     #[test]
@@ -161,6 +179,7 @@ mod tests {
             &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
             &sub.key(),
             Some(&prov.key()),
+            &[],
             FilterAction::Permit,
         )
         .expect("FwpmFilterAdd0 failed");
@@ -170,6 +189,49 @@ mod tests {
             (0, 0, 0, [0u8; 8]),
             "filter key was nil GUID"
         );
+        assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
+    }
+
+    /// Live admin-only smoke test: filter with TCP-protocol +
+    /// remote-port-65530 + remote-CIDR conditions. Permit action so
+    /// the filter never blocks legitimate traffic, and uses port
+    /// 65530 + 198.51.100.0/24 (TEST-NET-2 documentation range,
+    /// RFC 5737) which no real flow will hit. Validates that the
+    /// FWPM_FILTER_CONDITION0 array round-trips correctly through the
+    /// kernel's parameter validation.
+    #[test]
+    #[ignore = "requires elevated shell to call FwpmFilterAdd0"]
+    fn add_filter_with_conditions_admin_smoke() {
+        let engine = WfpEngine::open().expect("engine open failed");
+        let prov = provider::add(&engine, "simplewall-rs test", "test provider")
+            .expect("provider add failed");
+        let sub = sublayer::add(
+            &engine,
+            "simplewall-rs cond test sublayer",
+            "test sublayer",
+            0x4000,
+            Some(&prov.key()),
+        )
+        .expect("sublayer add failed");
+        let conds = [
+            FilterCondition::Protocol(IpProto::Tcp),
+            FilterCondition::RemotePort(65530),
+            FilterCondition::RemoteAddrV4 {
+                addr: Ipv4Addr::new(198, 51, 100, 0),
+                prefix: Some(24),
+            },
+        ];
+        let f = add(
+            &engine,
+            "simplewall-rs cond test filter",
+            "permit tcp:198.51.100.0/24:65530",
+            &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            &sub.key(),
+            Some(&prov.key()),
+            &conds,
+            FilterAction::Permit,
+        )
+        .expect("FwpmFilterAdd0 with conditions failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
     }
 }

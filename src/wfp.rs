@@ -11,6 +11,7 @@
 // `lib.rs` (`#[cfg(windows)] pub mod wfp;`), so this file does not
 // repeat the cfg attribute.
 
+pub mod condition;
 pub mod filter;
 pub mod provider;
 pub mod sublayer;
