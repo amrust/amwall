@@ -35,9 +35,10 @@ use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificL
 use windows::Win32::UI::Controls::{
     ICC_BAR_CLASSES, ICC_COOL_CLASSES, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
-    LVCFMT_RIGHT, LVCOLUMNW, LVIF_STATE, LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW,
-    LVM_DELETEALLITEMS, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVN_KEYDOWN,
+    LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_STATE, LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW,
+    LVM_DELETEALLITEMS, LVM_GETITEM, LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW,
+    LVN_KEYDOWN,
     LVNI_SELECTED, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT,
     LVS_SHOWSELALWAYS, NM_DBLCLK, NM_RCLICK, NMHDR, NMITEMACTIVATE, NMLVKEYDOWN,
     NMTBGETINFOTIPW, SBARS_TOOLTIPS, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW,
@@ -298,6 +299,23 @@ const EVENT_DRAIN_INTERVAL_MS: u32 = 500;
 /// be missed in other edge cases.
 const TIMER_RESIZE_CLEANUP: usize = 9003;
 const RESIZE_CLEANUP_MS: u32 = 100;
+
+/// One-shot timer fired shortly after `LVN_GROUPINFO` reports a
+/// group state change (typically the user clicking a collapse
+/// chevron). Mirrors `TIMER_RESIZE_CLEANUP` — same paint-pipeline
+/// class of bug as M5.9.5 (listview internal layout doesn't pick
+/// up the new geometry without a 1-pixel jiggle). Delaying past the
+/// collapse animation avoids fighting comctl's own paint.
+const TIMER_GROUP_COLLAPSE_REPAINT: usize = 9004;
+const GROUP_COLLAPSE_REPAINT_MS: u32 = 100;
+
+/// `LVN_GROUPINFO` — sent by a list-view control when a group's
+/// state has changed (collapsed, expanded, …). Not exposed as a
+/// public constant in windows-rs 0.54, so we hardcode it: the value
+/// is `LVN_FIRST - 88` per comctl headers, where `LVN_FIRST` is
+/// `(0u32 - 100u32) = 4294967196`. Verified live: this is the only
+/// notification that fires on chevron clicks.
+const LVN_GROUPINFO: u32 = 0xFFFFFF44;
 
 /// Register the window class, create the main window, show it.
 /// Ownership of `app` is transferred into the window's
@@ -616,6 +634,29 @@ unsafe extern "system" fn wnd_proc(
                 let activate = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
                 on_apps_context_menu(hwnd, nmhdr.idFrom as i32, activate);
             }
+            // LVN_GROUPINFO fires whenever a group's state changes —
+            // most importantly when the user clicks a collapse
+            // chevron. comctl32 doesn't expose any other notification
+            // for that gesture, so this is the canonical hook.
+            // Schedule the same paint-jiggle the resize cleanup uses
+            // so collapsed/expanded items render cleanly.
+            if nmhdr.code == LVN_GROUPINFO
+                && (nmhdr.idFrom == IDC_APPS_PROFILE as usize
+                    || nmhdr.idFrom == IDC_APPS_SERVICE as usize
+                    || nmhdr.idFrom == IDC_APPS_UWP as usize
+                    || nmhdr.idFrom == IDC_RULES_BLOCKLIST as usize
+                    || nmhdr.idFrom == IDC_RULES_SYSTEM as usize
+                    || nmhdr.idFrom == IDC_RULES_CUSTOM as usize)
+            {
+                unsafe {
+                    SetTimer(
+                        hwnd,
+                        TIMER_GROUP_COLLAPSE_REPAINT,
+                        GROUP_COLLAPSE_REPAINT_MS,
+                        None,
+                    );
+                }
+            }
             // Delete key on the User rules listview removes the
             // selected row (with confirm).
             if nmhdr.idFrom == IDC_RULES_CUSTOM as usize && nmhdr.code == LVN_KEYDOWN {
@@ -649,6 +690,18 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(state) = unsafe { state_ref(hwnd) } {
                     drain_events(hwnd, state);
                 }
+            } else if wparam.0 == TIMER_GROUP_COLLAPSE_REPAINT {
+                // One-shot — disarm before any further work so a
+                // re-arm during repaint doesn't recurse.
+                unsafe {
+                    let _ = KillTimer(hwnd, TIMER_GROUP_COLLAPSE_REPAINT);
+                }
+                // The active listview is whichever tab is selected;
+                // running on_tab_change does the SW_SHOW + force-
+                // repaint jiggle that fixes paint glitches without
+                // re-inserting items (so the user's just-collapsed
+                // state survives).
+                on_tab_change(hwnd);
             } else if wparam.0 == TIMER_RESIZE_CLEANUP {
                 // One-shot. Disarm immediately so we don't keep
                 // jiggling on every tick after a single resize.
@@ -1516,7 +1569,14 @@ fn on_context_set_enabled(hwnd: HWND, enable: bool) {
     }
 
     save_profile_to_disk(state);
+    // Refresh all three apps tabs — the change can be visible on
+    // any of them: the new App entry appears in Profile, the
+    // matched-by-image_path service moves to Allowed/Blocked group
+    // in Services, UWP isn't path-matched yet so it doesn't move
+    // but the call is harmless.
     populate_apps_tab(state);
+    populate_services_tab(state);
+    populate_uwp_tab(state);
     on_tab_change(hwnd);
 
     let verb = if enable { "Allowed" } else { "Blocked" };
@@ -1545,6 +1605,8 @@ fn on_context_remove(hwnd: HWND) {
     }
     save_profile_to_disk(state);
     populate_apps_tab(state);
+    populate_services_tab(state);
+    populate_uwp_tab(state);
     on_tab_change(hwnd);
     set_status_text(
         state.status.get(),
@@ -2545,7 +2607,131 @@ fn configure_listview(lv: HWND, id: i32, dpi: u32) -> Result<(), String> {
         other => return Err(format!("unknown listview id {other}")),
     }
 
+    // Group view (M5.4d): Apps tabs get the upstream 5-bucket
+    // Allowed/Timer/Special/Blocked/Blocked-silent layout; Rules
+    // tabs get a 2-bucket Enabled/Disabled split. Group titles are
+    // placeholders here ("Allowed", "Blocked", ...) — the populators
+    // re-render them with `(group_count/total_count)` suffixes after
+    // each populate. Network and Log don't use groups; they're
+    // chronological transient lists.
+    match id {
+        IDC_APPS_PROFILE | IDC_APPS_SERVICE | IDC_APPS_UWP => {
+            super::listview_groups::enable(lv);
+            insert_apps_groups(lv);
+        }
+        IDC_RULES_BLOCKLIST | IDC_RULES_SYSTEM | IDC_RULES_CUSTOM => {
+            super::listview_groups::enable(lv);
+            insert_rules_groups(lv);
+        }
+        _ => {}
+    }
+
     Ok(())
+}
+
+fn insert_apps_groups(lv: HWND) {
+    use super::listview_groups::{
+        GROUP_APP_ALLOWED, GROUP_APP_BLOCKED, GROUP_APP_BLOCKED_SILENT, GROUP_APP_SPECIAL,
+        GROUP_APP_TIMER, insert,
+    };
+    for (gid, title) in [
+        (GROUP_APP_ALLOWED, "Allowed"),
+        (GROUP_APP_TIMER, "Timer"),
+        (GROUP_APP_SPECIAL, "Special apps"),
+        (GROUP_APP_BLOCKED, "Blocked"),
+        (GROUP_APP_BLOCKED_SILENT, "Blocked (silent)"),
+    ] {
+        let mut wtitle = wide(title);
+        insert(lv, gid, &mut wtitle);
+    }
+}
+
+fn insert_rules_groups(lv: HWND) {
+    use super::listview_groups::{GROUP_RULE_DISABLED, GROUP_RULE_ENABLED, insert};
+    for (gid, title) in [
+        (GROUP_RULE_ENABLED, "Enabled"),
+        (GROUP_RULE_DISABLED, "Disabled"),
+    ] {
+        let mut wtitle = wide(title);
+        insert(lv, gid, &mut wtitle);
+    }
+}
+
+/// Re-render the apps-tab group headers with `(count/total)`
+/// suffixes after a populate. Walks `iGroupId` per item — cheap
+/// since the listview is in-memory and small (≤500 rows even on
+/// large machines after refresh).
+fn refresh_apps_group_headers(lv: HWND) {
+    use super::listview_groups::{
+        GROUP_APP_ALLOWED, GROUP_APP_BLOCKED, GROUP_APP_BLOCKED_SILENT, GROUP_APP_SPECIAL,
+        GROUP_APP_TIMER, set_header,
+    };
+    let total = unsafe {
+        SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0))
+    }
+    .0 as i32;
+    let mut counts: [i32; 5] = [0; 5];
+    for row in 0..total {
+        if let Some(gid) = listview_item_group(lv, row) {
+            if (0..5).contains(&gid) {
+                counts[gid as usize] += 1;
+            }
+        }
+    }
+    let labels = [
+        (GROUP_APP_ALLOWED, "Allowed"),
+        (GROUP_APP_TIMER, "Timer"),
+        (GROUP_APP_SPECIAL, "Special apps"),
+        (GROUP_APP_BLOCKED, "Blocked"),
+        (GROUP_APP_BLOCKED_SILENT, "Blocked (silent)"),
+    ];
+    for (gid, base) in labels {
+        let n = counts[gid as usize];
+        let mut wtitle = wide(&format!("{base} ({n}/{total})"));
+        set_header(lv, gid, &mut wtitle);
+    }
+}
+
+/// Same idea as `refresh_apps_group_headers` for rules tabs.
+fn refresh_rules_group_headers(lv: HWND) {
+    use super::listview_groups::{GROUP_RULE_DISABLED, GROUP_RULE_ENABLED, set_header};
+    let total = unsafe {
+        SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0))
+    }
+    .0 as i32;
+    let mut enabled = 0i32;
+    let mut disabled = 0i32;
+    for row in 0..total {
+        match listview_item_group(lv, row) {
+            Some(g) if g == GROUP_RULE_ENABLED => enabled += 1,
+            Some(g) if g == GROUP_RULE_DISABLED => disabled += 1,
+            _ => {}
+        }
+    }
+    let mut w_enabled = wide(&format!("Enabled ({enabled}/{total})"));
+    let mut w_disabled = wide(&format!("Disabled ({disabled}/{total})"));
+    set_header(lv, GROUP_RULE_ENABLED, &mut w_enabled);
+    set_header(lv, GROUP_RULE_DISABLED, &mut w_disabled);
+}
+
+/// Read the `iGroupId` of the row at `idx`. Wraps the LVM_GETITEM
+/// dance — LVITEMW.iGroupId is only filled when LVIF_GROUPID is in
+/// the request mask.
+fn listview_item_group(lv: HWND, idx: i32) -> Option<i32> {
+    let mut item = LVITEMW {
+        mask: LVIF_GROUPID,
+        iItem: idx,
+        ..Default::default()
+    };
+    let res = unsafe {
+        SendMessageW(
+            lv,
+            LVM_GETITEM,
+            WPARAM(0),
+            LPARAM(&mut item as *mut _ as isize),
+        )
+    };
+    if res.0 == 0 { None } else { Some(item.iGroupId) }
 }
 
 fn add_column(
@@ -2609,10 +2795,11 @@ fn populate_user_rules(state: &WndState) {
         row += 1;
         let mut name_buf = wide(&rule.name);
         let item = LVITEMW {
-            mask: LVIF_TEXT,
+            mask: LVIF_TEXT | LVIF_GROUPID,
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
+            iGroupId: super::listview_groups::rule_group_id(rule),
             ..Default::default()
         };
         let _ = unsafe {
@@ -2648,6 +2835,8 @@ fn populate_user_rules(state: &WndState) {
         set_subitem(lv, idx as i32, 1, &protocol);
         set_subitem(lv, idx as i32, 2, direction);
     }
+    drop(profile);
+    refresh_rules_group_headers(lv);
 }
 
 /// Wipe the Apps ListView (IDC_APPS_PROFILE) and re-fill from
@@ -2700,12 +2889,13 @@ fn populate_apps_tab(state: &WndState) {
         // alongside the row insert.
         let state_image_index = if app.is_enabled { 2u32 } else { 1u32 };
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image_index << 12),
+            iGroupId: super::listview_groups::app_group_id(app),
             ..Default::default()
         };
         let _ = unsafe {
@@ -2724,6 +2914,8 @@ fn populate_apps_tab(state: &WndState) {
         };
         set_subitem(lv, idx as i32, 1, &added);
     }
+    drop(profile);
+    refresh_apps_group_headers(lv);
 }
 
 /// Populate the Apps → Services tab from the cached SCM enumeration
@@ -2742,6 +2934,7 @@ fn populate_services_tab(state: &WndState) {
     }
 
     let services = state.services.borrow();
+    let profile = state.app.profile.borrow();
     let filter = state.search_text.borrow().clone();
     let mut row = 0i32;
     for svc in services.iter() {
@@ -2760,15 +2953,27 @@ fn populate_services_tab(state: &WndState) {
         let i = row;
         row += 1;
         let mut name_buf = wide(name_for_display);
+
+        // Group + checkbox state both come from any matching profile
+        // App. Unmanaged services (no profile entry) are checkbox-
+        // off and group as Blocked (amwall's default-deny baseline).
+        let matched_app = profile.apps.iter().find(|a| a.path == svc.image_path);
+        let (group_id, state_image) = match matched_app {
+            Some(a) => (
+                super::listview_groups::app_group_id(a),
+                if a.is_enabled { 2u32 } else { 1u32 },
+            ),
+            None => (super::listview_groups::GROUP_APP_BLOCKED, 1u32),
+        };
+
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
             iItem: i,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
-            // Unchecked by default (state image 1) — no profile rule
-            // exists for this service yet.
-            state: LIST_VIEW_ITEM_STATE_FLAGS(1u32 << 12),
+            state: LIST_VIEW_ITEM_STATE_FLAGS(state_image << 12),
+            iGroupId: group_id,
             ..Default::default()
         };
         let _ = unsafe {
@@ -2781,6 +2986,9 @@ fn populate_services_tab(state: &WndState) {
         };
         // "Added" column stays empty for system-discovered services.
     }
+    drop(profile);
+    drop(services);
+    refresh_apps_group_headers(lv);
 }
 
 /// Populate the Apps → UWP tab from the cached registry walk
@@ -2809,12 +3017,15 @@ fn populate_uwp_tab(state: &WndState) {
         row += 1;
         let mut name_buf = wide(&pkg.display_name);
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
             iItem: i,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(1u32 << 12),
+            // UWP packages have no path-based App match yet, so
+            // they uniformly land in Blocked (default-deny).
+            iGroupId: super::listview_groups::GROUP_APP_BLOCKED,
             ..Default::default()
         };
         let _ = unsafe {
@@ -2826,6 +3037,8 @@ fn populate_uwp_tab(state: &WndState) {
             )
         };
     }
+    drop(packages);
+    refresh_apps_group_headers(lv);
 }
 
 /// Re-walk SCM and the UWP repository, replacing the cached
@@ -3208,12 +3421,13 @@ fn populate_internal_rules(state: &WndState, id: i32) {
         let mut name_buf = wide(&rule.name);
         let state_image = if rule.is_enabled { 2u32 } else { 1u32 };
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image << 12),
+            iGroupId: super::listview_groups::rule_group_id(rule),
             ..Default::default()
         };
         let _ = unsafe {
@@ -3242,6 +3456,7 @@ fn populate_internal_rules(state: &WndState, id: i32) {
         set_subitem(lv, idx as i32, 1, &protocol);
         set_subitem(lv, idx as i32, 2, direction);
     }
+    refresh_rules_group_headers(lv);
 }
 
 fn set_subitem(lv: HWND, row: i32, sub: i32, text: &str) {

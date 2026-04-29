@@ -22,6 +22,7 @@ pub mod event_log;
 pub mod font;
 pub mod icons;
 pub mod ids;
+pub mod listview_groups;
 pub mod main_window;
 pub mod notification;
 pub mod rule_editor;
