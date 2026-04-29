@@ -27,6 +27,13 @@
 #define IDD_EDITOR_RULE         104
 #define IDD_EDITOR_APPS         105
 #define IDD_EDITOR_ADDRULE      106
+#define IDD_APP_PROPERTIES      110
+
+// App properties dialog (M5.4c follow-up).
+#define IDC_APPPROP_PATH_ID     1100
+#define IDC_APPPROP_COMMENT_ID  1101
+#define IDC_APPPROP_ENABLED_CHK 1102
+#define IDC_APPPROP_SILENT_CHK  1103
 
 #define IDC_TAB                 105
 #define IDC_ENABLE_CHK          250
@@ -448,4 +455,34 @@ BEGIN
 
     DEFPUSHBUTTON   "Save",  IDC_SAVE,  166, 132, 50, 14, WS_TABSTOP
     PUSHBUTTON      "Close", IDC_CLOSE, 220, 132, 50, 14, WS_TABSTOP
+END
+
+// ---------------------------------------------------------------
+// App properties dialog (M5.4c follow-up — modeled on the Settings
+// page templates: fixed-size, dialog-template-driven, modal).
+// Shown when the user picks Properties on a row in any of the
+// Apps / Services / UWP tabs.
+// ---------------------------------------------------------------
+IDD_APP_PROPERTIES DIALOGEX 0, 0, 270, 130
+STYLE WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_POPUP | WS_VISIBLE | WS_BORDER | WS_SYSMENU | WS_CAPTION | DS_SHELLFONT | DS_MODALFRAME
+EXSTYLE WS_EX_APPWINDOW | WS_EX_CONTROLPARENT
+CAPTION "App properties"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Path:", -1, 4, 4, 262, 32, WS_GROUP
+    EDITTEXT        IDC_APPPROP_PATH_ID, 10, 16, 250, 14,
+                    WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY
+
+    GROUPBOX        "Comment:", -1, 4, 40, 262, 32, WS_GROUP
+    EDITTEXT        IDC_APPPROP_COMMENT_ID, 10, 52, 250, 14,
+                    WS_TABSTOP | ES_AUTOHSCROLL
+
+    GROUPBOX        "Settings:", -1, 4, 76, 262, 30, WS_GROUP
+    AUTOCHECKBOX    "Enabled (allow this app's traffic)",
+                    IDC_APPPROP_ENABLED_CHK, 12, 88, 150, 12, WS_TABSTOP
+    AUTOCHECKBOX    "Silent (no notifications)",
+                    IDC_APPPROP_SILENT_CHK,  166, 88, 96,  12, WS_TABSTOP
+
+    DEFPUSHBUTTON   "Save",  IDC_SAVE,  158, 110, 50, 14, WS_TABSTOP
+    PUSHBUTTON      "Close", IDC_CLOSE, 212, 110, 50, 14, WS_TABSTOP
 END

@@ -1662,21 +1662,53 @@ fn on_context_copy(hwnd: HWND) {
     set_clipboard_text(hwnd, &text);
 }
 
-/// Properties: open the rule editor / app properties pane. For now,
-/// only fires for in-profile entries; UWP and not-yet-added Service
-/// rows have it grayed out in the menu. The handler is a stub —
-/// proper "App properties" dialog parity is M5.5d follow-up.
+/// Properties: open the App properties modal for the right-clicked
+/// row's profile entry. Grayed out in the menu for UWP and not-yet-
+/// added rows, so when this fires we know `target.in_profile` is
+/// true and `target.binary_path` matches an `App` in the profile.
+/// On Save, replace the matched entry, persist, repopulate.
 fn on_context_properties(hwnd: HWND) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
         None => return,
     };
+    let target = match state.context_target.borrow().clone() {
+        Some(t) => t,
+        None => return,
+    };
+    if !target.in_profile || target.binary_path.as_os_str().is_empty() {
+        return;
+    }
+
+    let initial = {
+        let profile = state.app.profile.borrow();
+        match profile.apps.iter().find(|a| a.path == target.binary_path) {
+            Some(a) => a.clone(),
+            None => return,
+        }
+    };
+
+    let updated = match super::app_properties::open(hwnd, &initial) {
+        Some(u) => u,
+        None => return, // Close / no edits.
+    };
+
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        if let Some(slot) = profile.apps.iter_mut().find(|a| a.path == target.binary_path) {
+            *slot = updated;
+        }
+    }
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    populate_services_tab(state);
+    populate_uwp_tab(state);
+    on_tab_change(hwnd);
     set_status_text(
         state.status.get(),
         0,
-        "App properties dialog not yet implemented (M5.5d).",
+        &format!("Saved: {}", target.display_name),
     );
-    let _ = hwnd;
 }
 
 /// Push UTF-16 text to the clipboard. Standard Win32 idiom:
