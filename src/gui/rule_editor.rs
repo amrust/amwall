@@ -43,7 +43,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CreateDialogParamW,
     DialogBoxParamW, EndDialog, GWLP_USERDATA, GetClientRect, GetDlgItem, GetWindowLongPtrW,
-    IDCANCEL, IDOK, MoveWindow, SW_HIDE, SW_SHOW, SendDlgItemMessageW, SendMessageW,
+    IDCANCEL, IDOK, SW_HIDE, SW_SHOW, SendDlgItemMessageW, SendMessageW,
     SetWindowLongPtrW, ShowWindow, WM_COMMAND, WM_INITDIALOG, WM_NOTIFY, WM_SIZE,
 };
 use windows::core::PCWSTR;
@@ -299,14 +299,14 @@ fn on_init_parent(hwnd: HWND) {
 }
 
 fn on_size_parent(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+    };
+
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
         None => return,
     };
-    // Tab control is the only direct child we need to resize on
-    // WM_SIZE; the Save/Close buttons + Enable checkbox stay at
-    // their dialog-template positions because we don't move them.
-    // Tab content rect drives where the tab pages live.
     let tab = unsafe { GetDlgItem(hwnd, IDC_TAB) };
     if tab.0 == 0 {
         return;
@@ -317,19 +317,19 @@ fn on_size_parent(hwnd: HWND) {
     }
     let total_w = client.right - client.left;
     let total_h = client.bottom - client.top;
-    // Reserve 38px at the bottom for the Enable checkbox + Save +
-    // Close. Matches the dialog template's spacing.
-    let bottom_strip = 38;
-    unsafe {
-        let _ = MoveWindow(tab, 0, 0, total_w, total_h - bottom_strip, true);
-    }
 
-    // Position each tab page inside the tab control's content rect.
+    // Reserve a 50-px bottom strip for Enable checkbox (left) +
+    // Save/Close buttons (right). Larger than necessary so the
+    // tab content has visible breathing room from the buttons.
+    let bottom_strip = 50;
+    let tab_h = (total_h - bottom_strip).max(0);
+
+    // Tab content rect — where the three tab pages live.
     let mut content = RECT {
         left: 0,
         top: 0,
         right: total_w,
-        bottom: total_h - bottom_strip,
+        bottom: tab_h,
     };
     unsafe {
         SendMessageW(
@@ -341,22 +341,104 @@ fn on_size_parent(hwnd: HWND) {
     }
     let cw = content.right - content.left;
     let ch = content.bottom - content.top;
-    for &page in &[state.page_general, state.page_rule, state.page_apps] {
-        if page.0 == 0 {
-            continue;
-        }
-        unsafe {
-            let _ = MoveWindow(page, content.left, content.top, cw, ch, true);
-            // MoveWindow only invalidates the page's own rect;
-            // its dialog children keep stale paint state and
-            // disappear visually until the next implicit redraw.
-            use windows::Win32::Graphics::Gdi::{
-                InvalidateRect, RDW_ALLCHILDREN, RDW_INVALIDATE, RedrawWindow,
-            };
-            let _ = RedrawWindow(page, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
-            let _ = InvalidateRect(page, None, true);
+
+    // Atomic batched move — same pattern upstream uses
+    // (controls.c:_app_window_resize). The Win32 dialog manager
+    // computes the affected paint regions for all batched
+    // windows together and issues one synchronized invalidation,
+    // which avoids the "stale rect under a child window" bug
+    // that individual MoveWindow calls exhibit.
+    //
+    // Batch slots: tab + 3 pages + Enable + Save + Close = 7.
+    unsafe {
+        if let Ok(mut hdwp) = BeginDeferWindowPos(7) {
+            if let Ok(h) = DeferWindowPos(
+                hdwp,
+                tab,
+                HWND::default(),
+                0,
+                0,
+                total_w,
+                tab_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            ) {
+                hdwp = h;
+            }
+            for &page in &[state.page_general, state.page_rule, state.page_apps] {
+                if page.0 == 0 {
+                    continue;
+                }
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    page,
+                    HWND::default(),
+                    content.left,
+                    content.top,
+                    cw,
+                    ch,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
+            // Bottom strip: Enable on the left, Save + Close on
+            // the right. Same fixed widths as the dialog
+            // template so resizing only changes positions, not
+            // the buttons' shape.
+            let btn_w = 80;
+            let btn_h = 26;
+            let btn_y = total_h - btn_h - 12;
+            let close_x = total_w - btn_w - 12;
+            let save_x = close_x - btn_w - 6;
+            let enable = GetDlgItem(hwnd, IDC_ENABLE_CHK);
+            let save = GetDlgItem(hwnd, IDC_SAVE);
+            let close = GetDlgItem(hwnd, IDC_CLOSE);
+            if enable.0 != 0 {
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    enable,
+                    HWND::default(),
+                    12,
+                    btn_y + 4,
+                    160,
+                    btn_h - 4,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
+            if save.0 != 0 {
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    save,
+                    HWND::default(),
+                    save_x,
+                    btn_y,
+                    btn_w,
+                    btn_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
+            if close.0 != 0 {
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    close,
+                    HWND::default(),
+                    close_x,
+                    btn_y,
+                    btn_w,
+                    btn_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
+            let _ = EndDeferWindowPos(hdwp);
         }
     }
+
     // Apps listview column width tracks pane width.
     if state.page_apps.0 != 0 {
         let lv = unsafe { GetDlgItem(state.page_apps, IDC_RULE_APPS_ID) };

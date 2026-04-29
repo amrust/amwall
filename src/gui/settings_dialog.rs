@@ -30,7 +30,7 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, CreateDialogParamW, DialogBoxParamW, EndDialog, GWLP_USERDATA,
-    GetClientRect, GetDlgItem, GetWindowLongPtrW, IDCANCEL, IDOK, MoveWindow, SW_HIDE, SW_SHOW,
+    GetClientRect, GetDlgItem, GetWindowLongPtrW, IDCANCEL, IDOK, SW_HIDE, SW_SHOW,
     SendDlgItemMessageW, SendMessageW, SetWindowLongPtrW, ShowWindow, WM_COMMAND, WM_INITDIALOG,
     WM_NOTIFY, WM_SIZE,
 };
@@ -264,6 +264,12 @@ fn on_init_parent(hwnd: HWND) {
 }
 
 fn on_size_parent(hwnd: HWND) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::Controls::TCM_ADJUSTRECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+    };
+
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
         None => return,
@@ -272,24 +278,33 @@ fn on_size_parent(hwnd: HWND) {
     if tab.0 == 0 {
         return;
     }
-    let mut client = windows::Win32::Foundation::RECT::default();
+    let mut client = RECT::default();
     if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
         return;
     }
     let total_w = client.right - client.left;
     let total_h = client.bottom - client.top;
-    let bottom_strip = 32;
-    unsafe {
-        let _ = MoveWindow(tab, 0, 0, total_w, total_h - bottom_strip, true);
-    }
-    let mut content = windows::Win32::Foundation::RECT {
+
+    // Reserve the bottom strip for Save / Close. Buttons are 26
+    // tall + 8px top padding + 8px bottom padding = 42; leave a
+    // little extra so the content doesn't touch the buttons.
+    let bottom_strip = 50;
+    let tab_h = (total_h - bottom_strip).max(0);
+
+    // Compute tab content rect (where pages live) once so we can
+    // include both tab + each page in a single DeferWindowPos
+    // batch. Atomic batched move is the upstream pattern — Win32
+    // computes the affected paint regions for every member of the
+    // batch together and issues one synchronized invalidation,
+    // which is what avoids the "stale rect" blank-content bug we
+    // hit with individual MoveWindow calls.
+    let mut content = RECT {
         left: 0,
         top: 0,
         right: total_w,
-        bottom: total_h - bottom_strip,
+        bottom: tab_h,
     };
     unsafe {
-        use windows::Win32::UI::Controls::TCM_ADJUSTRECT;
         SendMessageW(
             tab,
             TCM_ADJUSTRECT,
@@ -299,22 +314,82 @@ fn on_size_parent(hwnd: HWND) {
     }
     let cw = content.right - content.left;
     let ch = content.bottom - content.top;
-    for &p in &state.pages {
-        if p.0 != 0 {
-            unsafe {
-                let _ = MoveWindow(p, content.left, content.top, cw, ch, true);
-                // Force a full descendant invalidation — without
-                // this the page's controls keep their pre-resize
-                // paint regions and effectively disappear when
-                // the page is grown (the new area is the parent's
-                // background; the controls themselves never get
-                // a paint message).
-                use windows::Win32::Graphics::Gdi::{
-                    InvalidateRect, RDW_ALLCHILDREN, RDW_INVALIDATE, RedrawWindow,
-                };
-                let _ = RedrawWindow(p, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
-                let _ = InvalidateRect(p, None, true);
+
+    // Batch size: tab + 8 pages + 2 buttons = 11.
+    unsafe {
+        if let Ok(mut hdwp) = BeginDeferWindowPos(11) {
+            // Tab control fills the area above the bottom strip.
+            if let Ok(h) = DeferWindowPos(
+                hdwp,
+                tab,
+                HWND::default(),
+                0,
+                0,
+                total_w,
+                tab_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            ) {
+                hdwp = h;
             }
+
+            // Each page fills the tab control's content rect.
+            for &p in &state.pages {
+                if p.0 == 0 {
+                    continue;
+                }
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    p,
+                    HWND::default(),
+                    content.left,
+                    content.top,
+                    cw,
+                    ch,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
+
+            // Save / Close anchored bottom-right. Static widths
+            // (74) match the dialog template's button size.
+            let btn_w = 74;
+            let btn_h = 26;
+            let btn_y = total_h - btn_h - 12;
+            let close_x = total_w - btn_w - 12;
+            let save_x = close_x - btn_w - 6;
+            let save = GetDlgItem(hwnd, IDC_SETTINGS_SAVE);
+            let close = GetDlgItem(hwnd, IDC_SETTINGS_CLOSE);
+            if save.0 != 0 {
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    save,
+                    HWND::default(),
+                    save_x,
+                    btn_y,
+                    btn_w,
+                    btn_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
+            if close.0 != 0 {
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    close,
+                    HWND::default(),
+                    close_x,
+                    btn_y,
+                    btn_w,
+                    btn_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
+
+            let _ = EndDeferWindowPos(hdwp);
         }
     }
 }

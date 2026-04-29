@@ -657,11 +657,15 @@ fn on_size(hwnd: HWND) {
     }
     let tab_y = rebar_h;
     let tab_h = (total_h - rebar_h - status_h).max(0);
-    unsafe {
-        let _ = MoveWindow(tab, 0, tab_y, total_w, tab_h, true);
-    }
 
-    // Per-tab listviews fill the tab control's content area.
+    // Compute the tab content rect once before we start the
+    // batched move so all of (tab + listviews) update atomically.
+    // BeginDeferWindowPos / DeferWindowPos / EndDeferWindowPos is
+    // upstream's pattern (controls.c:_app_window_resize) — Win32
+    // computes the affected paint regions across the whole batch
+    // and issues one synchronized invalidation, which avoids the
+    // "stale paint after resize" bug we hit with individual
+    // MoveWindow calls.
     let mut content = RECT {
         left: 0,
         top: tab_y,
@@ -669,7 +673,6 @@ fn on_size(hwnd: HWND) {
         bottom: tab_y + tab_h,
     };
     unsafe {
-        // TCM_ADJUSTRECT with wParam=0 = "shrink rect to content area".
         let _ = SendMessageW(
             tab,
             TCM_ADJUSTRECT,
@@ -679,23 +682,44 @@ fn on_size(hwnd: HWND) {
     }
     let cw = content.right - content.left;
     let ch = content.bottom - content.top;
-    for slot in 0..TAB_LISTVIEW_IDS.len() {
-        let lv = state.listviews[slot].get();
-        if lv.0 == 0 {
-            continue;
-        }
-        unsafe {
-            let _ = MoveWindow(lv, content.left, content.top, cw, ch, true);
-            // MoveWindow with bRepaint=true only invalidates the
-            // listview's own rect; descendants (the column header,
-            // sub-items, etc.) keep their stale paints. Force a
-            // full descendant invalidation so listview content
-            // doesn't go blank after a resize.
-            use windows::Win32::Graphics::Gdi::{
-                InvalidateRect, RDW_ALLCHILDREN, RDW_INVALIDATE, RedrawWindow,
-            };
-            let _ = RedrawWindow(lv, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
-            let _ = InvalidateRect(lv, None, true);
+
+    // Batch slots: tab + 8 listviews = 9.
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+    };
+    unsafe {
+        if let Ok(mut hdwp) = BeginDeferWindowPos(9) {
+            if let Ok(h) = DeferWindowPos(
+                hdwp,
+                tab,
+                HWND::default(),
+                0,
+                tab_y,
+                total_w,
+                tab_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            ) {
+                hdwp = h;
+            }
+            for slot in 0..TAB_LISTVIEW_IDS.len() {
+                let lv = state.listviews[slot].get();
+                if lv.0 == 0 {
+                    continue;
+                }
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    lv,
+                    HWND::default(),
+                    content.left,
+                    content.top,
+                    cw,
+                    ch,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
+            let _ = EndDeferWindowPos(hdwp);
         }
     }
 }
