@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/amwallgithub.png" alt="amwall" width="540" />
+  <img src="assets/amwallgithub.png" alt="amwall" width="270" />
 </p>
 
 # amwall
