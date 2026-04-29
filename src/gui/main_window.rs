@@ -55,7 +55,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MoveWindow, RegisterClassExW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
-    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
+    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SHOWWINDOW, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER,
+    WS_CHILD,
     WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
@@ -425,6 +426,19 @@ unsafe extern "system" fn wnd_proc(
             on_size(hwnd);
             LRESULT(0)
         }
+        WM_SHOWWINDOW => {
+            // wparam=TRUE means we're becoming visible. The
+            // listviews were ShowWindow(SW_SHOW)'d during WM_CREATE
+            // (via on_tab_change) but their first WM_PAINT was
+            // dropped because the parent was still hidden — so
+            // re-trigger the active-listview reveal now that the
+            // parent is up. Idempotent: subsequent visibility
+            // changes (minimize/restore) just re-show the same lv.
+            if wparam.0 != 0 {
+                on_tab_change(hwnd);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_NOTIFY => {
             let nmhdr = unsafe { &*(lparam.0 as *const NMHDR) };
             // TCN_SELCHANGE: user clicked a different tab — show
@@ -522,8 +536,20 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // Per-tab listviews. Created in TAB_LISTVIEW_IDS order, all
     // hidden initially; the `on_tab_change` call at the end shows
     // the one matching the selected tab.
+    //
+    // Each listview is MoveWindow'd to a non-zero rect *before*
+    // configure_listview adds columns. Inserting columns into a
+    // 0×0 listview leaves the internal header control with bogus
+    // geometry that subsequent resizes don't recover — observed as
+    // headers/rows that stay invisible until hot-tracked column-
+    // by-column on hover. on_size below sizes the listview to its
+    // real rect; the 800×600 here is just placeholder geometry so
+    // the header has somewhere to lay itself out.
     for (slot, &id) in TAB_LISTVIEW_IDS.iter().enumerate() {
         let lv = create_tab_listview(hwnd, id)?;
+        unsafe {
+            let _ = MoveWindow(lv, 0, 0, 800, 600, false);
+        }
         configure_listview(lv, id, state.dpi.get())?;
         state.listviews[slot].set(lv);
     }
@@ -623,16 +649,16 @@ fn on_size(hwnd: HWND) {
     let total_w = client.right - client.left;
     let total_h = client.bottom - client.top;
 
-    // Rebar self-sizes on forwarded WM_SIZE. Read its height back
-    // afterwards so the tab control knows where to start.
+    // Rebar self-sizes on forwarded WM_SIZE. Read its preferred
+    // height back so the tab control knows where to start. Don't
+    // MoveWindow it here — the DeferWindowPos batch below moves
+    // both rebar and tab atomically, mirroring upstream's
+    // controls.c:_app_window_resize.
     let rebar = state.rebar.get();
     let mut rebar_h = 0;
     if rebar.0 != 0 {
         unsafe {
-            // Forward WM_SIZE; the rebar uses lParam packed width
-            // (LOWORD) and height (HIWORD) but tolerates 0 here.
             let _ = SendMessageW(rebar, WM_SIZE, WPARAM(0), LPARAM(0));
-            let _ = MoveWindow(rebar, 0, 0, total_w, 0, true);
         }
         rebar_h = toolbar::rebar_height(rebar);
     }
@@ -658,14 +684,8 @@ fn on_size(hwnd: HWND) {
     let tab_y = rebar_h;
     let tab_h = (total_h - rebar_h - status_h).max(0);
 
-    // Compute the tab content rect once before we start the
-    // batched move so all of (tab + listviews) update atomically.
-    // BeginDeferWindowPos / DeferWindowPos / EndDeferWindowPos is
-    // upstream's pattern (controls.c:_app_window_resize) — Win32
-    // computes the affected paint regions across the whole batch
-    // and issues one synchronized invalidation, which avoids the
-    // "stale paint after resize" bug we hit with individual
-    // MoveWindow calls.
+    // Compute the tab's content rect (the area inside the tab
+    // strip) so we can size listviews to fill it.
     let mut content = RECT {
         left: 0,
         top: tab_y,
@@ -683,12 +703,32 @@ fn on_size(hwnd: HWND) {
     let cw = content.right - content.left;
     let ch = content.bottom - content.top;
 
-    // Batch slots: tab + 8 listviews = 9.
+    // Mirror upstream simplewall (controls.c:_app_window_resize):
+    // batch ONLY rebar + tab in DeferWindowPos, then MoveWindow
+    // each listview INDIVIDUALLY outside the batch with
+    // bRepaint=TRUE. Earlier versions batched all 9 (tab + 8
+    // listviews) which reliably caused the listviews' inner
+    // header + body to skip their first WM_PAINT after a resize
+    // until hover hot-tracked them column-by-column.
     use windows::Win32::UI::WindowsAndMessaging::{
         BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
     };
     unsafe {
-        if let Ok(mut hdwp) = BeginDeferWindowPos(9) {
+        if let Ok(mut hdwp) = BeginDeferWindowPos(2) {
+            if rebar.0 != 0 {
+                if let Ok(h) = DeferWindowPos(
+                    hdwp,
+                    rebar,
+                    HWND::default(),
+                    0,
+                    0,
+                    total_w,
+                    rebar_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    hdwp = h;
+                }
+            }
             if let Ok(h) = DeferWindowPos(
                 hdwp,
                 tab,
@@ -701,47 +741,15 @@ fn on_size(hwnd: HWND) {
             ) {
                 hdwp = h;
             }
-            for slot in 0..TAB_LISTVIEW_IDS.len() {
-                let lv = state.listviews[slot].get();
-                if lv.0 == 0 {
-                    continue;
-                }
-                if let Ok(h) = DeferWindowPos(
-                    hdwp,
-                    lv,
-                    HWND::default(),
-                    content.left,
-                    content.top,
-                    cw,
-                    ch,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                ) {
-                    hdwp = h;
-                }
-            }
             let _ = EndDeferWindowPos(hdwp);
+        }
 
-            // Force a full descendant invalidation on each
-            // listview — DeferWindowPos's atomic batch covers
-            // geometry but doesn't always propagate paint to
-            // listview row content + headers after a resize.
-            use windows::Win32::Graphics::Gdi::{
-                InvalidateRect, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW,
-                RedrawWindow,
-            };
-            for slot in 0..TAB_LISTVIEW_IDS.len() {
-                let lv = state.listviews[slot].get();
-                if lv.0 == 0 {
-                    continue;
-                }
-                let _ = InvalidateRect(lv, None, true);
-                let _ = RedrawWindow(
-                    lv,
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
-                );
+        for slot in 0..TAB_LISTVIEW_IDS.len() {
+            let lv = state.listviews[slot].get();
+            if lv.0 == 0 {
+                continue;
             }
+            let _ = MoveWindow(lv, content.left, content.top, cw, ch, true);
         }
     }
 }
@@ -831,13 +839,32 @@ fn on_tab_change(hwnd: HWND) {
         unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
     let sel_slot = if sel < 0 { 0 } else { sel as usize };
 
+    // ShowWindow(SW_SHOW) on a previously-hidden child window adds
+    // its area to the parent's update region but doesn't always
+    // queue a WM_PAINT for the child's own client rect — so the
+    // listview can become visible without ever drawing its headers
+    // or rows until something else (mouse hover hot-tracking)
+    // pokes it. Force a full repaint on the just-shown listview.
+    use windows::Win32::Graphics::Gdi::{
+        RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow,
+    };
     for (slot, lv_cell) in state.listviews.iter().enumerate() {
         let lv = lv_cell.get();
         if lv.0 == 0 {
             continue;
         }
         unsafe {
-            let _ = ShowWindow(lv, if slot == sel_slot { SW_SHOW } else { SW_HIDE });
+            if slot == sel_slot {
+                let _ = ShowWindow(lv, SW_SHOW);
+                let _ = RedrawWindow(
+                    lv,
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                );
+            } else {
+                let _ = ShowWindow(lv, SW_HIDE);
+            }
         }
     }
 
