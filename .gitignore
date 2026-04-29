@@ -30,3 +30,6 @@ Desktop.ini
 # Debug dumps left by `netsh wfp show filters` etc.
 /filters.xml
 /wfpstate.xml
+
+# stderr capture from VS Code build-and-run task.
+/swaplog.txt
