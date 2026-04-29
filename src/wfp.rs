@@ -12,6 +12,7 @@
 // repeat the cfg attribute.
 
 pub mod condition;
+pub mod events;
 pub mod filter;
 pub mod provider;
 pub mod sublayer;
