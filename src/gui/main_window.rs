@@ -55,8 +55,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MoveWindow, RegisterClassExW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
-    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SHOWWINDOW, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER,
-    WS_CHILD,
+    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SHOWWINDOW,
+    WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
     WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
@@ -191,6 +191,15 @@ struct WndState {
     /// the oldest is dropped. `EVENT_LOG_CAP` rows is enough to
     /// see recent activity without unbounded memory growth.
     event_log: std::cell::RefCell<std::collections::VecDeque<crate::wfp::events::NetEvent>>,
+    /// `true` between WM_ENTERSIZEMOVE and WM_EXITSIZEMOVE — i.e.
+    /// while the user is actively dragging the resize edge. We
+    /// suppress paint on the listviews during the drag (single
+    /// MoveWindow with bRepaint=FALSE; the LVS_EX_DOUBLEBUFFER
+    /// content remains visible at the old size), and re-fire a
+    /// clean jiggle-repaint once at WM_EXITSIZEMOVE. Otherwise
+    /// the per-pixel WM_SIZE flood coalesces paints and lands
+    /// the listview in a half-painted state.
+    resizing: Cell<bool>,
 }
 
 impl WndState {
@@ -217,6 +226,7 @@ impl WndState {
             event_rx: std::cell::RefCell::new(None),
             event_engine: std::cell::RefCell::new(None),
             event_log: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            resizing: Cell::new(false),
         }
     }
 }
@@ -234,6 +244,15 @@ const TIMER_EVENT_DRAIN: usize = 9002;
 /// frequent enough to feel live without burning CPU when no events
 /// are firing.
 const EVENT_DRAIN_INTERVAL_MS: u32 = 500;
+
+/// One-shot timer that fires `EVENT_RESIZE_CLEANUP_MS` after the
+/// last WM_SIZE — at which point the user has stopped dragging
+/// and we can safely do the listview-jiggle repaint without
+/// fighting the live-drag paint flood. More reliable than
+/// WM_EXITSIZEMOVE, which doesn't fire under Aero Snap and can
+/// be missed in other edge cases.
+const TIMER_RESIZE_CLEANUP: usize = 9003;
+const RESIZE_CLEANUP_MS: u32 = 100;
 
 /// Register the window class, create the main window, show it.
 /// Ownership of `app` is transferred into the window's
@@ -464,6 +483,16 @@ unsafe extern "system" fn wnd_proc(
         },
         WM_SIZE => {
             on_size(hwnd);
+            // (Re-)arm the resize-cleanup timer. Each new WM_SIZE
+            // pushes the deadline back; once size events stop the
+            // timer fires once (100 ms later) and we run the
+            // listview-jiggle repaint to land in a clean paint
+            // state. This handles every resize path — drag,
+            // double-click maximize, Aero Snap, programmatic
+            // SetWindowPos — without depending on WM_EXITSIZEMOVE.
+            unsafe {
+                SetTimer(hwnd, TIMER_RESIZE_CLEANUP, RESIZE_CLEANUP_MS, None);
+            }
             LRESULT(0)
         }
         WM_SHOWWINDOW => {
@@ -478,6 +507,30 @@ unsafe extern "system" fn wnd_proc(
                 on_tab_change(hwnd);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_ENTERSIZEMOVE => {
+            // Mark resize-in-progress so on_size can skip the
+            // listview paint flag (bRepaint=FALSE) for the
+            // duration of the live drag. WM_SIZE fires many times
+            // per second during a drag and paint coalescing
+            // leaves the listview half-painted otherwise.
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                state.resizing.set(true);
+            }
+            LRESULT(0)
+        }
+        WM_EXITSIZEMOVE => {
+            // Drag finished. Clear the resize flag, then re-fire
+            // the clean repaint path: on_size with paint enabled
+            // (one final layout at the settled size), then
+            // on_tab_change which jiggles the active listview to
+            // wake its header subwindow up.
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                state.resizing.set(false);
+            }
+            on_size(hwnd);
+            on_tab_change(hwnd);
+            LRESULT(0)
         }
         WM_NOTIFY => {
             let nmhdr = unsafe { &*(lparam.0 as *const NMHDR) };
@@ -527,6 +580,31 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(state) = unsafe { state_ref(hwnd) } {
                     drain_events(hwnd, state);
                 }
+            } else if wparam.0 == TIMER_RESIZE_CLEANUP {
+                // One-shot. Disarm immediately so we don't keep
+                // jiggling on every tick after a single resize.
+                unsafe {
+                    let _ = KillTimer(hwnd, TIMER_RESIZE_CLEANUP);
+                }
+                if let Some(state) = unsafe { state_ref(hwnd) } {
+                    let tab = state.tab.get();
+                    if tab.0 != 0 {
+                        let sel = unsafe {
+                            SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0))
+                        }
+                        .0 as isize;
+                        let slot = if sel < 0 { 0 } else { sel as usize };
+                        // Repopulate clears + re-inserts items
+                        // and forces the listview to rebuild its
+                        // view, which is invariant to whatever
+                        // half-painted state comctl32 is in
+                        // post-resize. Followed by on_tab_change
+                        // for the jiggle that wakes the header
+                        // subwindow up.
+                        repopulate_tab(state, slot);
+                    }
+                }
+                on_tab_change(hwnd);
             }
             LRESULT(0)
         }
@@ -861,12 +939,22 @@ fn on_size(hwnd: HWND) {
             let _ = EndDeferWindowPos(hdwp);
         }
 
+        // bRepaint=FALSE while the user is actively dragging the
+        // resize edge (resizing flag set by WM_ENTERSIZEMOVE).
+        // MoveWindow still updates the window rect and fires
+        // WM_SIZE on the listview so its internal layout updates,
+        // but suppresses the per-pixel paint flood that would
+        // otherwise produce visible flashing. The cleanup timer
+        // armed by WM_SIZE fires once 100 ms after the last size
+        // event and runs repopulate_tab + on_tab_change to land
+        // the listview in a clean visible state.
+        let repaint = !state.resizing.get();
         for slot in 0..TAB_LISTVIEW_IDS.len() {
             let lv = state.listviews[slot].get();
             if lv.0 == 0 {
                 continue;
             }
-            let _ = MoveWindow(lv, content.left, content.top, cw, ch, true);
+            let _ = MoveWindow(lv, content.left, content.top, cw, ch, repaint);
         }
     }
 }
@@ -939,6 +1027,47 @@ fn rescale_listview_columns(lv: HWND, id: i32, dpi: u32) {
     }
 }
 
+/// Position a listview at `(x, y, w, h)` and force its internal
+/// header subwindow to repaint. A single `MoveWindow` leaves the
+/// header ghosted (visible-but-blank) until hover hot-tracking
+/// forces per-element invalidation — the standard
+/// `RedrawWindow(RDW_ALLCHILDREN)` doesn't reliably reach it
+/// under comctl6. The reliable workaround is to make `MoveWindow`
+/// fire `WM_SIZE` *twice*: once with a 1-pixel-larger rect (which
+/// is a real size change so the listview re-lays out its
+/// internals), then once with the correct rect (which trips the
+/// re-layout a second time and lands on the right size). Used by
+/// `on_tab_change` to wake the active listview's header up after
+/// `SW_SHOW`.
+fn force_listview_repaint(lv: HWND, x: i32, y: i32, w: i32, h: i32) {
+    unsafe {
+        let _ = MoveWindow(lv, x, y, w + 1, h + 1, true);
+        let _ = MoveWindow(lv, x, y, w, h, true);
+    }
+}
+
+/// Get a listview's current rect in its parent's client
+/// coordinates, suitable for handing back to `force_listview_repaint`.
+/// Returns `None` if the Win32 calls fail (shouldn't happen for
+/// live windows).
+fn current_lv_rect_in_parent(lv: HWND, parent: HWND) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let mut wr = RECT::default();
+    if unsafe { GetWindowRect(lv, &mut wr) }.is_err() {
+        return None;
+    }
+    let mut tl = POINT {
+        x: wr.left,
+        y: wr.top,
+    };
+    if unsafe { ScreenToClient(parent, &mut tl) }.0 == 0 {
+        return None;
+    }
+    Some((tl.x, tl.y, wr.right - wr.left, wr.bottom - wr.top))
+}
+
 /// Show the listview matching the currently-selected tab; hide the
 /// rest. Called once at startup and from WM_NOTIFY/TCN_SELCHANGE.
 /// Also starts/stops the Connections-tab refresh timer so we only
@@ -962,9 +1091,6 @@ fn on_tab_change(hwnd: HWND) {
     // listview can become visible without ever drawing its headers
     // or rows until something else (mouse hover hot-tracking)
     // pokes it. Force a full repaint on the just-shown listview.
-    use windows::Win32::Graphics::Gdi::{
-        RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow,
-    };
     for (slot, lv_cell) in state.listviews.iter().enumerate() {
         let lv = lv_cell.get();
         if lv.0 == 0 {
@@ -973,12 +1099,9 @@ fn on_tab_change(hwnd: HWND) {
         unsafe {
             if slot == sel_slot {
                 let _ = ShowWindow(lv, SW_SHOW);
-                let _ = RedrawWindow(
-                    lv,
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-                );
+                if let Some((x, y, w, h)) = current_lv_rect_in_parent(lv, hwnd) {
+                    force_listview_repaint(lv, x, y, w, h);
+                }
             } else {
                 let _ = ShowWindow(lv, SW_HIDE);
             }
