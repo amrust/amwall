@@ -17,6 +17,7 @@
 pub mod app;
 pub mod connections;
 pub mod dialogs;
+pub mod event_log;
 pub mod font;
 pub mod icons;
 pub mod ids;

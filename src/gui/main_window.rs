@@ -197,6 +197,11 @@ struct WndState {
     /// the oldest is dropped. `EVENT_LOG_CAP` rows is enough to
     /// see recent activity without unbounded memory growth.
     event_log: std::cell::RefCell<std::collections::VecDeque<crate::wfp::events::NetEvent>>,
+    /// File-backed event log writer (M6.3). Lazily opens / rotates
+    /// the on-disk log per `Settings.enable_log` + `log_path` +
+    /// `log_size_limit`. Mirrors the in-memory `event_log` ring,
+    /// but persists across app restarts.
+    event_log_writer: std::cell::RefCell<super::event_log::EventLogWriter>,
     /// `true` between WM_ENTERSIZEMOVE and WM_EXITSIZEMOVE — i.e.
     /// while the user is actively dragging the resize edge. We
     /// suppress paint on the listviews during the drag (single
@@ -244,6 +249,9 @@ impl WndState {
             event_rx: std::cell::RefCell::new(None),
             event_engine: std::cell::RefCell::new(None),
             event_log: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            event_log_writer: std::cell::RefCell::new(
+                super::event_log::EventLogWriter::new(),
+            ),
             resizing: Cell::new(false),
             amwall_filter_ids: std::cell::RefCell::new(std::collections::HashSet::new()),
             filters_active: Cell::new(false),
@@ -852,12 +860,19 @@ fn update_enable_filters_button(state: &WndState, active: bool) {
 /// entries. If the Log tab is currently visible, repopulate the
 /// listview so the new rows show up live.
 fn drain_events(hwnd: HWND, state: &WndState) {
-    let notify = state.app.settings.borrow().enable_notifications;
+    let settings = state.app.settings.borrow();
+    let notify = settings.enable_notifications;
     let mut log = state.event_log.borrow_mut();
+    let mut writer = state.event_log_writer.borrow_mut();
     let mut new_arrivals = false;
     let mut last_drop: Option<crate::wfp::events::NetEvent> = None;
     if let Some(rx) = state.event_rx.borrow().as_ref() {
         while let Ok(event) = rx.try_recv() {
+            // Persist to the on-disk log first. Settings gate
+            // (enable_log, exclude_classify_allow, rotation cap)
+            // are applied inside the writer.
+            writer.append(&event, &settings);
+
             // Toast the most recent drop in this batch and only
             // when the drop came from one of OUR filters — bare
             // FwpmNetEventSubscribe0 sees every drop in the
@@ -879,7 +894,9 @@ fn drain_events(hwnd: HWND, state: &WndState) {
             new_arrivals = true;
         }
     }
+    drop(writer);
     drop(log);
+    drop(settings);
     if let Some(ev) = last_drop {
         super::notification::show_drop_notification(&ev);
     }
