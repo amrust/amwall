@@ -140,3 +140,17 @@ pub const IDM_TRAY_LOGCLEAR: u16 = 313;
 
 // Listview-context-menu IDM upstream uses for "Create rule".
 pub const IDM_OPENRULESEDITOR: u16 = 323;
+
+// ---- listview right-click context menu (M5.4c) ----
+//
+// Posted as WM_COMMAND from the popup menu shown on NM_RCLICK
+// over an apps / services / UWP / rules / network / log row. The
+// active listview is captured at popup time and routed back through
+// state so the handler can act on the right item.
+
+pub const IDM_PROPERTIES: u16 = 350;
+pub const IDM_ALLOW: u16 = 351;
+pub const IDM_BLOCK: u16 = 352;
+pub const IDM_REMOVE_FROM_PROFILE: u16 = 353;
+pub const IDM_EXPLORE: u16 = 354;
+pub const IDM_COPY: u16 = 355;

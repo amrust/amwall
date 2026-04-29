@@ -39,7 +39,7 @@ use windows::Win32::UI::Controls::{
     LVM_DELETEALLITEMS, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
     LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVN_KEYDOWN,
     LVNI_SELECTED, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT,
-    LVS_SHOWSELALWAYS, NM_DBLCLK, NMHDR, NMLVKEYDOWN,
+    LVS_SHOWSELALWAYS, NM_DBLCLK, NM_RCLICK, NMHDR, NMITEMACTIVATE, NMLVKEYDOWN,
     NMTBGETINFOTIPW, SBARS_TOOLTIPS, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW,
     TBN_GETINFOTIPW, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW,
     TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
@@ -68,9 +68,11 @@ use super::ids::{
     IDM_ABOUT, IDM_ADD_FILE, IDM_ALWAYSONTOP_CHK, IDM_AUTOSIZECOLUMNS_CHK,
     IDM_BLOCKLIST_EXTRA_ALLOW, IDM_BLOCKLIST_EXTRA_BLOCK, IDM_BLOCKLIST_EXTRA_DISABLE,
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
-    IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK, IDM_BLOCKLIST_UPDATE_DISABLE,
-    IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_EXIT, IDM_EXPORT, IDM_FONT, IDM_IMPORT,
-    IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_OPENRULESEDITOR, IDM_PURGE_TIMERS,
+    IDM_ALLOW, IDM_BLOCK, IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK,
+    IDM_BLOCKLIST_UPDATE_DISABLE, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_COPY, IDM_EXIT,
+    IDM_EXPLORE, IDM_EXPORT, IDM_FONT, IDM_IMPORT,
+    IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_OPENRULESEDITOR, IDM_PROPERTIES, IDM_PURGE_TIMERS,
+    IDM_REMOVE_FROM_PROFILE,
     IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK,
     IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SETTINGS,
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SKIPUACWARNING_CHK,
@@ -230,6 +232,10 @@ struct WndState {
     /// Cached registry walk of installed UWP packages for the Apps
     /// → UWP tab. Same population/refresh model as `services`.
     uwp_packages: std::cell::RefCell<Vec<super::uwp_enum::PackageEntry>>,
+    /// Most recently right-clicked listview row, set on NM_RCLICK
+    /// before the popup menu shows and consumed by the IDM_*
+    /// handlers. None after the menu dismisses (or never opened).
+    context_target: std::cell::RefCell<Option<super::apps_context_menu::ContextTarget>>,
 }
 
 impl WndState {
@@ -265,6 +271,7 @@ impl WndState {
             filters_active: Cell::new(false),
             services: std::cell::RefCell::new(Vec::new()),
             uwp_packages: std::cell::RefCell::new(Vec::new()),
+            context_target: std::cell::RefCell::new(None),
         }
     }
 }
@@ -598,6 +605,16 @@ unsafe extern "system" fn wnd_proc(
             // editor for the clicked row.
             if nmhdr.idFrom == IDC_RULES_CUSTOM as usize && nmhdr.code == NM_DBLCLK {
                 on_edit_selected_rule(hwnd);
+            }
+            // NM_RCLICK on any of the Apps tabs (Profile / Service /
+            // UWP) shows the right-click context menu (M5.4c).
+            if nmhdr.code == NM_RCLICK
+                && (nmhdr.idFrom == IDC_APPS_PROFILE as usize
+                    || nmhdr.idFrom == IDC_APPS_SERVICE as usize
+                    || nmhdr.idFrom == IDC_APPS_UWP as usize)
+            {
+                let activate = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
+                on_apps_context_menu(hwnd, nmhdr.idFrom as i32, activate);
             }
             // Delete key on the User rules listview removes the
             // selected row (with confirm).
@@ -1396,7 +1413,260 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         IDM_SETTINGS => on_open_settings(hwnd),
         IDM_ADD_FILE => on_add_app(hwnd),
 
+        // Apps tab right-click menu (M5.4c). All of these consume
+        // `state.context_target` populated at NM_RCLICK time.
+        IDM_ALLOW => on_context_set_enabled(hwnd, true),
+        IDM_BLOCK => on_context_set_enabled(hwnd, false),
+        IDM_REMOVE_FROM_PROFILE => on_context_remove(hwnd),
+        IDM_EXPLORE => on_context_explore(hwnd),
+        IDM_COPY => on_context_copy(hwnd),
+        IDM_PROPERTIES => on_context_properties(hwnd),
+
         other => eprintln!("amwall: menu id {other} not yet wired up"),
+    }
+}
+
+/// Build + show the apps context menu, then route the chosen
+/// command through `on_command`. Stores the right-clicked target on
+/// `state.context_target` for the IDM_* handlers to read.
+fn on_apps_context_menu(hwnd: HWND, listview_id: i32, activate: &NMITEMACTIVATE) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let target = {
+        let profile = state.app.profile.borrow();
+        let services = state.services.borrow();
+        let uwp = state.uwp_packages.borrow();
+        super::apps_context_menu::target_from_click(
+            listview_id,
+            activate.iItem,
+            &profile,
+            &services,
+            &uwp,
+        )
+    };
+    let target = match target {
+        Some(t) => t,
+        // Right-click on empty area / out-of-range row — nothing
+        // to act on. Could show a different "create new" menu but
+        // that's M5.4 polish.
+        None => return,
+    };
+    *state.context_target.borrow_mut() = Some(target.clone());
+
+    let cmd = super::apps_context_menu::show(hwnd, &target);
+    if let Some(id) = cmd {
+        // TPM_RETURNCMD bypasses the WM_COMMAND queue, so dispatch
+        // ourselves through the same handler.
+        on_command(hwnd, id as u32, 0);
+    }
+
+    // Always clear after the menu — even if no item was picked, the
+    // captured target shouldn't persist into the next interaction.
+    *state.context_target.borrow_mut() = None;
+}
+
+/// Allow / Block toggle. Upserts an App entry at `target.binary_path`:
+/// updates `is_enabled` if one exists, creates a new one otherwise.
+/// No-op for UWP rows (binary_path is empty until M5.4d adds the
+/// package-family-name model).
+fn on_context_set_enabled(hwnd: HWND, enable: bool) {
+    use crate::profile::App as ProfileApp;
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let target = match state.context_target.borrow().clone() {
+        Some(t) => t,
+        None => return,
+    };
+    if target.binary_path.as_os_str().is_empty() {
+        set_status_text(
+            state.status.get(),
+            0,
+            "UWP packages not yet wired to profile (path-only model).",
+        );
+        return;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        if let Some(existing) =
+            profile.apps.iter_mut().find(|a| a.path == target.binary_path)
+        {
+            existing.is_enabled = enable;
+        } else {
+            profile.apps.push(ProfileApp {
+                path: target.binary_path.clone(),
+                is_enabled: enable,
+                is_silent: false,
+                is_undeletable: false,
+                timestamp: now,
+                timer: 0,
+                hash: None,
+                comment: None,
+            });
+        }
+    }
+
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+
+    let verb = if enable { "Allowed" } else { "Blocked" };
+    set_status_text(
+        state.status.get(),
+        0,
+        &format!("{verb}: {}", target.display_name),
+    );
+}
+
+/// Remove the right-clicked app's entry from the profile. Only the
+/// Apps Profile tab and Services tab can hit this — UWP entries
+/// can't be in_profile yet, so the menu item is hidden for them.
+fn on_context_remove(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let target = match state.context_target.borrow().clone() {
+        Some(t) => t,
+        None => return,
+    };
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        profile.apps.retain(|a| a.path != target.binary_path);
+    }
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+    set_status_text(
+        state.status.get(),
+        0,
+        &format!("Removed: {}", target.display_name),
+    );
+}
+
+/// Open the binary's containing folder in Explorer with the file
+/// pre-selected. Uses `ShellExecuteW("open", "explorer.exe",
+/// "/select, <path>")` — the canonical idiom that handles paths
+/// with spaces, NT-style native paths, and missing folders gracefully
+/// (Explorer just opens at the closest existing parent).
+fn on_context_explore(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let target = match state.context_target.borrow().clone() {
+        Some(t) => t,
+        None => return,
+    };
+    if target.binary_path.as_os_str().is_empty() {
+        return;
+    }
+    let path_str = target.binary_path.display().to_string();
+    let args = format!("/select,\"{path_str}\"");
+    let mut wargs = wide(&args);
+    let mut wexe = wide("explorer.exe");
+    let mut wverb = wide("open");
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            hwnd,
+            windows::core::PCWSTR(wverb.as_mut_ptr()),
+            windows::core::PCWSTR(wexe.as_mut_ptr()),
+            windows::core::PCWSTR(wargs.as_mut_ptr()),
+            windows::core::PCWSTR::null(),
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Copy the right-clicked row's display name to the clipboard.
+fn on_context_copy(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let text = match state.context_target.borrow().clone() {
+        Some(t) => t.display_name,
+        None => return,
+    };
+    set_clipboard_text(hwnd, &text);
+}
+
+/// Properties: open the rule editor / app properties pane. For now,
+/// only fires for in-profile entries; UWP and not-yet-added Service
+/// rows have it grayed out in the menu. The handler is a stub —
+/// proper "App properties" dialog parity is M5.5d follow-up.
+fn on_context_properties(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    set_status_text(
+        state.status.get(),
+        0,
+        "App properties dialog not yet implemented (M5.5d).",
+    );
+    let _ = hwnd;
+}
+
+/// Push UTF-16 text to the clipboard. Standard Win32 idiom:
+/// `OpenClipboard` → `EmptyClipboard` → `GlobalAlloc(GMEM_MOVEABLE)`
+/// → `GlobalLock` + memcpy → `GlobalUnlock` → `SetClipboardData`
+/// (which takes ownership of the HGLOBAL on success). On failure the
+/// HGLOBAL is freed locally so we don't leak.
+fn set_clipboard_text(hwnd: HWND, text: &str) {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{
+        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+    };
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+
+    let mut wide_text: Vec<u16> = text.encode_utf16().collect();
+    wide_text.push(0);
+    let bytes = std::mem::size_of_val(wide_text.as_slice());
+
+    let hmem = match unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) } {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let dst = unsafe { GlobalLock(hmem) } as *mut u16;
+    if dst.is_null() {
+        unsafe {
+            let _ = GlobalFree(hmem);
+        }
+        return;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_text.as_ptr(), dst, wide_text.len());
+        let _ = GlobalUnlock(hmem);
+    }
+
+    if unsafe { OpenClipboard(hwnd) }.is_err() {
+        unsafe {
+            let _ = GlobalFree(hmem);
+        }
+        return;
+    }
+    unsafe {
+        let _ = EmptyClipboard();
+        // Clipboard takes ownership of the HGLOBAL on success;
+        // free it ourselves on failure to avoid leaking.
+        let handle = HANDLE(hmem.0 as isize);
+        if SetClipboardData(CF_UNICODETEXT.0 as u32, handle).is_err() {
+            let _ = GlobalFree(hmem);
+        }
+        let _ = CloseClipboard();
     }
 }
 
