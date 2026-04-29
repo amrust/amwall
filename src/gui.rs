@@ -24,9 +24,11 @@ pub mod ids;
 pub mod main_window;
 pub mod notification;
 pub mod rule_editor;
+pub mod services_enum;
 pub mod settings;
 pub mod settings_dialog;
 pub mod toolbar;
+pub mod uwp_enum;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

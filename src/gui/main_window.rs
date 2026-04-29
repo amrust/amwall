@@ -222,6 +222,14 @@ struct WndState {
     /// `amwall_filter_ids` is non-empty). Drives the toolbar
     /// "Enable filters" ↔ "Disable filters" toggle.
     filters_active: Cell<bool>,
+    /// Cached SCM enumeration for the Apps → Services tab. Populated
+    /// on WM_CREATE and refreshed by IDM_REFRESH (F5). Kept in
+    /// memory so tab-switch + search-filter repaints don't re-walk
+    /// SCM for every keystroke.
+    services: std::cell::RefCell<Vec<super::services_enum::ServiceEntry>>,
+    /// Cached registry walk of installed UWP packages for the Apps
+    /// → UWP tab. Same population/refresh model as `services`.
+    uwp_packages: std::cell::RefCell<Vec<super::uwp_enum::PackageEntry>>,
 }
 
 impl WndState {
@@ -255,6 +263,8 @@ impl WndState {
             resizing: Cell::new(false),
             amwall_filter_ids: std::cell::RefCell::new(std::collections::HashSet::new()),
             filters_active: Cell::new(false),
+            services: std::cell::RefCell::new(Vec::new()),
+            uwp_packages: std::cell::RefCell::new(Vec::new()),
         }
     }
 }
@@ -729,10 +739,13 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // gets the user's per-application list (with checkbox + Added
     // timestamp); User rules tab gets the custom rules. System
     // Rules + Blocklist come from the bundled internal profile.
-    // Services / UWP need separate enumeration sources (Win32 SCM
-    // and Package Manager respectively); Connections + Log are
-    // M5.7+ work.
+    // Services / UWP come from a Win32 SCM walk + a registry walk
+    // of the UWP repository hive — both cached on `state` so tab-
+    // switch + search-filter repaints don't re-enumerate.
+    refresh_system_app_caches(state);
     populate_apps_tab(state);
+    populate_services_tab(state);
+    populate_uwp_tab(state);
     populate_user_rules(state);
     populate_internal_rules(state, IDC_RULES_SYSTEM);
     populate_internal_rules(state, IDC_RULES_BLOCKLIST);
@@ -1936,7 +1949,12 @@ fn on_refresh(hwnd: HWND) {
         }
     };
     state.app.profile.replace(new_profile);
+    // F5 also re-walks SCM + the UWP repository so the user picks
+    // up newly-installed services / packages without restarting.
+    refresh_system_app_caches(state);
     populate_apps_tab(state);
+    populate_services_tab(state);
+    populate_uwp_tab(state);
     populate_user_rules(state);
     on_tab_change(hwnd); // refresh status-bar item count
     set_status_text(state.status.get(), 0, "Profile reloaded.");
@@ -2438,6 +2456,118 @@ fn populate_apps_tab(state: &WndState) {
     }
 }
 
+/// Populate the Apps → Services tab from the cached SCM enumeration
+/// (`state.services`). Walks every Win32 service the SCM knows
+/// about, regardless of running state — the user may want to author
+/// a rule for a service that's currently stopped. Display name
+/// shown in column 0, "Added" column 1 left blank since these
+/// haven't been imported into the profile yet.
+fn populate_services_tab(state: &WndState) {
+    let lv = state.listviews[1].get();
+    if lv.0 == 0 {
+        return;
+    }
+    unsafe {
+        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
+    }
+
+    let services = state.services.borrow();
+    let filter = state.search_text.borrow().clone();
+    let mut row = 0i32;
+    for svc in services.iter() {
+        // Match the search filter against display name first, then
+        // service name as a fallback — users may know either.
+        let name_for_display = if svc.display_name.is_empty() {
+            svc.service_name.as_str()
+        } else {
+            svc.display_name.as_str()
+        };
+        if !search_match(name_for_display, &filter)
+            && !search_match(&svc.service_name, &filter)
+        {
+            continue;
+        }
+        let i = row;
+        row += 1;
+        let mut name_buf = wide(name_for_display);
+        let item = LVITEMW {
+            mask: LVIF_TEXT | LVIF_STATE,
+            iItem: i,
+            iSubItem: 0,
+            pszText: PWSTR(name_buf.as_mut_ptr()),
+            stateMask: LVIS_STATEIMAGEMASK,
+            // Unchecked by default (state image 1) — no profile rule
+            // exists for this service yet.
+            state: LIST_VIEW_ITEM_STATE_FLAGS(1u32 << 12),
+            ..Default::default()
+        };
+        let _ = unsafe {
+            SendMessageW(
+                lv,
+                LVM_INSERTITEMW,
+                WPARAM(0),
+                LPARAM(&item as *const _ as isize),
+            )
+        };
+        // "Added" column stays empty for system-discovered services.
+    }
+}
+
+/// Populate the Apps → UWP tab from the cached registry walk
+/// (`state.uwp_packages`). One row per installed packaged app.
+fn populate_uwp_tab(state: &WndState) {
+    let lv = state.listviews[2].get();
+    if lv.0 == 0 {
+        return;
+    }
+    unsafe {
+        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
+    }
+
+    let packages = state.uwp_packages.borrow();
+    let filter = state.search_text.borrow().clone();
+    let mut row = 0i32;
+    for pkg in packages.iter() {
+        // Search matches display name OR package full name (the
+        // latter is what advanced users key off of).
+        if !search_match(&pkg.display_name, &filter)
+            && !search_match(&pkg.package_full_name, &filter)
+        {
+            continue;
+        }
+        let i = row;
+        row += 1;
+        let mut name_buf = wide(&pkg.display_name);
+        let item = LVITEMW {
+            mask: LVIF_TEXT | LVIF_STATE,
+            iItem: i,
+            iSubItem: 0,
+            pszText: PWSTR(name_buf.as_mut_ptr()),
+            stateMask: LVIS_STATEIMAGEMASK,
+            state: LIST_VIEW_ITEM_STATE_FLAGS(1u32 << 12),
+            ..Default::default()
+        };
+        let _ = unsafe {
+            SendMessageW(
+                lv,
+                LVM_INSERTITEMW,
+                WPARAM(0),
+                LPARAM(&item as *const _ as isize),
+            )
+        };
+    }
+}
+
+/// Re-walk SCM and the UWP repository, replacing the cached
+/// enumerations on `WndState`. Called once from `WM_CREATE` after
+/// the listviews exist, and again from `IDM_REFRESH` (F5) so the
+/// user can pick up newly-installed services / packages without
+/// restarting amwall.
+fn refresh_system_app_caches(state: &WndState) {
+    *state.services.borrow_mut() = super::services_enum::enumerate();
+    *state.uwp_packages.borrow_mut() = super::uwp_enum::enumerate();
+}
+
 /// Convert a Unix timestamp (seconds since 1970-01-01 UTC) into a
 /// local-time string formatted as "yyyy-MM-dd HH:mm:ss". Returns
 /// an empty string if any of the three Win32 conversions fail —
@@ -2744,13 +2874,13 @@ fn on_search_changed(hwnd: HWND) {
 fn repopulate_tab(state: &WndState, slot: usize) {
     match slot {
         0 => populate_apps_tab(state),
+        1 => populate_services_tab(state),
+        2 => populate_uwp_tab(state),
         3 => populate_internal_rules(state, IDC_RULES_BLOCKLIST),
         4 => populate_internal_rules(state, IDC_RULES_SYSTEM),
         5 => populate_user_rules(state),
         6 => populate_connections_tab(state),
         7 => populate_log_tab(state),
-        // Slots 1 (Services) and 2 (UWP) are not yet populated
-        // from any source — search filter is a no-op there.
         _ => {}
     }
 }
