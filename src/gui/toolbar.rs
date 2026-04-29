@@ -26,119 +26,105 @@
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    BTNS_AUTOSIZE, BTNS_BUTTON, BTNS_SHOWTEXT, CCS_NODIVIDER, CCS_NOPARENTALIGN, I_IMAGENONE,
-    RBBIM_CHILD, RBBIM_CHILDSIZE, RBBIM_ID, RBBIM_STYLE, RBBS_CHILDEDGE, RBBS_NOGRIPPER,
-    RBBS_USECHEVRON, RBBS_VARIABLEHEIGHT, RBS_BANDBORDERS, RBS_VARHEIGHT, RB_INSERTBANDW,
-    REBARBANDINFOW, REBARCLASSNAMEW, TBBUTTON, TBSTATE_ENABLED, TBSTYLE_AUTOSIZE,
-    TBSTYLE_EX_DOUBLEBUFFER, TBSTYLE_EX_HIDECLIPPEDBUTTONS, TBSTYLE_EX_MIXEDBUTTONS,
-    TBSTYLE_FLAT, TBSTYLE_LIST, TBSTYLE_TOOLTIPS, TBSTYLE_TRANSPARENT, TB_ADDBUTTONS,
-    TB_AUTOSIZE, TB_BUTTONSTRUCTSIZE, TB_GETBUTTONSIZE, TB_SETEXTENDEDSTYLE,
-    TOOLBARCLASSNAMEW, WC_EDITW,
+    BTNS_AUTOSIZE, BTNS_BUTTON, BTNS_SHOWTEXT, CCS_NODIVIDER, I_IMAGENONE, TBBUTTON,
+    TBSTATE_ENABLED, TBSTYLE_EX_DOUBLEBUFFER, TBSTYLE_EX_MIXEDBUTTONS, TBSTYLE_FLAT, TBSTYLE_LIST,
+    TBSTYLE_TOOLTIPS, TBSTYLE_TRANSPARENT, TBSTYLE_WRAPABLE, TB_ADDBUTTONS, TB_AUTOSIZE,
+    TB_BUTTONSTRUCTSIZE, TB_SETEXTENDEDSTYLE, TOOLBARCLASSNAMEW, WC_EDITW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, ES_AUTOHSCROLL, ES_LEFT, GetClientRect, HMENU,
-    SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_VISIBLE,
+    CW_USEDEFAULT, CreateWindowExW, ES_AUTOHSCROLL, ES_LEFT, HMENU, SendMessageW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE,
+    WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
 use super::ids::{
-    IDC_REBAR, IDC_SEARCH, IDC_TOOLBAR, IDM_OPENRULESEDITOR, IDM_REFRESH, IDM_RELEASES,
+    IDC_SEARCH, IDC_TOOLBAR, IDM_OPENRULESEDITOR, IDM_REFRESH, IDM_RELEASES,
     IDM_SETTINGS, IDM_TRAY_ENABLELOG_CHK, IDM_TRAY_ENABLENOTIFICATIONS_CHK,
     IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGSHOW, IDM_TRAY_START,
 };
 
-/// Logical width of the search edit band. DPI-scaled at create time.
-const SEARCH_LOGICAL_W: i32 = 200;
-
-/// `REBARBANDINFOW_V6_SIZE` from Win32 — the offset of `cxHeader`,
-/// i.e. the size of the struct up through `lParam`. ComCtl32 rejects
-/// `RB_INSERTBANDW` if `cbSize` matches neither the pre-Vista size
-/// (this constant) nor the post-Vista one. windows-rs always gives
-/// us the full struct including chevron/header fields, so we have
-/// to pass the V6 size explicitly to stay compatible with both
-/// ComCtl32 v5 (no manifest) and v6 (with manifest).
-const REBARBANDINFOW_V6_SIZE: u32 =
-    std::mem::offset_of!(REBARBANDINFOW, cxHeader) as u32;
-
-/// HWNDs created by `create`. The main window stores this and uses it
-/// to (a) forward WM_SIZE so the rebar self-sizes, and (b) read back
-/// the rebar's height for tab-control layout.
+/// HWNDs created by `create`. The main window stores these and
+/// owns the layout — toolbar + search are direct children of the
+/// main window, no rebar wrapper. (The rebar attempted to mediate
+/// between TBSTYLE_WRAPABLE and the search edit's row, but it
+/// caches band heights in ways that fight the wrap. Doing the
+/// layout ourselves is simpler and works.)
 pub struct Toolbar {
-    pub rebar: HWND,
     pub toolbar: HWND,
     pub search: HWND,
 }
 
-/// Build the rebar + toolbar + search edit and insert both bands.
-/// Returns the populated `Toolbar` so the caller can stash the
-/// HWNDs for later layout queries.
+/// Build the toolbar + search edit as direct children of `parent`.
+/// Caller positions them via `MoveWindow` in `on_size`.
 pub fn create(parent: HWND, dpi: u32) -> Result<Toolbar, String> {
-    let rebar = create_rebar(parent)?;
-    let toolbar = create_toolbar(rebar)?;
-    // Build the imagelist *before* populating the toolbar so each
-    // TBBUTTON's iBitmap can resolve to the right index.
+    let toolbar = create_toolbar(parent)?;
     let icons = super::icons::build(dpi);
     super::icons::attach_to_toolbar(toolbar, icons.himagelist);
     populate_toolbar(toolbar, &icons)?;
-    let search = create_search(rebar)?;
-    insert_bands(rebar, toolbar, search, dpi)?;
-    Ok(Toolbar {
-        rebar,
-        toolbar,
-        search,
-    })
+    let search = create_search(parent)?;
+    Ok(Toolbar { toolbar, search })
 }
 
-/// Get the current height of the rebar in device pixels. Called from
-/// WM_SIZE so the tab control can be positioned just below it.
-pub fn rebar_height(rebar: HWND) -> i32 {
-    if rebar.0 == 0 {
+/// Toolbar's content height in device pixels — bottom-most pixel
+/// occupied by any button or separator after wrap. The toolbar's
+/// own reported size has comctl32-internal trailing padding (~16
+/// px on Win11), so reading `GetClientRect` over-allocates. Walk
+/// the items and take `max(rect.bottom)` instead — that's the
+/// true bottom of rendered content.
+pub fn toolbar_layout_height(toolbar: HWND) -> i32 {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::Controls::{TB_BUTTONCOUNT, TB_GETITEMRECT};
+    if toolbar.0 == 0 {
         return 0;
     }
-    let mut rect = windows::Win32::Foundation::RECT::default();
-    if unsafe { GetClientRect(rebar, &mut rect) }.is_err() {
+    let count =
+        unsafe { SendMessageW(toolbar, TB_BUTTONCOUNT, WPARAM(0), LPARAM(0)) }.0 as i32;
+    if count <= 0 {
         return 0;
     }
-    rect.bottom - rect.top
-}
-
-fn create_rebar(parent: HWND) -> Result<HWND, String> {
-    unsafe {
-        let hinstance = GetModuleHandleW(PCWSTR::null())
-            .map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
-        // RBS_VARHEIGHT lets the toolbar band auto-grow with the
-        // toolbar's preferred height (matches upstream).
-        // RBS_BANDBORDERS draws the thin separators between bands.
-        // CCS_NODIVIDER removes the unwanted top divider line.
-        let style = WS_CHILD
-            | WS_VISIBLE
-            | WS_CLIPSIBLINGS
-            | WS_CLIPCHILDREN
-            | WINDOW_STYLE(RBS_VARHEIGHT | RBS_BANDBORDERS)
-            | WINDOW_STYLE(CCS_NODIVIDER as u32);
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            REBARCLASSNAMEW,
-            PCWSTR::null(),
-            style,
-            0,
-            0,
-            0,
-            0,
-            parent,
-            HMENU(IDC_REBAR as isize),
-            hinstance,
-            None,
-        );
-        if hwnd.0 == 0 {
-            return Err("CreateWindowExW(REBARCLASSNAMEW) failed".into());
+    let mut max_bottom = 0i32;
+    for i in 0..count {
+        let mut rect = RECT::default();
+        let r = unsafe {
+            SendMessageW(
+                toolbar,
+                TB_GETITEMRECT,
+                WPARAM(i as usize),
+                LPARAM(&mut rect as *mut _ as isize),
+            )
+        };
+        if r.0 != 0 && rect.bottom > max_bottom {
+            max_bottom = rect.bottom;
         }
-        Ok(hwnd)
+    }
+    max_bottom.max(1)
+}
+
+/// Clip the toolbar's painted area to a rect of (0, 0, w, h) so
+/// the comctl32-internal trailing padding (~16 px) and any
+/// inter-row gap caused by separator-stretched row heights
+/// becomes transparent. The toolbar's logical window rect stays
+/// at whatever it auto-grew to during WM_SIZE — only painting is
+/// constrained.
+pub fn clip_to_content(toolbar: HWND, w: i32, h: i32) {
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+    if toolbar.0 == 0 || w <= 0 || h <= 0 {
+        return;
+    }
+    let hrgn = unsafe { CreateRectRgn(0, 0, w, h) };
+    if hrgn.0 == 0 {
+        return;
+    }
+    // SetWindowRgn takes ownership of the region — don't free it
+    // ourselves. bRedraw=true so the clipped area repaints.
+    unsafe {
+        SetWindowRgn(toolbar, hrgn, true);
     }
 }
 
-fn create_toolbar(rebar: HWND) -> Result<HWND, String> {
+
+fn create_toolbar(parent: HWND) -> Result<HWND, String> {
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null())
             .map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
@@ -153,13 +139,35 @@ fn create_toolbar(rebar: HWND) -> Result<HWND, String> {
         let style = WS_CHILD
             | WS_VISIBLE
             | WS_CLIPSIBLINGS
-            | WINDOW_STYLE(CCS_NOPARENTALIGN as u32)
+            // CCS_NOPARENTALIGN intentionally NOT set: with it,
+            // the toolbar refuses to be repositioned by its parent
+            // (the rebar), so it keeps its create-time width and
+            // never sees a "you're now narrower" WM_SIZE — which
+            // means TBSTYLE_WRAPABLE never fires. Without it, the
+            // rebar sizes the toolbar to the band's width on
+            // resize and the toolbar wraps its buttons to multiple
+            // rows when needed.
             | WINDOW_STYLE(CCS_NODIVIDER as u32)
             | WINDOW_STYLE(TBSTYLE_FLAT)
             | WINDOW_STYLE(TBSTYLE_LIST)
             | WINDOW_STYLE(TBSTYLE_TRANSPARENT)
             | WINDOW_STYLE(TBSTYLE_TOOLTIPS)
-            | WINDOW_STYLE(TBSTYLE_AUTOSIZE);
+            // TBSTYLE_AUTOSIZE intentionally NOT set: it makes the
+            // toolbar's WM_SIZE handler grow the window back to
+            // its preferred (rows × 2 - 1 with our separators)
+            // height after we MoveWindow it to a smaller value,
+            // leaving an extra blank row below the wrapped
+            // buttons. Without AUTOSIZE the size we set sticks
+            // and the toolbar paints inside whatever rect we give.
+            // TBSTYLE_WRAPABLE: when the band is too narrow for
+            // all buttons to fit on a single line, the toolbar
+            // wraps the overflow buttons to a second (third, …)
+            // line. Combined with RBBS_VARIABLEHEIGHT on the
+            // band, the rebar's reported height grows to match,
+            // and main_window's on_size reads that height to
+            // shift the tab control down accordingly. Resizing
+            // wider snaps the wrapped buttons back up.
+            | WINDOW_STYLE(TBSTYLE_WRAPABLE);
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             TOOLBARCLASSNAMEW,
@@ -169,7 +177,7 @@ fn create_toolbar(rebar: HWND) -> Result<HWND, String> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            rebar,
+            parent,
             HMENU(IDC_TOOLBAR as isize),
             hinstance,
             None,
@@ -186,9 +194,25 @@ fn create_toolbar(rebar: HWND) -> Result<HWND, String> {
             WPARAM(std::mem::size_of::<TBBUTTON>()),
             LPARAM(0),
         );
-        let ext = TBSTYLE_EX_DOUBLEBUFFER
-            | TBSTYLE_EX_MIXEDBUTTONS
-            | TBSTYLE_EX_HIDECLIPPEDBUTTONS;
+
+        // Trim the toolbar's per-button padding to 0,0. Default
+        // padding under TBSTYLE_LIST adds a few pixels of vertical
+        // breathing room which, multiplied across wrapped rows,
+        // produces a noticeable empty band below the last row.
+        // LOWORD(lparam) = horizontal padding, HIWORD(lparam) =
+        // vertical.
+        const TB_SETPADDING: u32 = 1111;
+        let _ = SendMessageW(hwnd, TB_SETPADDING, WPARAM(0), LPARAM(0));
+        // Intentionally NOT setting TBSTYLE_EX_HIDECLIPPEDBUTTONS:
+        // when the toolbar band is too narrow for all buttons,
+        // the rightmost button stays partially visible (clipped at
+        // the band's edge) instead of disappearing entirely. That
+        // half-cut button is the strongest "more buttons here"
+        // visual hint we can give without going to a custom paint
+        // overlay; combined with the chevron (>>) at the band's
+        // right edge, the user has two cues that buttons are
+        // hidden.
+        let ext = TBSTYLE_EX_DOUBLEBUFFER | TBSTYLE_EX_MIXEDBUTTONS;
         let _ = SendMessageW(
             hwnd,
             TB_SETEXTENDEDSTYLE,
@@ -288,7 +312,7 @@ fn separator() -> TBBUTTON {
     }
 }
 
-fn create_search(rebar: HWND) -> Result<HWND, String> {
+fn create_search(parent: HWND) -> Result<HWND, String> {
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null())
             .map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
@@ -311,7 +335,7 @@ fn create_search(rebar: HWND) -> Result<HWND, String> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            rebar,
+            parent,
             HMENU(IDC_SEARCH as isize),
             hinstance,
             None,
@@ -323,73 +347,3 @@ fn create_search(rebar: HWND) -> Result<HWND, String> {
     }
 }
 
-fn insert_bands(
-    rebar: HWND,
-    toolbar: HWND,
-    search: HWND,
-    dpi: u32,
-) -> Result<(), String> {
-    let button_size =
-        unsafe { SendMessageW(toolbar, TB_GETBUTTONSIZE, WPARAM(0), LPARAM(0)) }.0 as u32;
-    // LOWORD = width, HIWORD = height. Win32 wraps both in the same
-    // LRESULT.
-    let btn_w = (button_size & 0xFFFF) as i32;
-    let btn_h = ((button_size >> 16) & 0xFFFF) as i32;
-
-    let mut tb_band = REBARBANDINFOW {
-        cbSize: REBARBANDINFOW_V6_SIZE,
-        fMask: RBBIM_ID | RBBIM_STYLE | RBBIM_CHILD | RBBIM_CHILDSIZE,
-        fStyle: RBBS_VARIABLEHEIGHT | RBBS_NOGRIPPER | RBBS_USECHEVRON,
-        wID: IDC_TOOLBAR as u32,
-        hwndChild: toolbar,
-        cxMinChild: btn_w as u32,
-        cyMinChild: btn_h as u32,
-        ..Default::default()
-    };
-    let res = unsafe {
-        SendMessageW(
-            rebar,
-            RB_INSERTBANDW,
-            WPARAM(usize::MAX),
-            LPARAM(&mut tb_band as *mut _ as isize),
-        )
-    };
-    if res.0 == 0 {
-        return Err("RB_INSERTBANDW(toolbar) failed".into());
-    }
-
-    let search_w = scale_dpi(SEARCH_LOGICAL_W, dpi) as u32;
-    let mut sb_band = REBARBANDINFOW {
-        cbSize: REBARBANDINFOW_V6_SIZE,
-        fMask: RBBIM_ID | RBBIM_STYLE | RBBIM_CHILD | RBBIM_CHILDSIZE,
-        // CHILDEDGE adds the small inset around the edit so it
-        // doesn't collide with adjacent bands; NOGRIPPER hides the
-        // drag handle.
-        fStyle: RBBS_CHILDEDGE | RBBS_NOGRIPPER,
-        wID: IDC_SEARCH as u32,
-        hwndChild: search,
-        cxMinChild: search_w,
-        cyMinChild: btn_h.max(20) as u32,
-        ..Default::default()
-    };
-    let res = unsafe {
-        SendMessageW(
-            rebar,
-            RB_INSERTBANDW,
-            WPARAM(usize::MAX),
-            LPARAM(&mut sb_band as *mut _ as isize),
-        )
-    };
-    if res.0 == 0 {
-        return Err("RB_INSERTBANDW(search) failed".into());
-    }
-    Ok(())
-}
-
-/// Same DPI-scale function as `main_window` — duplicated here to
-/// avoid a circular `use` between the two modules. Trivial enough
-/// that copy-and-paste is cheaper than a shared helper.
-fn scale_dpi(logical: i32, dpi: u32) -> i32 {
-    let n = logical as i64 * dpi as i64;
-    (n / 96) as i32
-}

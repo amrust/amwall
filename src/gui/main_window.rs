@@ -102,8 +102,12 @@ const CONNECTIONS_REFRESH_MS: u32 = 2000;
 const REFERENCE_DPI: u32 = 96;
 
 /// Logical (96-DPI) initial window dimensions. Real pixels are computed
-/// in `create` once we know the monitor DPI.
-const LOGICAL_INITIAL_W: i32 = 900;
+/// in `create` once we know the monitor DPI. Width chosen to fit the
+/// full toolbar (last button "Releases" ends around x=870 device px at
+/// 96 DPI) plus the window's non-client frame on either side, with a
+/// little margin so the toolbar doesn't wrap to a second row at the
+/// default size.
+const LOGICAL_INITIAL_W: i32 = 1024;
 const LOGICAL_INITIAL_H: i32 = 600;
 
 /// Logical column widths per tab type. Real pixel widths are
@@ -144,9 +148,11 @@ const LOG_COL_WIDTHS: &[i32] = &[
 /// avoid `GetDlgItem` lookups on every WM_SIZE.
 struct WndState {
     app: Box<App>,
-    /// HWND of the rebar (toolbar + search edit container). Cached
-    /// so WM_SIZE can forward height queries without `GetDlgItem`.
-    rebar: Cell<HWND>,
+    /// HWND of the toolbar (the action-buttons row). Cached so
+    /// `on_size` can MoveWindow it directly without `GetDlgItem`.
+    toolbar: Cell<HWND>,
+    /// HWND of the search edit. Lives directly under the toolbar.
+    search: Cell<HWND>,
     /// HWND of the tab control. `Cell` because we set it in WM_CREATE
     /// from a `&WndState` (`GWLP_USERDATA` only hands us a `*const`).
     tab: Cell<HWND>,
@@ -206,7 +212,8 @@ impl WndState {
     fn new(app: Box<App>) -> Self {
         Self {
             app,
-            rebar: Cell::new(HWND::default()),
+            toolbar: Cell::new(HWND::default()),
+            search: Cell::new(HWND::default()),
             tab: Cell::new(HWND::default()),
             listviews: [
                 Cell::new(HWND::default()),
@@ -539,6 +546,16 @@ unsafe extern "system" fn wnd_proc(
             if nmhdr.idFrom == IDC_TAB as usize && nmhdr.code == TCN_SELCHANGE {
                 on_tab_change(hwnd);
             }
+            // RBN_HEIGHTCHANGE: the rebar's overall height grew
+            // or shrank — typically because the toolbar's
+            // TBSTYLE_WRAPABLE wrapped buttons to a new row. Re-
+            // run on_size so the tab control + listview shift
+            // down (or up) to match the new rebar height. Without
+            // this the wrapped second row of buttons paints over
+            // whatever sits below the rebar.
+            if nmhdr.code == windows::Win32::UI::Controls::RBN_HEIGHTCHANGE {
+                on_size(hwnd);
+            }
             // TBN_GETINFOTIPW: toolbar wants tooltip text for a
             // button. Fill in the NMTBGETINFOTIPW->pszText buffer
             // with our hardcoded English description.
@@ -647,8 +664,9 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // Rebar with toolbar + search edit lives at the top, just under
     // the menu bar. Created before the tab control so its HWND is
     // available when the layout pass needs the rebar height.
-    let Toolbar { rebar, .. } = toolbar::create(hwnd, state.dpi.get())?;
-    state.rebar.set(rebar);
+    let Toolbar { toolbar, search } = toolbar::create(hwnd, state.dpi.get())?;
+    state.toolbar.set(toolbar);
+    state.search.set(search);
 
     // Tab control — listviews are siblings, not children.
     let tab = create_tab_control(hwnd)?;
@@ -844,19 +862,54 @@ fn on_size(hwnd: HWND) {
     let total_w = client.right - client.left;
     let total_h = client.bottom - client.top;
 
-    // Rebar self-sizes on forwarded WM_SIZE. Read its preferred
-    // height back so the tab control knows where to start. Don't
-    // MoveWindow it here — the DeferWindowPos batch below moves
-    // both rebar and tab atomically, mirroring upstream's
-    // controls.c:_app_window_resize.
-    let rebar = state.rebar.get();
-    let mut rebar_h = 0;
-    if rebar.0 != 0 {
+    // Layout: toolbar at the very top with full client width;
+    // search edit below it; tab control below that.
+    //
+    //   1. Tell the toolbar its width via SetWindowPos. Its
+    //      WM_SIZE handler runs TBSTYLE_WRAPABLE wrap if needed.
+    //   2. Query TB_GETMAXSIZE for the wrapped height.
+    //   3. MoveWindow the toolbar to (0, 0, total_w, tb_h).
+    //   4. Position the search edit just below.
+    //   5. Tab control sits below the search edit.
+    let toolbar_hwnd = state.toolbar.get();
+    let search_hwnd = state.search.get();
+    const SEARCH_H: i32 = 24;
+    let mut tb_h = 0;
+    let mut header_h = 0;
+    if toolbar_hwnd.0 != 0 {
+        // 1. MoveWindow at the new width — the WRAPABLE toolbar
+        //    auto-grows itself to its preferred height (rows ×
+        //    row_h + comctl32 trailing padding). We can't shrink
+        //    it back: a second MoveWindow gets reverted on the
+        //    next WM_SIZE.
+        // 2. Read the actual content extent (max bottom across
+        //    all buttons + separators) — that's where the visible
+        //    content ends.
+        // 3. SetWindowRgn clips the toolbar's painted area to that
+        //    extent. The window's logical rect stays at the
+        //    toolbar's preferred size (so its layout state is
+        //    untouched), but the gap between content_h and
+        //    preferred_h becomes transparent — no visible blank
+        //    band before the next control.
         unsafe {
-            let _ = SendMessageW(rebar, WM_SIZE, WPARAM(0), LPARAM(0));
+            let _ = MoveWindow(toolbar_hwnd, 0, 0, total_w, 1, true);
         }
-        rebar_h = toolbar::rebar_height(rebar);
+        tb_h = toolbar::toolbar_layout_height(toolbar_hwnd);
+        toolbar::clip_to_content(toolbar_hwnd, total_w, tb_h);
+        header_h += tb_h;
     }
+    let _ = tb_h; // header_h is what downstream layout uses
+    if search_hwnd.0 != 0 {
+        let visible = state.app.settings.borrow().show_search_bar;
+        if visible {
+            unsafe {
+                let _ = MoveWindow(search_hwnd, 0, header_h, total_w, SEARCH_H, true);
+            }
+            header_h += SEARCH_H;
+        }
+    }
+    let rebar_h = header_h;
+    let _ = tb_h; // kept for future per-row tinting if we want it
 
     // Status bar pins to bottom and self-sizes too.
     let status = state.status.get();
@@ -909,21 +962,10 @@ fn on_size(hwnd: HWND) {
         BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
     };
     unsafe {
-        if let Ok(mut hdwp) = BeginDeferWindowPos(2) {
-            if rebar.0 != 0 {
-                if let Ok(h) = DeferWindowPos(
-                    hdwp,
-                    rebar,
-                    HWND::default(),
-                    0,
-                    0,
-                    total_w,
-                    rebar_h,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                ) {
-                    hdwp = h;
-                }
-            }
+        // Only the tab control needs DeferWindowPos here — the
+        // toolbar + search edit were positioned above. (The
+        // batch-of-1 still provides atomic invalidation.)
+        if let Ok(mut hdwp) = BeginDeferWindowPos(1) {
             if let Ok(h) = DeferWindowPos(
                 hdwp,
                 tab,
@@ -1346,14 +1388,9 @@ fn apply_search_bar_visibility(hwnd: HWND, visible: bool) {
         None => return,
     };
     // The search edit is a child of the rebar; its HWND is
-    // GetDlgItem(rebar, IDC_SEARCH). We look it up rather than
-    // caching because it's a one-off operation.
-    use windows::Win32::UI::WindowsAndMessaging::GetDlgItem;
-    let rebar = state.rebar.get();
-    if rebar.0 == 0 {
-        return;
-    }
-    let search = unsafe { GetDlgItem(rebar, IDC_SEARCH) };
+    // Search edit is now a direct child of the main window,
+    // cached in WndState — no GetDlgItem hop.
+    let search = state.search.get();
     if search.0 != 0 {
         unsafe {
             let _ = ShowWindow(search, if visible { SW_SHOW } else { SW_HIDE });
@@ -2492,12 +2529,7 @@ fn on_search_changed(hwnd: HWND) {
         Some(s) => s,
         None => return,
     };
-    let rebar = state.rebar.get();
-    if rebar.0 == 0 {
-        return;
-    }
-    use windows::Win32::UI::WindowsAndMessaging::GetDlgItem;
-    let edit = unsafe { GetDlgItem(rebar, IDC_SEARCH) };
+    let edit = state.search.get();
     if edit.0 == 0 {
         return;
     }
