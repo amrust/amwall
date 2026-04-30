@@ -38,7 +38,8 @@ use windows::Win32::UI::Controls::{
     InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
     LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_IMAGE, LVIF_PARAM, LVIF_STATE, LVIF_TEXT,
     LVIS_STATEIMAGEMASK, LVITEMW,
-    LVM_DELETEALLITEMS, LVM_GETITEM, LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
+    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOUNTPERPAGE, LVM_GETITEM, LVM_GETITEMCOUNT,
+    LVM_GETNEXTITEM, LVM_GETTOPINDEX, LVM_INSERTCOLUMNW,
     LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
     LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_COLUMNCLICK, LVN_KEYDOWN, LVSIL_SMALL,
     LVIS_SELECTED, LVNI_SELECTED, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
@@ -62,7 +63,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
     WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY,
-    WM_SHOWWINDOW, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
+    WM_SETREDRAW, WM_SHOWWINDOW, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
     WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
@@ -5228,6 +5229,61 @@ fn add_column(
     Ok(())
 }
 
+/// Snapshot of a listview's scroll position. Captured before a
+/// delete-all/refill cycle so [`end_listview_refill`] can put the
+/// user back where they were.
+#[derive(Debug, Clone, Copy)]
+struct SavedScroll {
+    top: i32,
+    count_per_page: i32,
+}
+
+/// Pair with [`end_listview_refill`]. Snapshots the current
+/// scroll position, freezes paints (`WM_SETREDRAW(0)`), and
+/// wipes the listview. Used by every populator that does a
+/// bulk delete-all / re-insert — without the pair, the auto-
+/// refresh timers (Connections every 1.5 s, Log every drain
+/// tick) yank the user back to row 0 and they can't read past
+/// the first page.
+fn begin_listview_refill(lv: HWND) -> SavedScroll {
+    let top = unsafe {
+        SendMessageW(lv, LVM_GETTOPINDEX, WPARAM(0), LPARAM(0))
+    }
+    .0 as i32;
+    let count_per_page = unsafe {
+        SendMessageW(lv, LVM_GETCOUNTPERPAGE, WPARAM(0), LPARAM(0))
+    }
+    .0 as i32;
+    unsafe {
+        let _ = SendMessageW(lv, WM_SETREDRAW, WPARAM(0), LPARAM(0));
+        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
+    }
+    SavedScroll { top, count_per_page }
+}
+
+/// Pair with [`begin_listview_refill`]. Restores the saved
+/// scroll position, re-enables paints, and forces a single
+/// invalidate so the deferred redraw fires once. `new_count` is
+/// how many rows the populator actually inserted — needed to
+/// clamp `saved.top` if the list shrank (e.g. a connection
+/// closed) so we don't try to scroll past the new end. The
+/// two-step ENSUREVISIBLE (last-visible-of-old-view first, then
+/// `saved.top`) is the canonical comctl idiom for "put `top`
+/// back at the top of the visible area."
+fn end_listview_refill(lv: HWND, saved: SavedScroll, new_count: i32) {
+    if saved.top > 0 && new_count > 0 {
+        let bottom = (saved.top + saved.count_per_page - 1).min(new_count - 1);
+        unsafe {
+            let _ = SendMessageW(lv, LVM_ENSUREVISIBLE, WPARAM(bottom as usize), LPARAM(1));
+            let _ = SendMessageW(lv, LVM_ENSUREVISIBLE, WPARAM(saved.top as usize), LPARAM(1));
+        }
+    }
+    unsafe {
+        let _ = SendMessageW(lv, WM_SETREDRAW, WPARAM(1), LPARAM(0));
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(lv, None, false);
+    }
+}
+
 /// Wipe the User rules ListView and re-fill from the current
 /// profile's custom rules. The Apps / Services / UWP / Blocklist /
 /// System rules / Connections / Log tabs follow their own
@@ -5241,9 +5297,7 @@ fn populate_user_rules(state: &WndState) {
         return;
     }
 
-    unsafe {
-        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-    }
+    let saved = begin_listview_refill(lv);
 
     let profile = state.app.profile.borrow();
     let filter = state.search_text.borrow().clone();
@@ -5298,6 +5352,7 @@ fn populate_user_rules(state: &WndState) {
     }
     drop(profile);
     refresh_rules_group_headers(lv);
+    end_listview_refill(lv, saved, row);
 }
 
 /// Wipe the Apps ListView (IDC_APPS_PROFILE) and re-fill from
@@ -5336,9 +5391,7 @@ fn populate_apps_tab(state: &WndState) {
         }
     }
 
-    unsafe {
-        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-    }
+    let saved = begin_listview_refill(lv);
 
     let profile = state.app.profile.borrow();
     let filenames_only = state.app.settings.borrow().show_filenames_only;
@@ -5449,6 +5502,7 @@ fn populate_apps_tab(state: &WndState) {
     }
     drop(profile);
     refresh_apps_group_headers(lv);
+    end_listview_refill(lv, saved, row);
 }
 
 /// Populate the Apps → Services tab from the cached SCM enumeration
@@ -5463,9 +5517,7 @@ fn populate_services_tab(state: &WndState) {
         return;
     }
     refresh_connected_paths(state);
-    unsafe {
-        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-    }
+    let saved = begin_listview_refill(lv);
 
     let services = state.services.borrow();
     let profile = state.app.profile.borrow();
@@ -5548,6 +5600,7 @@ fn populate_services_tab(state: &WndState) {
     drop(profile);
     drop(services);
     refresh_apps_group_headers(lv);
+    end_listview_refill(lv, saved, row);
 }
 
 /// Populate the Apps → UWP tab from the cached registry walk
@@ -5557,9 +5610,7 @@ fn populate_uwp_tab(state: &WndState) {
     if lv.0 == 0 {
         return;
     }
-    unsafe {
-        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-    }
+    let saved = begin_listview_refill(lv);
 
     let packages = state.uwp_packages.borrow();
     let filter = state.search_text.borrow().clone();
@@ -5620,6 +5671,7 @@ fn populate_uwp_tab(state: &WndState) {
     }
     drop(packages);
     refresh_apps_group_headers(lv);
+    end_listview_refill(lv, saved, row);
 }
 
 /// Re-walk SCM and the UWP repository, replacing the cached
@@ -5679,9 +5731,7 @@ fn populate_connections_tab(state: &WndState) {
     }
     let conns = super::connections::enumerate();
 
-    unsafe {
-        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-    }
+    let saved = begin_listview_refill(lv);
     let filter = state.search_text.borrow().clone();
     let resolve = state.app.settings.borrow().use_network_resolution;
     let mut row = 0i32;
@@ -5734,6 +5784,7 @@ fn populate_connections_tab(state: &WndState) {
         set_subitem(lv, idx as i32, 7, c.protocol.label());
         set_subitem(lv, idx as i32, 8, c.state);
     }
+    end_listview_refill(lv, saved, row);
 }
 
 /// Hostname-or-empty for one IP. When `resolve` is false we don't
@@ -5784,9 +5835,7 @@ fn populate_log_tab(state: &WndState) {
     if lv.0 == 0 {
         return;
     }
-    unsafe {
-        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-    }
+    let saved = begin_listview_refill(lv);
     let log = state.event_log.borrow();
     let filter = state.search_text.borrow().clone();
     let resolve = state.app.settings.borrow().use_network_resolution;
@@ -5887,6 +5936,7 @@ fn populate_log_tab(state: &WndState) {
                 .unwrap_or_default(),
         );
     }
+    end_listview_refill(lv, saved, row);
 }
 
 /// Last component of an NT-form path
@@ -6033,14 +6083,15 @@ fn populate_internal_rules(state: &WndState, id: i32) {
         return;
     }
 
-    unsafe {
-        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-    }
+    let saved = begin_listview_refill(lv);
 
     let rules: &[Rule] = match id {
         IDC_RULES_BLOCKLIST => &state.app.internal_profile.blocklist_rules,
         IDC_RULES_SYSTEM => &state.app.internal_profile.system_rules,
-        _ => return,
+        _ => {
+            end_listview_refill(lv, saved, 0);
+            return;
+        }
     };
 
     let filter = state.search_text.borrow().clone();
@@ -6090,6 +6141,7 @@ fn populate_internal_rules(state: &WndState, id: i32) {
         set_subitem(lv, idx as i32, 2, direction);
     }
     refresh_rules_group_headers(lv);
+    end_listview_refill(lv, saved, row);
 }
 
 fn set_subitem(lv: HWND, row: i32, sub: i32, text: &str) {
