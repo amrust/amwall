@@ -585,6 +585,7 @@ mod tests {
             &[FilterCondition::RemotePort(65530)],
             FilterAction::Permit,
             false,
+            None,
         )
         .expect("filter f1 add failed");
         let _f2 = filter::add(
@@ -597,6 +598,7 @@ mod tests {
             &[FilterCondition::RemotePort(65531)],
             FilterAction::Permit,
             false,
+            None,
         )
         .expect("filter f2 add failed");
 

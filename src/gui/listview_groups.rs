@@ -33,11 +33,17 @@ use crate::profile::{App, Rule};
 // `Special` is a placeholder for now (amwall doesn't yet flag
 // system-managed apps); items never resolve to it but we reserve
 // the id so the visual layout matches upstream.
-pub const GROUP_APP_ALLOWED: i32 = 0;
-pub const GROUP_APP_TIMER: i32 = 1;
-pub const GROUP_APP_SPECIAL: i32 = 2;
-pub const GROUP_APP_BLOCKED: i32 = 3;
-pub const GROUP_APP_BLOCKED_SILENT: i32 = 4;
+//
+// Win32 ListView orders groups by `iGroupId` ascending — so
+// Blocked=0 sorts to the top of the listview, with the noisy
+// signal (apps that just got blocked) visible without scrolling.
+// Allowed sits at the bottom; users browsing the long allow-list
+// scroll down naturally.
+pub const GROUP_APP_BLOCKED: i32 = 0;
+pub const GROUP_APP_BLOCKED_SILENT: i32 = 1;
+pub const GROUP_APP_TIMER: i32 = 2;
+pub const GROUP_APP_SPECIAL: i32 = 3;
+pub const GROUP_APP_ALLOWED: i32 = 4;
 
 // Rules tabs (slots 3..=5).
 pub const GROUP_RULE_ENABLED: i32 = 0;

@@ -87,6 +87,12 @@ impl FilterAction {
 /// upstream `simplewall -install` flow. Should match the
 /// persistence of the owning provider+sublayer.
 ///
+/// `weight = None` lets the kernel auto-assign a mid-range weight
+/// inside the sublayer; `Some(n)` pins it. Per-app permits use
+/// auto; the default-deny catch-all installed at the end of
+/// `install_with_internal` pins its weight to `0` so any per-app
+/// permit at higher weight wins.
+///
 /// Requires admin. Returns the filter key (GUID) and runtime id.
 #[allow(clippy::too_many_arguments)]
 pub fn add(
@@ -99,6 +105,7 @@ pub fn add(
     conditions: &[FilterCondition],
     action: FilterAction,
     persistent: bool,
+    weight: Option<u64>,
 ) -> Result<Filter, WfpError> {
     let mut key = GUID::zeroed();
     let rpc_status = unsafe { UuidCreate(&mut key) };
@@ -131,8 +138,26 @@ pub fn add(
     if persistent {
         filter.flags = FWPM_FILTER_FLAG_PERSISTENT;
     }
-    // weight stays FWP_EMPTY (zero-init) — kernel auto-assigns weight
-    // in the sublayer. Explicit uint64 weight may be exposed later.
+    // Weight handling: None leaves the FWP_VALUE0 zero-init
+    // (FWP_EMPTY → kernel picks a default mid-range). `Some(n)`
+    // builds an FWP_UINT64 with `n`; we own a Box-allocated u64
+    // so the pointer the FWP_VALUE0 carries stays valid through
+    // FwpmFilterAdd0 (which copies the value out before
+    // returning). Without the box the stack-allocated u64 would
+    // dangle past the call's lifetime.
+    let _weight_box: Option<Box<u64>> = if let Some(w) = weight {
+        let boxed = Box::new(w);
+        filter.weight = windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0 {
+            r#type: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_UINT64,
+            Anonymous:
+                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 {
+                    uint64: &*boxed as *const u64 as *mut u64,
+                },
+        };
+        Some(boxed)
+    } else {
+        None
+    };
     filter.numFilterConditions = cond_slice.len() as u32;
     if !cond_slice.is_empty() {
         // FWPM_FILTER0::filterCondition is `*mut FWPM_FILTER_CONDITION0`.
@@ -160,6 +185,7 @@ pub fn add(
     };
     drop(name_buf);
     drop(desc_buf);
+    drop(_weight_box);
 
     if status != ERROR_SUCCESS {
         return Err(WfpError::FilterAdd(status));
@@ -209,6 +235,7 @@ mod tests {
             &[],
             FilterAction::Permit,
             false,
+            None,
         )
         .expect("FwpmFilterAdd0 failed");
         let k = f.key();
@@ -258,6 +285,7 @@ mod tests {
             &conds,
             FilterAction::Permit,
             false,
+            None,
         )
         .expect("FwpmFilterAdd0 with AppPath failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
@@ -295,6 +323,7 @@ mod tests {
             &[],
             FilterAction::Permit,
             false,
+            None,
         )
         .expect("filter add failed");
 
@@ -353,6 +382,7 @@ mod tests {
             &conds,
             FilterAction::Permit,
             false,
+            None,
         )
         .expect("FwpmFilterAdd0 with conditions failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
@@ -399,6 +429,7 @@ mod tests {
             &conds,
             FilterAction::Permit,
             false,
+            None,
         )
         .expect("FwpmFilterAdd0 with range conditions failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
@@ -443,6 +474,7 @@ mod tests {
             &[FilterCondition::RemotePort(65530)],
             FilterAction::Permit,
             true,
+            None,
         )
         .expect("persistent filter add failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");

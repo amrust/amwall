@@ -267,10 +267,162 @@ pub fn install_with_internal(
         }
     }
 
+    // 4. Per-app permit filters. Each enabled `<app>` entry in
+    //    the user profile gets a Permit filter at all four ALE
+    //    layers keyed by its NT-form image path. Disabled apps
+    //    get NO filter — they're caught by the default-deny step
+    //    below. Service-shaped (path-less) and UWP-SID entries
+    //    are skipped here; their respective tabs / install paths
+    //    handle them once those features land.
+    let app_filters = install_per_app_filters(engine, &user_profile.apps, persistent)?;
+    filters_added += app_filters.added;
+    rules_skipped += app_filters.skipped;
+
+    // 5. Default-deny catch-all at FW_WEIGHT_LOWEST. Anything not
+    //    matched by a per-app permit / system rule / blocklist
+    //    Allow drops here. Without this filter, amwall's
+    //    "Enable filters" silently allows everything that isn't
+    //    explicitly blocked — caught during the user's M9.4
+    //    testing where right-clicking Block on brave.exe had no
+    //    effect since no per-app filters existed and no default-
+    //    deny was installed.
+    filters_added += install_default_deny(engine, persistent)?;
+
     Ok(InstallReport {
         filters_added,
         rules_skipped,
     })
+}
+
+/// Walk `apps` and install a Permit filter for each enabled
+/// File-kind entry. Service-shaped and UWP-SID entries skip with
+/// `skipped += 1`. Any underlying WFP error short-circuits the
+/// whole walk so the caller's accumulated counts stay accurate.
+fn install_per_app_filters(
+    engine: &WfpEngine,
+    apps: &[crate::profile::App],
+    persistent: bool,
+) -> Result<PerAppCounts, InstallError> {
+    use crate::profile::AppKind;
+
+    let mut counts = PerAppCounts::default();
+    for app in apps {
+        if !app.is_enabled {
+            // Disabled apps rely on the default-deny — no
+            // explicit block needed. Counts as skipped only if
+            // we ever wanted to surface "not installed" rows.
+            continue;
+        }
+        if app.kind() != AppKind::File {
+            // Service / UWP entries don't use AppPath; they need
+            // their own resolution path (service name → exe;
+            // UWP SID → package family token). Skip cleanly.
+            counts.skipped += 1;
+            continue;
+        }
+
+        let conds = [crate::wfp::condition::FilterCondition::AppPath(
+            app.path.clone(),
+        )];
+
+        // FwpmGetAppIdFromFileName0 fails for paths that don't
+        // exist on disk (an old simplewall profile may reference
+        // apps the user has since uninstalled). `filter::add`
+        // surfaces that as a WfpError; treat it as skipped on the
+        // first layer's attempt rather than aborting the whole
+        // install. If the first layer succeeds, the remaining
+        // three should too — they share the same AppPath
+        // resolution.
+        let display = app
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| app.path.display().to_string());
+        let mut layer_failed_first = false;
+        for (idx, layer) in [
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let result = filter::add(
+                engine,
+                &format!("Allow {display}"),
+                "amwall: per-app permit",
+                layer,
+                &SUBLAYER_KEY,
+                Some(&PROVIDER_KEY),
+                &conds,
+                FilterAction::Permit,
+                persistent,
+                None, // kernel-assigned mid-range weight
+            );
+            match result {
+                Ok(_) => counts.added += 1,
+                Err(e) if idx == 0 => {
+                    // First layer failed — typically AppPath
+                    // resolution (file missing). Treat as
+                    // skipped and skip remaining layers.
+                    eprintln!(
+                        "amwall: per-app permit skipped for {}: {e:?}",
+                        app.path.display()
+                    );
+                    counts.skipped += 1;
+                    layer_failed_first = true;
+                    break;
+                }
+                Err(e) => {
+                    // Layers 2+ failed despite layer 1 succeeding
+                    // — shouldn't happen since they share the
+                    // same AppPath. Bubble it; rolling back the
+                    // partial install is the caller's job via
+                    // cleanup_provider on the next disable.
+                    return Err(e.into());
+                }
+            }
+        }
+        let _ = layer_failed_first; // silence unused: communicates intent above
+    }
+    Ok(counts)
+}
+
+#[derive(Default)]
+struct PerAppCounts {
+    added: u32,
+    skipped: u32,
+}
+
+/// Install the catch-all block at the lowest weight. Anything not
+/// permitted by a higher-weight per-app / system / blocklist Allow
+/// drops here. Mirrors upstream's `_app_install_filters` final
+/// pass at FW_WEIGHT_LOWEST.
+fn install_default_deny(engine: &WfpEngine, persistent: bool) -> Result<u32, InstallError> {
+    let layers = [
+        FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+        FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+    ];
+    let mut count = 0u32;
+    for layer in &layers {
+        filter::add(
+            engine,
+            "amwall default-deny",
+            "amwall: catch-all block at lowest weight",
+            layer,
+            &SUBLAYER_KEY,
+            Some(&PROVIDER_KEY),
+            &[], // no conditions = match-all
+            FilterAction::Block,
+            persistent,
+            Some(0), // FW_WEIGHT_LOWEST — every per-app permit wins
+        )?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn filter_action_from_rule(rule: &Rule) -> FilterAction {
@@ -368,6 +520,7 @@ fn install_one_rule(
                         &conds,
                         action,
                         persistent,
+                        None, // kernel-assigned weight
                     )?;
                     count += 1;
                 }

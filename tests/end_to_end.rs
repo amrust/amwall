@@ -108,6 +108,7 @@ fn full_pipeline_profile_to_kernel_to_cleanup() {
                 &conds,
                 action,
                 false,
+                None,
             )
             .expect("filter add failed");
             installed += 1;

@@ -2929,12 +2929,15 @@ fn insert_apps_groups(lv: HWND) {
         GROUP_APP_ALLOWED, GROUP_APP_BLOCKED, GROUP_APP_BLOCKED_SILENT, GROUP_APP_SPECIAL,
         GROUP_APP_TIMER, insert,
     };
+    // Insert order is cosmetic — Win32 sorts groups by iGroupId
+    // for display. Listed in display order here for readability:
+    // Blocked first, then Allowed last.
     for (gid, title) in [
-        (GROUP_APP_ALLOWED, "Allowed"),
-        (GROUP_APP_TIMER, "Timer"),
-        (GROUP_APP_SPECIAL, "Special apps"),
         (GROUP_APP_BLOCKED, "Blocked"),
         (GROUP_APP_BLOCKED_SILENT, "Blocked (silent)"),
+        (GROUP_APP_TIMER, "Timer"),
+        (GROUP_APP_SPECIAL, "Special apps"),
+        (GROUP_APP_ALLOWED, "Allowed"),
     ] {
         let mut wtitle = wide(title);
         insert(lv, gid, &mut wtitle);
@@ -2974,11 +2977,11 @@ fn refresh_apps_group_headers(lv: HWND) {
         }
     }
     let labels = [
-        (GROUP_APP_ALLOWED, "Allowed"),
-        (GROUP_APP_TIMER, "Timer"),
-        (GROUP_APP_SPECIAL, "Special apps"),
         (GROUP_APP_BLOCKED, "Blocked"),
         (GROUP_APP_BLOCKED_SILENT, "Blocked (silent)"),
+        (GROUP_APP_TIMER, "Timer"),
+        (GROUP_APP_SPECIAL, "Special apps"),
+        (GROUP_APP_ALLOWED, "Allowed"),
     ];
     for (gid, base) in labels {
         let n = counts[gid as usize];
