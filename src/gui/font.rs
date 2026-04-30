@@ -82,6 +82,78 @@ pub fn set_dark_mode(hwnd: HWND, on: bool) {
     }
 }
 
+/// Build an HFONT from a stored face name + height (LOGFONT
+/// convention — negative for character height, positive for cell
+/// height). Returns `None` if the face name is empty so the
+/// caller can fall back to `load_message_font`.
+pub fn load_named_font(face: &str, height: i32) -> Option<HFONT> {
+    use windows::Win32::Graphics::Gdi::LOGFONTW;
+    if face.is_empty() {
+        return None;
+    }
+    let mut lf = LOGFONTW {
+        lfHeight: height,
+        lfWeight: 400, // FW_NORMAL — the picker writes the user's choice in directly
+        ..Default::default()
+    };
+    let face_w: Vec<u16> = face.encode_utf16().chain(std::iter::once(0)).collect();
+    let n = face_w.len().min(lf.lfFaceName.len());
+    lf.lfFaceName[..n].copy_from_slice(&face_w[..n]);
+    let hf = unsafe { CreateFontIndirectW(&lf) };
+    if hf.is_invalid() { None } else { Some(hf) }
+}
+
+/// Show the system Choose Font dialog seeded with the current
+/// `(face, height)` and return the user's selection on OK, or
+/// `None` if they cancelled. The returned LOGFONT face / height
+/// are what the caller persists into `Settings.font_*`.
+pub fn pick_font(
+    parent: HWND,
+    initial_face: &str,
+    initial_height: i32,
+) -> Option<(String, i32)> {
+    use windows::Win32::Graphics::Gdi::LOGFONTW;
+    use windows::Win32::UI::Controls::Dialogs::{
+        CF_EFFECTS, CF_INITTOLOGFONTSTRUCT, CF_SCREENFONTS, CHOOSEFONTW, ChooseFontW,
+    };
+
+    // Seed LOGFONT with the current font (if any). When the
+    // settings face is empty we leave the LOGFONT zero — the
+    // picker just shows whatever default it picks.
+    let mut lf = LOGFONTW {
+        lfHeight: if initial_height != 0 { initial_height } else { -12 },
+        lfWeight: 400,
+        ..Default::default()
+    };
+    if !initial_face.is_empty() {
+        let face_w: Vec<u16> =
+            initial_face.encode_utf16().chain(std::iter::once(0)).collect();
+        let n = face_w.len().min(lf.lfFaceName.len());
+        lf.lfFaceName[..n].copy_from_slice(&face_w[..n]);
+    }
+
+    let mut cf = CHOOSEFONTW {
+        lStructSize: std::mem::size_of::<CHOOSEFONTW>() as u32,
+        hwndOwner: parent,
+        lpLogFont: &mut lf,
+        Flags: CF_SCREENFONTS | CF_EFFECTS | CF_INITTOLOGFONTSTRUCT,
+        ..Default::default()
+    };
+    let ok = unsafe { ChooseFontW(&mut cf) }.as_bool();
+    if !ok {
+        return None;
+    }
+    // Marshal the face out. lfFaceName is a null-terminated
+    // wide-char array of length 32 (LF_FACESIZE).
+    let face_len = lf
+        .lfFaceName
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(lf.lfFaceName.len());
+    let face = String::from_utf16_lossy(&lf.lfFaceName[..face_len]);
+    Some((face, lf.lfHeight))
+}
+
 /// Walk every descendant of `root` and broadcast WM_SETFONT.
 /// `font` is HFONT cast to wparam; lparam = TRUE asks for an
 /// immediate repaint. Recurses depth-first via GW_CHILD /

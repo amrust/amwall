@@ -78,6 +78,14 @@ pub struct Settings {
     /// Selected language code (e.g. "en", "ru"). Empty = system default.
     pub language: String,
 
+    // ---- View → Font ----
+    /// Custom font face name (e.g. "Consolas"). Empty falls back
+    /// to the system message font (Segoe UI 9pt on Windows 10/11).
+    pub font_face: String,
+    /// Font height in LOGFONT units (negative = char-height, the
+    /// `ChooseFont` convention). 0 = use the system default.
+    pub font_height: i32,
+
     // ---- Settings → Interface (confirmations + tray) ----
     pub confirm_exit: bool,
     pub confirm_exit_timer: bool,
@@ -153,6 +161,8 @@ impl Default for Settings {
             skip_uac_warning: false,
             check_updates: true,
             language: String::new(),
+            font_face: String::new(),
+            font_height: 0,
             confirm_exit: true,
             confirm_exit_timer: true,
             confirm_log_clear: true,
@@ -252,6 +262,8 @@ impl Settings {
         kv(&mut buf, "skip_uac_warning", self.skip_uac_warning);
         kv(&mut buf, "check_updates", self.check_updates);
         kv_str(&mut buf, "language", &self.language);
+        kv_str(&mut buf, "font_face", &self.font_face);
+        kv_i32(&mut buf, "font_height", self.font_height);
         kv(&mut buf, "confirm_exit", self.confirm_exit);
         kv(&mut buf, "confirm_exit_timer", self.confirm_exit_timer);
         kv(&mut buf, "confirm_log_clear", self.confirm_log_clear);
@@ -355,6 +367,16 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
         }
         "log_viewer" => {
             s.log_viewer = value.to_string();
+            return;
+        }
+        "font_face" => {
+            s.font_face = value.to_string();
+            return;
+        }
+        "font_height" => {
+            if let Ok(n) = value.parse::<i32>() {
+                s.font_height = n;
+            }
             return;
         }
         _ => {}

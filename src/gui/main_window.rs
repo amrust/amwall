@@ -382,6 +382,16 @@ const TIMER_EVENT_DRAIN: usize = 9002;
 /// are firing.
 const EVENT_DRAIN_INTERVAL_MS: u32 = 500;
 
+/// Periodic pump that scans `profile.apps` for entries whose
+/// `timer` field has elapsed and rolls them back to `is_enabled
+/// = false`. Mirrors upstream's "timed Allow" feature where the
+/// user grants an app an N-minute window. 60-second tick is
+/// coarse enough that idle CPU stays unmeasurable; finer
+/// granularity isn't useful since timers are usually set in
+/// minutes.
+const TIMER_APP_EXPIRY: usize = 9005;
+const APP_EXPIRY_INTERVAL_MS: u32 = 60_000;
+
 /// One-shot timer that fires `EVENT_RESIZE_CLEANUP_MS` after the
 /// last WM_SIZE — at which point the user has stopped dragging
 /// and we can safely do the listview-jiggle repaint without
@@ -878,6 +888,10 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(state) = unsafe { state_ref(hwnd) } {
                     drain_events(hwnd, state);
                 }
+            } else if wparam.0 == TIMER_APP_EXPIRY {
+                if let Some(state) = unsafe { state_ref(hwnd) } {
+                    expire_timed_apps(hwnd, state);
+                }
             } else if wparam.0 == TIMER_GROUP_COLLAPSE_REPAINT {
                 // One-shot — disarm before any further work so a
                 // re-arm during repaint doesn't recurse.
@@ -1106,7 +1120,15 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // buttons, tab labels, listview items, status-bar text. Modal
     // dialogs handle this via DS_SHELLFONT in their templates;
     // raw CreateWindowEx-built controls need WM_SETFONT.
-    let font = super::font::load_message_font();
+    // Persisted user choice (View → Font…) wins over the system
+    // message font. Falls back when the saved face is empty
+    // (default install) or load_named_font returns None (face
+    // uninstalled since last save).
+    let font = {
+        let s = state.app.settings.borrow();
+        super::font::load_named_font(&s.font_face, s.font_height)
+            .unwrap_or_else(super::font::load_message_font)
+    };
     state.font.set(font);
     super::font::apply_recursive(hwnd, font);
 
@@ -1121,6 +1143,7 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     try_subscribe_events(state);
     unsafe {
         SetTimer(hwnd, TIMER_EVENT_DRAIN, EVENT_DRAIN_INTERVAL_MS, None);
+        SetTimer(hwnd, TIMER_APP_EXPIRY, APP_EXPIRY_INTERVAL_MS, None);
     }
 
     // Filters installed on a previous run survive process exit
@@ -1642,6 +1665,45 @@ fn force_active_apps_listview_jiggle(hwnd: HWND, state: &WndState) {
 /// Returning `(path, remote)` lets the caller show "brave.exe
 /// → 142.250.65.74:443" in the dialog without re-walking the
 /// drop event.
+/// Sweep `profile.apps` for entries whose `timer` field has
+/// elapsed (Unix timestamp <= now). Each expired entry rolls
+/// back to `is_enabled = false` and clears its timer, then a
+/// single reinstall pushes the new posture to the kernel. No-op
+/// when nothing has expired so the 60-second tick stays cheap.
+/// Mirrors upstream's "timed Allow" feature.
+fn expire_timed_apps(hwnd: HWND, state: &WndState) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut expired = 0usize;
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        for app in profile.apps.iter_mut() {
+            if app.timer > 0 && app.timer <= now && app.is_enabled {
+                app.is_enabled = false;
+                app.timer = 0;
+                expired += 1;
+            }
+        }
+    }
+    if expired == 0 {
+        return;
+    }
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+    force_active_apps_listview_jiggle(hwnd, state);
+    reinstall_filters_if_active(state);
+    set_status_text(
+        state.status.get(),
+        0,
+        &format!(
+            "{expired} app timer(s) expired \u{2014} rolled back to Block."
+        ),
+    );
+}
+
 fn auto_catalog_drops(
     state: &WndState,
     events: &[crate::wfp::events::NetEvent],
@@ -2388,6 +2450,7 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
 
         IDM_TRAY_START => on_enable_filters(hwnd),
         IDM_TRAY_SHOW => super::tray::toggle_main_window(hwnd),
+        IDM_FONT => on_pick_font(hwnd),
         IDM_OPENRULESEDITOR => on_create_rule(hwnd),
         IDM_SETTINGS => on_open_settings(hwnd),
         IDM_ADD_FILE => on_add_app(hwnd),
@@ -4467,6 +4530,57 @@ fn on_log_show(hwnd: HWND) {
             "Failed to launch log viewer (check Settings → Logging).",
         );
     }
+}
+
+/// View → Font…. Shows the system Choose Font dialog seeded
+/// with the currently-applied font, and on OK builds a fresh
+/// HFONT, swaps it onto every child of the main window via
+/// `font::apply_recursive`, deletes the old HFONT, and persists
+/// the user's choice into `Settings.font_face` /
+/// `Settings.font_height` so it survives restart.
+fn on_pick_font(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let (face, height) = {
+        let s = state.app.settings.borrow();
+        (s.font_face.clone(), s.font_height)
+    };
+    let (new_face, new_height) = match super::font::pick_font(hwnd, &face, height) {
+        Some(pair) => pair,
+        None => return, // user cancelled
+    };
+
+    let new_font = match super::font::load_named_font(&new_face, new_height) {
+        Some(f) => f,
+        None => {
+            set_status_text(state.status.get(), 0, "Font load failed; reverted.");
+            return;
+        }
+    };
+
+    // Swap onto the live tree, then delete the old handle so we
+    // don't leak GDI objects across font changes.
+    let old = state.font.get();
+    state.font.set(new_font);
+    super::font::apply_recursive(hwnd, new_font);
+    if !old.is_invalid() {
+        unsafe {
+            let _ = DeleteObject(old);
+        }
+    }
+
+    {
+        let mut s = state.app.settings.borrow_mut();
+        s.font_face = new_face;
+        s.font_height = new_height;
+    }
+    let path = state.app.settings_path.borrow().clone();
+    if let Err(e) = state.app.settings.borrow().save(&path) {
+        eprintln!("amwall: settings: save font choice failed: {e}");
+    }
+    set_status_text(state.status.get(), 0, "Font updated.");
 }
 
 /// Modal yes/no for the right-click Allow path when the target
