@@ -39,7 +39,7 @@ use windows::Win32::UI::Controls::{
     LVITEMW,
     LVM_DELETEALLITEMS, LVM_GETITEM, LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
     LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVN_KEYDOWN,
+    LVM_SETITEMTEXTW, LVN_COLUMNCLICK, LVN_KEYDOWN,
     LVIS_SELECTED, LVNI_SELECTED, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
     LVS_REPORT,
     LVS_SHOWSELALWAYS, NM_DBLCLK, NM_RCLICK, NMHDR, NMITEMACTIVATE, NMLVKEYDOWN,
@@ -91,6 +91,28 @@ use super::{post_quit, wide};
 /// registration.
 const CLASS_NAME: PCWSTR = w!("AmwallMainWindow");
 
+/// Sort state for the Apps Profile listview. Click a column
+/// header → toggle sort direction (or switch column). Drives
+/// `populate_apps_tab`'s iteration order.
+#[derive(Debug, Clone, Copy)]
+struct AppsSortState {
+    /// 0 = Name, 1 = Added timestamp. Other columns ignored.
+    column: i32,
+    /// `true` = small → large; `false` = large → small. Default
+    /// is descending on Added so the most recent activity shows
+    /// at the top of each group.
+    ascending: bool,
+}
+
+impl Default for AppsSortState {
+    fn default() -> Self {
+        Self {
+            column: 1,
+            ascending: false,
+        }
+    }
+}
+
 /// Win32 timer id used to drive Connections-tab live refresh.
 /// Distinct from any IDC_* control id since Win32 routes timers
 /// through the same WM_TIMER queue.
@@ -119,7 +141,7 @@ const LOGICAL_INITIAL_H: i32 = 600;
 /// computed at WM_CREATE time. Negative values in upstream were
 /// "percent-of-rect" hints; we translate them to fixed logical
 /// widths for the M5.2 baseline (M5.4 will revisit auto-sizing).
-const APPS_COL_WIDTHS: &[i32] = &[280, 100]; // Name, Added
+const APPS_COL_WIDTHS: &[i32] = &[280, 150]; // Name, Added (date+time)
 const RULES_COL_WIDTHS: &[i32] = &[280, 80, 80]; // Name, Protocol, Direction
 const NETWORK_COL_WIDTHS: &[i32] = &[
     180, // Name
@@ -235,6 +257,12 @@ struct WndState {
     /// Cached registry walk of installed UWP packages for the Apps
     /// → UWP tab. Same population/refresh model as `services`.
     uwp_packages: std::cell::RefCell<Vec<super::uwp_enum::PackageEntry>>,
+    /// Sort state for the Apps Profile tab, toggled by clicking
+    /// a column header (LVN_COLUMNCLICK). Default: most-recent
+    /// Added first, so the user sees fresh activity at the top
+    /// of each group (especially "Blocked" once auto-cataloging
+    /// of new drops lands in the next commit).
+    apps_sort: Cell<AppsSortState>,
     /// Most recently right-clicked listview row, set on NM_RCLICK
     /// before the popup menu shows and consumed by the IDM_*
     /// handlers. None after the menu dismisses (or never opened).
@@ -275,6 +303,7 @@ impl WndState {
             services: std::cell::RefCell::new(Vec::new()),
             uwp_packages: std::cell::RefCell::new(Vec::new()),
             context_target: std::cell::RefCell::new(None),
+            apps_sort: Cell::new(AppsSortState::default()),
         }
     }
 }
@@ -635,6 +664,20 @@ unsafe extern "system" fn wnd_proc(
             {
                 let activate = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
                 on_apps_context_menu(hwnd, nmhdr.idFrom as i32, activate);
+            }
+            // LVN_COLUMNCLICK on the Apps Profile listview
+            // toggles sort. iSubItem on NMLISTVIEW carries the
+            // column index. Repeating click on the same column
+            // flips ascending/descending; clicking a different
+            // column resets to descending (so most-recent-first
+            // is the default for Added).
+            if nmhdr.code == LVN_COLUMNCLICK
+                && nmhdr.idFrom == IDC_APPS_PROFILE as usize
+            {
+                let nmlv = unsafe {
+                    &*(lparam.0 as *const windows::Win32::UI::Controls::NMLISTVIEW)
+                };
+                on_apps_column_click(hwnd, nmlv.iSubItem);
             }
             // Apps tab keyboard shortcuts (Ctrl+A select all,
             // Del bulk delete from profile).
@@ -1669,6 +1712,26 @@ fn on_apps_context_menu(hwnd: HWND, listview_id: i32, activate: &NMITEMACTIVATE)
     // Always clear after the menu — even if no item was picked, the
     // captured target shouldn't persist into the next interaction.
     *state.context_target.borrow_mut() = None;
+}
+
+/// User clicked a column header on the Apps Profile listview.
+/// Toggle sort direction if it's the same column, otherwise
+/// switch to that column with a descending default (so a fresh
+/// click on Added shows latest-first).
+fn on_apps_column_click(hwnd: HWND, column: i32) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let mut sort = state.apps_sort.get();
+    if sort.column == column {
+        sort.ascending = !sort.ascending;
+    } else {
+        sort.column = column;
+        sort.ascending = false;
+    }
+    state.apps_sort.set(sort);
+    populate_apps_tab(state);
 }
 
 /// `true` if either Ctrl key is currently pressed. Used to
@@ -3455,8 +3518,26 @@ fn populate_apps_tab(state: &WndState) {
     let profile = state.app.profile.borrow();
     let filenames_only = state.app.settings.borrow().show_filenames_only;
     let filter = state.search_text.borrow().clone();
+
+    // Sort the iteration order per the user's last column-click
+    // (default: Added desc, so most recent activity surfaces at
+    // the top of each group). The `iGroupId` we stamp per item
+    // still drives Win32 group bucketing — the sort just picks
+    // ordering within each group.
+    let sort = state.apps_sort.get();
+    let mut indexed: Vec<(usize, &crate::profile::App)> =
+        profile.apps.iter().enumerate().collect();
+    indexed.sort_by(|a, b| {
+        let cmp = match sort.column {
+            0 => a.1.path.cmp(&b.1.path),
+            // 1 (and any other column) sorts by timestamp.
+            _ => a.1.timestamp.cmp(&b.1.timestamp),
+        };
+        if sort.ascending { cmp } else { cmp.reverse() }
+    });
+
     let mut row = 0i32;
-    for (orig_idx, app) in profile.apps.iter().enumerate() {
+    for (orig_idx, app) in indexed {
         // Only File-kind entries show on this tab. Service and
         // UWP entries (path-less SCM short names like "Dnscache"
         // and S-1-15-2-... package family SIDs) belong on the
