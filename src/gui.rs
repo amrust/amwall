@@ -21,6 +21,7 @@ pub mod apps_context_menu;
 pub mod connect_dialog;
 pub mod connections;
 pub mod dialogs;
+pub mod dns_resolve;
 pub mod event_log;
 pub mod first_run_wizard;
 pub mod font;

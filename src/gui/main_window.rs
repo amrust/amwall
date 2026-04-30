@@ -316,6 +316,19 @@ struct WndState {
     /// messages against it cheaply (it's a per-process constant
     /// once registered).
     taskbar_created_msg: Cell<u32>,
+    /// Reverse-DNS cache shared with the
+    /// [`dns_resolve`](super::dns_resolve) worker thread.
+    /// `Some(host)` = PTR record resolved; `None` = queried but
+    /// no record / lookup failed (so the populator doesn't
+    /// re-enqueue dead IPs every refresh). Only consulted when
+    /// `Settings.use_network_resolution` is on; the worker
+    /// itself runs unconditionally and is cheap while idle.
+    dns_cache: std::sync::Arc<
+        std::sync::Mutex<super::dns_resolve::DnsCacheMap>,
+    >,
+    /// Sends new IPs to the DNS worker. `None` until the worker
+    /// spawns at WM_CREATE.
+    dns_tx: std::cell::RefCell<Option<std::sync::mpsc::Sender<std::net::IpAddr>>>,
 }
 
 impl WndState {
@@ -364,6 +377,10 @@ impl WndState {
             tray_added: Cell::new(false),
             taskbar_created_msg: Cell::new(0),
             app_icon_cache: super::app_icons::IconCache::new(),
+            dns_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            dns_tx: std::cell::RefCell::new(None),
         }
     }
 }
@@ -879,6 +896,27 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        m if m == super::dns_resolve::WM_USER_DNS_REFRESH => {
+            // DNS worker resolved a batch of hostnames; if the
+            // Connections tab is visible re-populate so the new
+            // names appear in the Host columns. Tab indices 6 +
+            // 7 are Connections + Log; both consume hostnames.
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                let tab = state.tab.get();
+                if tab.0 != 0 {
+                    let sel = unsafe {
+                        SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0))
+                    }
+                    .0 as isize;
+                    if sel == 6 {
+                        populate_connections_tab(state);
+                    } else if sel == 7 {
+                        populate_log_tab(state);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_TIMER => {
             if wparam.0 == TIMER_CONNECTIONS_REFRESH {
                 if let Some(state) = unsafe { state_ref(hwnd) } {
@@ -1175,6 +1213,14 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // populator code can enqueue paths.
     let tx = spawn_signed_worker(hwnd, state.signed_cache.clone());
     *state.signed_tx.borrow_mut() = Some(tx);
+
+    // Reverse-DNS worker: fills `dns_cache` on a background
+    // thread and pings the GUI back via WM_USER_DNS_REFRESH after
+    // each batch. Only consulted when
+    // `Settings.use_network_resolution` is on, but always alive
+    // so toggling the setting from off→on doesn't need a respawn.
+    let dns_tx = super::dns_resolve::spawn_worker(hwnd, state.dns_cache.clone());
+    *state.dns_tx.borrow_mut() = Some(dns_tx);
 
     // First-run wizard (M9.4): if the user has never seen it
     // and simplewall has a config to import, ask. Runs once per
@@ -5637,6 +5683,7 @@ fn populate_connections_tab(state: &WndState) {
         let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
     }
     let filter = state.search_text.borrow().clone();
+    let resolve = state.app.settings.borrow().use_network_resolution;
     let mut row = 0i32;
     for c in conns.iter() {
         if !search_match(&c.process, &filter) {
@@ -5661,7 +5708,10 @@ fn populate_connections_tab(state: &WndState) {
             )
         };
         set_subitem(lv, idx as i32, 1, &c.local.ip.to_string());
-        // col 2 (Host source) intentionally empty — see fn doc.
+        // Host(Source) — only filled when reverse DNS is on and
+        // the cache already has a hit. Misses enqueue a lookup.
+        let local_host = lookup_or_enqueue(state, c.local.ip, resolve);
+        set_subitem(lv, idx as i32, 2, &local_host);
         set_subitem(lv, idx as i32, 3, &c.local.port.to_string());
         let remote_addr = if c.remote.ip.is_unspecified() {
             String::new()
@@ -5669,7 +5719,12 @@ fn populate_connections_tab(state: &WndState) {
             c.remote.ip.to_string()
         };
         set_subitem(lv, idx as i32, 4, &remote_addr);
-        // col 5 (Host destination) intentionally empty.
+        let remote_host = if c.remote.ip.is_unspecified() {
+            String::new()
+        } else {
+            lookup_or_enqueue(state, c.remote.ip, resolve)
+        };
+        set_subitem(lv, idx as i32, 5, &remote_host);
         let remote_port = if c.remote.port == 0 {
             String::new()
         } else {
@@ -5679,6 +5734,39 @@ fn populate_connections_tab(state: &WndState) {
         set_subitem(lv, idx as i32, 7, c.protocol.label());
         set_subitem(lv, idx as i32, 8, c.state);
     }
+}
+
+/// Hostname-or-empty for one IP. When `resolve` is false we don't
+/// even consult the cache (so the Host columns stay blank just
+/// like they did pre-Phase-G). On hit, returns the cached
+/// hostname or empty for "queried, no PTR record". On miss,
+/// enqueues the IP for the worker and returns empty so the row
+/// renders immediately; a WM_USER_DNS_REFRESH will repopulate
+/// once resolution lands.
+///
+/// Skips loopback / unspecified / multicast IPs — looking those
+/// up just wastes worker cycles since they have no meaningful
+/// PTR record to surface.
+fn lookup_or_enqueue(
+    state: &WndState,
+    ip: std::net::IpAddr,
+    resolve: bool,
+) -> String {
+    if !resolve {
+        return String::new();
+    }
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+        return String::new();
+    }
+    if let Ok(g) = state.dns_cache.lock() {
+        if let Some(entry) = g.get(&ip) {
+            return entry.clone().unwrap_or_default();
+        }
+    }
+    if let Some(tx) = state.dns_tx.borrow().as_ref() {
+        let _ = tx.send(ip);
+    }
+    String::new()
 }
 
 /// Populate the Packets log tab (`IDC_LOG`, slot 7) from the
@@ -5701,6 +5789,7 @@ fn populate_log_tab(state: &WndState) {
     }
     let log = state.event_log.borrow();
     let filter = state.search_text.borrow().clone();
+    let resolve = state.app.settings.borrow().use_network_resolution;
 
     let mut row = 0i32;
     for (event_idx, event) in log.iter().enumerate() {
@@ -5746,8 +5835,14 @@ fn populate_log_tab(state: &WndState) {
                 .map(|a| a.to_string())
                 .unwrap_or_default(),
         );
-        // col 4 (Host source) intentionally empty — DNS would block
-        // the UI thread.
+        // Host source: DNS cache hit → render hostname; miss
+        // enqueues an async lookup and a later WM_USER_DNS_REFRESH
+        // re-runs this populator.
+        let local_host = details
+            .local_addr
+            .map(|a| lookup_or_enqueue(state, a, resolve))
+            .unwrap_or_default();
+        set_subitem(lv, i, 4, &local_host);
         set_subitem(
             lv,
             i,
@@ -5766,8 +5861,11 @@ fn populate_log_tab(state: &WndState) {
                 .map(|a| a.to_string())
                 .unwrap_or_default(),
         );
-        // col 7 (Host destination) intentionally empty — same reason
-        // as col 4.
+        let remote_host = details
+            .remote_addr
+            .map(|a| lookup_or_enqueue(state, a, resolve))
+            .unwrap_or_default();
+        set_subitem(lv, i, 7, &remote_host);
         set_subitem(
             lv,
             i,
