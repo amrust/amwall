@@ -59,9 +59,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONERROR, MB_OK, MF_BYCOMMAND, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
     MessageBoxW, MoveWindow, RegisterClassExW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
-    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SHOWWINDOW,
-    WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
+    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY,
+    WM_SHOWWINDOW, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
     WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
@@ -82,7 +82,7 @@ use super::ids::{
     IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SETTINGS,
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SKIPUACWARNING_CHK,
     IDM_STARTMINIMIZED_CHK, IDM_TRAY_ENABLELOG_CHK, IDM_TRAY_ENABLENOTIFICATIONS_CHK,
-    IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGSHOW, IDM_TRAY_START,
+    IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGSHOW, IDM_TRAY_SHOW, IDM_TRAY_START,
     IDM_USEDARKTHEME_CHK, IDM_WEBSITE, TAB_LISTVIEW_IDS,
 };
 use super::dialogs;
@@ -290,6 +290,16 @@ struct WndState {
     /// before the popup menu shows and consumed by the IDM_*
     /// handlers. None after the menu dismisses (or never opened).
     context_target: std::cell::RefCell<Option<super::apps_context_menu::ContextTarget>>,
+    /// `true` once Shell_NotifyIcon(NIM_ADD) has accepted our
+    /// tray icon. Gates NIM_MODIFY / NIM_DELETE so we don't
+    /// double-add (which silently fails) or remove an icon we
+    /// never registered.
+    tray_added: Cell<bool>,
+    /// Runtime ID of the registered "TaskbarCreated" broadcast.
+    /// Cached at WM_CREATE so the wndproc can compare incoming
+    /// messages against it cheaply (it's a per-process constant
+    /// once registered).
+    taskbar_created_msg: Cell<u32>,
 }
 
 impl WndState {
@@ -332,6 +342,8 @@ impl WndState {
                 std::collections::HashMap::new(),
             )),
             signed_tx: std::cell::RefCell::new(None),
+            tray_added: Cell::new(false),
+            taskbar_created_msg: Cell::new(0),
         }
     }
 }
@@ -421,6 +433,11 @@ pub fn create(app: Box<App>) -> Result<HWND, String> {
 
         let title = wide(&format_window_title(&app.profile_path.borrow()));
 
+        // Pull `start_minimized` before consuming `app` so we can
+        // skip the SW_SHOW below and let the tray icon be the
+        // sole entry point on first paint.
+        let start_minimized = app.settings.borrow().start_minimized;
+
         // Wrap the App in WndState and pass the raw pointer through
         // CreateWindowExW. Consumed by WM_NCCREATE; reclaimed by
         // WM_NCDESTROY.
@@ -451,8 +468,20 @@ pub fn create(app: Box<App>) -> Result<HWND, String> {
             return Err("CreateWindowExW failed".into());
         }
 
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = UpdateWindow(hwnd);
+        // Tray icon is added during WM_CREATE so it's already
+        // registered by the time we either show or hide the
+        // window — keeps "Start minimized" honest (the user
+        // sees the tray icon as soon as the process is up).
+        if start_minimized {
+            // Don't paint the main window — the tray icon is
+            // the only entry point until the user clicks it.
+            // No SW_SHOW means the window never lands on the
+            // taskbar in the first place.
+            let _ = UpdateWindow(hwnd);
+        } else {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = UpdateWindow(hwnd);
+        }
         Ok(hwnd)
     }
 }
@@ -789,6 +818,10 @@ unsafe extern "system" fn wnd_proc(
             on_connect_allow(hwnd, wparam);
             LRESULT(0)
         }
+        m if m == super::tray::WM_USER_TRAYICON => {
+            on_tray_message(hwnd, lparam);
+            LRESULT(0)
+        }
         m if m == WM_USER_SIGNED_REFRESH => {
             // Worker filled new cache entries — repaint the
             // active apps listview so freshly-verified rows
@@ -865,7 +898,34 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_CLOSE => {
+            // X / Alt+F4 hides to the tray instead of exiting,
+            // matching simplewall's behavior. The user keeps
+            // IDM_EXIT (File → Exit, Ctrl+Q, tray "Exit amwall")
+            // as the real quit path. If NIM_ADD failed at
+            // startup we fall through to DefWindowProc so the
+            // user isn't trapped with no way to close the
+            // window.
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                if state.tray_added.get() {
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    }
+                    return LRESULT(0);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_DESTROY => {
+            // Tear down the tray icon before quitting so the
+            // notification area doesn't keep a stale slot for
+            // the dead HWND until the user hovers over it.
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                if state.tray_added.get() {
+                    super::tray::remove(hwnd);
+                    state.tray_added.set(false);
+                }
+            }
             post_quit(0);
             LRESULT(0)
         }
@@ -885,7 +945,48 @@ unsafe extern "system" fn wnd_proc(
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        _ => {
+            // explorer.exe restart broadcast — re-register the
+            // tray icon since the previous notification area is
+            // gone. Cached registered-message id lives on
+            // `state.taskbar_created_msg`.
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                let tcm = state.taskbar_created_msg.get();
+                if tcm != 0 && msg == tcm {
+                    state.tray_added.set(false);
+                    let active = state.filters_active.get();
+                    if super::tray::add(hwnd, active) {
+                        state.tray_added.set(true);
+                    }
+                    return LRESULT(0);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+    }
+}
+
+/// Handle a tray-icon callback message. lparam's LOWORD carries
+/// the underlying mouse / keyboard event the shell observed.
+/// Left-click toggles main-window visibility; right-click pops
+/// the tray context menu.
+fn on_tray_message(hwnd: HWND, lparam: LPARAM) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+    };
+    let event = (lparam.0 as u32) & 0xFFFF;
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    match event {
+        WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
+            super::tray::toggle_main_window(hwnd);
+        }
+        WM_RBUTTONUP | WM_CONTEXTMENU => {
+            super::tray::show_context_menu(hwnd, state.filters_active.get());
+        }
+        _ => {}
     }
 }
 
@@ -990,6 +1091,20 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // title-bar would say "off" while the kernel is still
     // dropping packets.
     detect_initial_filter_state(hwnd, state);
+
+    // Register the always-visible tray icon and the
+    // "TaskbarCreated" broadcast id (so we can re-register on
+    // explorer.exe restart). Done after detect_initial_filter_state
+    // so the icon paints with the correct color/mono variant.
+    state
+        .taskbar_created_msg
+        .set(super::tray::taskbar_created_message());
+    let active = state.filters_active.get();
+    if super::tray::add(hwnd, active) {
+        state.tray_added.set(true);
+    } else {
+        eprintln!("amwall: Shell_NotifyIcon(NIM_ADD) failed; tray icon unavailable.");
+    }
 
     // Spawn the WinVerifyTrust background worker so the apps-
     // tab signed-row colorizer can fill its cache without
@@ -1170,6 +1285,14 @@ fn update_titlebar_icon(hwnd: HWND, active: bool) {
             WPARAM(ICON_BIG as usize),
             LPARAM(icon.0),
         );
+    }
+
+    // Keep the tray icon's color/mono variant in sync with the
+    // title bar so both surfaces tell the same story.
+    if let Some(state) = unsafe { state_ref(hwnd) } {
+        if state.tray_added.get() {
+            super::tray::update(hwnd, active);
+        }
     }
 }
 
@@ -2129,6 +2252,7 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         | IDM_CHECKUPDATES_CHK => on_toggle(hwnd, id),
 
         IDM_TRAY_START => on_enable_filters(hwnd),
+        IDM_TRAY_SHOW => super::tray::toggle_main_window(hwnd),
         IDM_OPENRULESEDITOR => on_create_rule(hwnd),
         IDM_SETTINGS => on_open_settings(hwnd),
         IDM_ADD_FILE => on_add_app(hwnd),

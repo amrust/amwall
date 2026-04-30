@@ -144,6 +144,11 @@ pub const IDM_TRAY_ENABLEUILOG_CHK: u16 = 311;
 pub const IDM_TRAY_LOGSHOW: u16 = 312;
 pub const IDM_TRAY_LOGCLEAR: u16 = 313;
 
+/// Tray context-menu "Show amwall" command — restores the main
+/// window from hidden / minimized state. Handled in
+/// `main_window::on_command`.
+pub const IDM_TRAY_SHOW: u16 = 314;
+
 // Listview-context-menu IDM upstream uses for "Create rule".
 pub const IDM_OPENRULESEDITOR: u16 = 323;
 
