@@ -111,6 +111,55 @@ pub struct App {
     pub comment: Option<String>,
 }
 
+/// What kind of "app" the `path` field actually identifies. Upstream
+/// simplewall's profile.xml stores three flavors in one `<apps>`
+/// section, distinguished by the path's shape rather than a `type`
+/// attribute (matches upstream's runtime classification in
+/// `_app_addapplication`):
+///
+///   - `File` — a real executable path (`C:\...\app.exe`,
+///     `\device\harddiskvolume3\...`, `%systemroot%\...`). Always
+///     contains `\` or `/`.
+///   - `Service` — an SCM service short name (`Dnscache`, `Dhcp`,
+///     `wuauserv`). No path separators, not a SID.
+///   - `Uwp` — a UWP package family security id (`S-1-15-2-XXX-
+///     YYY-...`). Distinctive `S-1-15-2-` prefix.
+///
+/// Each kind is supposed to surface on its respective tab — File
+/// in `Apps`, Service in `Services`, Uwp in `UWP apps`. Without
+/// this split, importing a simplewall profile dumps all three
+/// kinds into the Apps tab where most users only expect to see
+/// .exe entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppKind {
+    File,
+    Service,
+    Uwp,
+}
+
+impl App {
+    /// Classify this entry by inspecting its `path`. See
+    /// [`AppKind`].
+    pub fn kind(&self) -> AppKind {
+        Self::kind_for(&self.path)
+    }
+
+    /// Stand-alone classifier (no `App` instance required) so
+    /// callers like `gui::apps_context_menu::target_from_click`
+    /// can route a service/UWP candidate without constructing a
+    /// throwaway `App`.
+    pub fn kind_for(path: &std::path::Path) -> AppKind {
+        let s = path.to_string_lossy();
+        if s.starts_with("S-1-15-2-") {
+            return AppKind::Uwp;
+        }
+        if s.contains('\\') || s.contains('/') {
+            return AppKind::File;
+        }
+        AppKind::Service
+    }
+}
+
 /// `<rules_config><item ...>` entry — overrides for a named rule
 /// (typically applied to a system rule).
 #[derive(Debug, Clone, PartialEq)]
@@ -219,5 +268,58 @@ impl AddressFamily {
             23 => Self::Ipv6,
             other => Self::Other(other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn app_kind_classifies_uwp_sid() {
+        assert_eq!(
+            App::kind_for(Path::new(
+                "S-1-15-2-3110756066-2507771734-389907848-353554127-1230786711-3973453966-120447785"
+            )),
+            AppKind::Uwp,
+        );
+    }
+
+    #[test]
+    fn app_kind_classifies_service_short_name() {
+        assert_eq!(App::kind_for(Path::new("CryptSvc")), AppKind::Service);
+        assert_eq!(App::kind_for(Path::new("Dnscache")), AppKind::Service);
+        assert_eq!(App::kind_for(Path::new("wuauserv")), AppKind::Service);
+    }
+
+    #[test]
+    fn app_kind_classifies_file_paths() {
+        assert_eq!(
+            App::kind_for(Path::new(r"C:\Windows\system32\svchost.exe")),
+            AppKind::File,
+        );
+        assert_eq!(
+            App::kind_for(Path::new(r"%systemroot%\system32\lsass.exe")),
+            AppKind::File,
+        );
+        // Forward-slash form (less common on Windows but valid).
+        assert_eq!(
+            App::kind_for(Path::new("/usr/bin/whatever")),
+            AppKind::File,
+        );
+        // NT-form native path used by WFP app-id blobs.
+        assert_eq!(
+            App::kind_for(Path::new(r"\device\harddiskvolume3\foo.exe")),
+            AppKind::File,
+        );
+    }
+
+    #[test]
+    fn app_kind_empty_path_is_service() {
+        // Edge case — no separator, no SID prefix, so falls
+        // through to Service. Profile.xml shouldn't ship empty
+        // paths but the heuristic shouldn't panic on one.
+        assert_eq!(App::kind_for(Path::new("")), AppKind::Service);
     }
 }

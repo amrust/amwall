@@ -191,13 +191,19 @@ fn append_separator(menu: windows::Win32::UI::WindowsAndMessaging::HMENU) {
 }
 
 /// Resolve the user's right-clicked row into a `ContextTarget`.
-/// Reads from the cached service / UWP enumerations on `WndState`
-/// and the user profile to decide the in_profile / is_enabled
-/// state. Returns `None` if the row index is out of range or the
-/// listview ID isn't one of the apps tabs.
-pub fn target_from_click(
+///
+/// `row` is the listview row index (kept on the target so handlers
+/// that need to repaint that specific row have it); `source_idx`
+/// is the original index in the underlying source slice
+/// (`profile.apps` / `services` / `uwp_packages`) that the
+/// populator stamped into `LVITEMW.lParam`. The two parted ways
+/// when the M9.4 AppKind filter started skipping rows during
+/// populate; `lParam` is the only reliable way to round-trip
+/// row → source.
+pub fn target_from_source(
     listview_id: i32,
     row: i32,
+    source_idx: usize,
     profile: &crate::profile::Profile,
     services: &[super::services_enum::ServiceEntry],
     uwp_packages: &[super::uwp_enum::PackageEntry],
@@ -205,10 +211,9 @@ pub fn target_from_click(
     if row < 0 {
         return None;
     }
-    let row_usize = row as usize;
     match listview_id {
         IDC_APPS_PROFILE => {
-            let app = profile.apps.get(row_usize)?;
+            let app = profile.apps.get(source_idx)?;
             Some(ContextTarget {
                 listview_id,
                 row,
@@ -223,7 +228,7 @@ pub fn target_from_click(
             })
         }
         IDC_APPS_SERVICE => {
-            let svc = services.get(row_usize)?;
+            let svc = services.get(source_idx)?;
             let display = if svc.display_name.is_empty() {
                 svc.service_name.clone()
             } else {
@@ -246,7 +251,7 @@ pub fn target_from_click(
             })
         }
         IDC_APPS_UWP => {
-            let pkg = uwp_packages.get(row_usize)?;
+            let pkg = uwp_packages.get(source_idx)?;
             // No path-based match for UWP — package family name
             // identifier needs a separate App-or-Package model
             // (M5.4d). For now the menu shows but Allow/Block are
@@ -298,7 +303,7 @@ mod tests {
     #[test]
     fn profile_row_yields_in_profile_target() {
         let profile = fixture_profile(vec![sample_app(r"C:\foo.exe", true)]);
-        let tgt = target_from_click(IDC_APPS_PROFILE, 0, &profile, &[], &[]).unwrap();
+        let tgt = target_from_source(IDC_APPS_PROFILE, 0, 0, &profile, &[], &[]).unwrap();
         assert_eq!(tgt.binary_path, PathBuf::from(r"C:\foo.exe"));
         assert!(tgt.in_profile);
         assert!(tgt.current_is_enabled);
@@ -315,7 +320,7 @@ mod tests {
         let profile =
             fixture_profile(vec![sample_app(r"C:\Windows\system32\svchost.exe", false)]);
         let tgt =
-            target_from_click(IDC_APPS_SERVICE, 0, &profile, std::slice::from_ref(&svc), &[])
+            target_from_source(IDC_APPS_SERVICE, 0, 0, &profile, std::slice::from_ref(&svc), &[])
                 .unwrap();
         assert!(tgt.in_profile, "image path matches an existing App entry");
         assert!(!tgt.current_is_enabled, "should reflect the App's is_enabled");
@@ -331,7 +336,7 @@ mod tests {
         };
         let profile = fixture_profile(Vec::new());
         let tgt =
-            target_from_click(IDC_APPS_SERVICE, 0, &profile, std::slice::from_ref(&svc), &[])
+            target_from_source(IDC_APPS_SERVICE, 0, 0, &profile, std::slice::from_ref(&svc), &[])
                 .unwrap();
         assert!(!tgt.in_profile);
     }
@@ -345,7 +350,7 @@ mod tests {
         };
         let profile = fixture_profile(Vec::new());
         let tgt =
-            target_from_click(IDC_APPS_UWP, 0, &profile, &[], std::slice::from_ref(&pkg))
+            target_from_source(IDC_APPS_UWP, 0, 0, &profile, &[], std::slice::from_ref(&pkg))
                 .unwrap();
         assert!(!tgt.in_profile);
         assert!(tgt.binary_path.as_os_str().is_empty());
@@ -355,13 +360,29 @@ mod tests {
     #[test]
     fn out_of_range_row_yields_none() {
         let profile = fixture_profile(Vec::new());
-        assert!(target_from_click(IDC_APPS_PROFILE, 0, &profile, &[], &[]).is_none());
-        assert!(target_from_click(IDC_APPS_PROFILE, -1, &profile, &[], &[]).is_none());
+        assert!(target_from_source(IDC_APPS_PROFILE, 0, 0, &profile, &[], &[]).is_none());
+        assert!(target_from_source(IDC_APPS_PROFILE, -1, 0, &profile, &[], &[]).is_none());
+    }
+
+    #[test]
+    fn source_idx_decoupled_from_row() {
+        // Same listview row (e.g. row 0) can resolve to a
+        // different App when the populator filtered earlier
+        // entries — that's exactly the bug the lParam round-
+        // trip fixes. Two-app profile, source_idx=1 must
+        // return the second App regardless of `row`.
+        let profile = fixture_profile(vec![
+            sample_app(r"C:\first.exe", true),
+            sample_app(r"C:\second.exe", false),
+        ]);
+        let tgt = target_from_source(IDC_APPS_PROFILE, 0, 1, &profile, &[], &[]).unwrap();
+        assert_eq!(tgt.binary_path, PathBuf::from(r"C:\second.exe"));
+        assert!(!tgt.current_is_enabled);
     }
 
     #[test]
     fn unknown_listview_id_yields_none() {
         let profile = fixture_profile(Vec::new());
-        assert!(target_from_click(99999, 0, &profile, &[], &[]).is_none());
+        assert!(target_from_source(99999, 0, 0, &profile, &[], &[]).is_none());
     }
 }

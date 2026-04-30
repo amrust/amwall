@@ -35,7 +35,8 @@ use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificL
 use windows::Win32::UI::Controls::{
     ICC_BAR_CLASSES, ICC_COOL_CLASSES, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
-    LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_STATE, LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW,
+    LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_PARAM, LVIF_STATE, LVIF_TEXT, LVIS_STATEIMAGEMASK,
+    LVITEMW,
     LVM_DELETEALLITEMS, LVM_GETITEM, LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
     LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW,
     LVN_KEYDOWN,
@@ -1602,13 +1603,32 @@ fn on_apps_context_menu(hwnd: HWND, listview_id: i32, activate: &NMITEMACTIVATE)
         Some(s) => s,
         None => return,
     };
+    // Map the clicked listview row back to its source-vec index
+    // via the `lParam` the populator stamped at insert time. The
+    // listview row index alone is stale once filters skip rows.
+    let source_idx = {
+        let lv_listview = match listview_id {
+            id if id == IDC_APPS_PROFILE => state.listviews[0].get(),
+            id if id == IDC_APPS_SERVICE => state.listviews[1].get(),
+            id if id == IDC_APPS_UWP => state.listviews[2].get(),
+            _ => return,
+        };
+        if lv_listview.0 == 0 {
+            return;
+        }
+        match listview_item_param(lv_listview, activate.iItem) {
+            Some(p) => p as usize,
+            None => return,
+        }
+    };
     let target = {
         let profile = state.app.profile.borrow();
         let services = state.services.borrow();
         let uwp = state.uwp_packages.borrow();
-        super::apps_context_menu::target_from_click(
+        super::apps_context_menu::target_from_source(
             listview_id,
             activate.iItem,
+            source_idx,
             &profile,
             &services,
             &uwp,
@@ -3009,6 +3029,29 @@ fn listview_item_group(lv: HWND, idx: i32) -> Option<i32> {
     if res.0 == 0 { None } else { Some(item.iGroupId) }
 }
 
+/// Read the `lParam` (source-vec index) the populator stamped on
+/// the row at `idx`. Returns `None` if the LVM_GETITEM call fails
+/// (out-of-range row, or a row that wasn't populated by us).
+/// Used by NM_RCLICK to round-trip from a clicked listview row to
+/// the underlying `profile.apps` / `state.services` /
+/// `state.uwp_packages` slot.
+fn listview_item_param(lv: HWND, idx: i32) -> Option<isize> {
+    let mut item = LVITEMW {
+        mask: LVIF_PARAM,
+        iItem: idx,
+        ..Default::default()
+    };
+    let res = unsafe {
+        SendMessageW(
+            lv,
+            LVM_GETITEM,
+            WPARAM(0),
+            LPARAM(&mut item as *mut _ as isize),
+        )
+    };
+    if res.0 == 0 { None } else { Some(item.lParam.0) }
+}
+
 fn add_column(
     lv: HWND,
     idx: i32,
@@ -3139,7 +3182,18 @@ fn populate_apps_tab(state: &WndState) {
     let filenames_only = state.app.settings.borrow().show_filenames_only;
     let filter = state.search_text.borrow().clone();
     let mut row = 0i32;
-    for app in profile.apps.iter() {
+    for (orig_idx, app) in profile.apps.iter().enumerate() {
+        // Only File-kind entries show on this tab. Service and
+        // UWP entries (path-less SCM short names like "Dnscache"
+        // and S-1-15-2-... package family SIDs) belong on the
+        // Services / UWP apps sub-tabs respectively. Without
+        // this filter, importing a simplewall profile dumps all
+        // three kinds onto Apps where most users only expect
+        // .exe paths — caught during M9.4 live testing.
+        if app.kind() != crate::profile::AppKind::File {
+            continue;
+        }
+
         // View → Show filenames only chooses between basename and
         // full path. Default-on matches upstream behaviour.
         let display_name = if filenames_only {
@@ -3163,14 +3217,24 @@ fn populate_apps_tab(state: &WndState) {
         // matching `stateMask` is the documented way to set this
         // alongside the row insert.
         let state_image_index = if app.is_enabled { 2u32 } else { 1u32 };
+        // `lParam` carries the original index in `profile.apps`.
+        // The listview row index isn't a 1:1 map any more (the
+        // AppKind filter and the search filter both skip rows),
+        // so the right-click handler needs `lParam` to round-
+        // trip to the same App that was rendered. Using the
+        // listview row directly read the wrong App's
+        // `is_enabled` and showed inverted Allow/Block check
+        // marks on imported profiles — caught during M9.4
+        // testing.
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM,
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image_index << 12),
             iGroupId: super::listview_groups::app_group_id(app),
+            lParam: LPARAM(orig_idx as isize),
             ..Default::default()
         };
         let _ = unsafe {
@@ -3212,7 +3276,7 @@ fn populate_services_tab(state: &WndState) {
     let profile = state.app.profile.borrow();
     let filter = state.search_text.borrow().clone();
     let mut row = 0i32;
-    for svc in services.iter() {
+    for (orig_idx, svc) in services.iter().enumerate() {
         // Match the search filter against display name first, then
         // service name as a fallback — users may know either.
         let name_for_display = if svc.display_name.is_empty() {
@@ -3242,13 +3306,18 @@ fn populate_services_tab(state: &WndState) {
         };
 
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM,
             iItem: i,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image << 12),
             iGroupId: group_id,
+            // Original index in `state.services` — see the
+            // populate_apps_tab comment for why the listview row
+            // can't be used as a direct index when the search
+            // filter skips entries.
+            lParam: LPARAM(orig_idx as isize),
             ..Default::default()
         };
         let _ = unsafe {
@@ -3280,7 +3349,7 @@ fn populate_uwp_tab(state: &WndState) {
     let packages = state.uwp_packages.borrow();
     let filter = state.search_text.borrow().clone();
     let mut row = 0i32;
-    for pkg in packages.iter() {
+    for (orig_idx, pkg) in packages.iter().enumerate() {
         // Search matches display name OR package full name (the
         // latter is what advanced users key off of).
         if !search_match(&pkg.display_name, &filter)
@@ -3292,7 +3361,7 @@ fn populate_uwp_tab(state: &WndState) {
         row += 1;
         let mut name_buf = wide(&pkg.display_name);
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM,
             iItem: i,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
@@ -3301,6 +3370,9 @@ fn populate_uwp_tab(state: &WndState) {
             // UWP packages have no path-based App match yet, so
             // they uniformly land in Blocked (default-deny).
             iGroupId: super::listview_groups::GROUP_APP_BLOCKED,
+            // Original index in `state.uwp_packages` — same
+            // rationale as the apps / services populators.
+            lParam: LPARAM(orig_idx as isize),
             ..Default::default()
         };
         let _ = unsafe {
