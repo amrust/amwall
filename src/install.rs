@@ -91,7 +91,7 @@ impl From<WfpError> for InstallError {
 }
 
 /// Counts returned by `install_profile`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub struct InstallReport {
     /// Number of filters successfully installed.
     pub filters_added: u32,
@@ -100,6 +100,36 @@ pub struct InstallReport {
     /// the current MVP doesn't compile yet). Helpful for surfacing
     /// "your profile has 50 rules but only 30 filtered" feedback.
     pub rules_skipped: u32,
+    /// Runtime filter ids grouped by category. Consumed by the
+    /// GUI's drain_events to gate the connect-prompt dialog
+    /// against the user's `exclude_*` flags — drops sourced from
+    /// blocklist filters can be silenced when `exclude_blocklist`
+    /// is on, etc.
+    pub filter_ids: CategorizedFilterIds,
+}
+
+/// Sets of runtime filter ids, partitioned by which install
+/// path created them. Empty `Default::default()` so non-GUI
+/// callers (CLI -install) and pre-install state are usable as-is.
+#[derive(Debug, Clone, Default)]
+pub struct CategorizedFilterIds {
+    /// Filters from `internal_profile.blocklist_rules`.
+    pub blocklist: Vec<u64>,
+    /// Filters from `user_profile.custom_rules`.
+    pub user_rules: Vec<u64>,
+    /// Filters from `internal_profile.system_rules`.
+    pub system_rules: Vec<u64>,
+    /// Per-app permits (one Permit at each of the four ALE
+    /// layers per enabled `App`).
+    pub per_app: Vec<u64>,
+    /// The four catch-all default-deny block filters at
+    /// FW_WEIGHT_LOWEST.
+    pub default_deny: Vec<u64>,
+    /// Settings → Rules global filters (block_outbound,
+    /// allow_loopback, allow_windows_update, etc.).
+    pub global_rules: Vec<u64>,
+    /// Stealth-mode ICMP-error blocks.
+    pub stealth: Vec<u64>,
 }
 
 /// Per-category mode for the bundled blocklist (M7). Matches the
@@ -261,102 +291,117 @@ pub fn install_with_internal(
         &SUBLAYER_KEY,
     )?;
 
-    let mut filters_added = 0u32;
-    let mut rules_skipped = 0u32;
+    let mut report = InstallReport::default();
 
-    // 1. User custom rules — same flow as before.
+    // 1. User custom rules.
     for rule in &user_profile.custom_rules {
         if !rule.is_enabled {
-            rules_skipped += 1;
+            report.rules_skipped += 1;
             continue;
         }
         let action = filter_action_from_rule(rule);
-        let added = install_one_rule(engine, persistent, rule, action)?;
+        let added = install_one_rule(
+            engine,
+            persistent,
+            rule,
+            action,
+            &mut report.filter_ids.user_rules,
+        )?;
         if added == 0 {
-            rules_skipped += 1;
+            report.rules_skipped += 1;
         }
-        filters_added += added;
+        report.filters_added += added;
     }
 
     // 2. System rules (DHCP, DNS, NetBIOS, etc.) — always Permit.
-    //    The XML's per-rule `is_enabled` still gates application,
-    //    matching upstream's behaviour where users can disable
-    //    individual system rules via the rules_config overrides.
     if let Some(internal) = internal_profile {
         for rule in &internal.system_rules {
             if !rule.is_enabled {
-                rules_skipped += 1;
+                report.rules_skipped += 1;
                 continue;
             }
-            let added = install_one_rule(engine, persistent, rule, FilterAction::Permit)?;
+            let added = install_one_rule(
+                engine,
+                persistent,
+                rule,
+                FilterAction::Permit,
+                &mut report.filter_ids.system_rules,
+            )?;
             if added == 0 {
-                rules_skipped += 1;
+                report.rules_skipped += 1;
             }
-            filters_added += added;
+            report.filters_added += added;
         }
 
         // 3. Blocklist rules — per-category mode decides the action.
         for rule in &internal.blocklist_rules {
             let action = match blocklist.action_for(&rule.name) {
                 BlocklistAction::Disable => {
-                    rules_skipped += 1;
+                    report.rules_skipped += 1;
                     continue;
                 }
                 BlocklistAction::Allow => FilterAction::Permit,
                 BlocklistAction::Block => FilterAction::Block,
             };
-            let added = install_one_rule(engine, persistent, rule, action)?;
+            let added = install_one_rule(
+                engine,
+                persistent,
+                rule,
+                action,
+                &mut report.filter_ids.blocklist,
+            )?;
             if added == 0 {
-                rules_skipped += 1;
+                report.rules_skipped += 1;
             }
-            filters_added += added;
+            report.filters_added += added;
         }
     }
 
-    // 4. Per-app permit filters. Each enabled `<app>` entry in
-    //    the user profile gets a Permit filter at all four ALE
-    //    layers keyed by its NT-form image path. Disabled apps
-    //    get NO filter — they're caught by the default-deny step
-    //    below. Service-shaped (path-less) and UWP-SID entries
-    //    are skipped here; their respective tabs / install paths
-    //    handle them once those features land.
-    let app_filters = install_per_app_filters(engine, &user_profile.apps, persistent)?;
-    filters_added += app_filters.added;
-    rules_skipped += app_filters.skipped;
+    // 4. Per-app permit filters.
+    let app_filters = install_per_app_filters(
+        engine,
+        &user_profile.apps,
+        persistent,
+        &mut report.filter_ids.per_app,
+    )?;
+    report.filters_added += app_filters.added;
+    report.rules_skipped += app_filters.skipped;
 
-    // 5. Default-deny catch-all at FW_WEIGHT_LOWEST. Anything not
-    //    matched by a per-app permit / system rule / blocklist
-    //    Allow drops here. Without this filter, amwall's
-    //    "Enable filters" silently allows everything that isn't
-    //    explicitly blocked — caught during the user's M9.4
-    //    testing where right-clicking Block on brave.exe had no
-    //    effect since no per-app filters existed and no default-
-    //    deny was installed.
-    filters_added += install_default_deny(engine, persistent)?;
+    // 5. Default-deny catch-all at FW_WEIGHT_LOWEST.
+    report.filters_added +=
+        install_default_deny(engine, persistent, &mut report.filter_ids.default_deny)?;
 
-    // 6. Settings → Rules global toggles. Each "on" flag adds one
-    //    or more filters at higher weight than the per-app permits.
-    //    Installed last so they sit at the top of the sublayer's
-    //    arbitration order — block-all-outbound dominates per-app
-    //    permits when both are set, and allow-loopback dominates
-    //    block-all-outbound. Mirrors upstream's _app_changefilters
-    //    pass that handles the same toggles.
-    filters_added += install_global_rules(engine, persistent, global_rules)?;
+    // 6. Settings → Rules global toggles.
+    report.filters_added += install_global_rules(
+        engine,
+        persistent,
+        global_rules,
+        &mut report.filter_ids.global_rules,
+    )?;
 
-    Ok(InstallReport {
-        filters_added,
-        rules_skipped,
-    })
+    // 7. Stealth-mode filters (split out so they categorize
+    //    separately for `exclude_stealth`).
+    report.filters_added += install_stealth_filters(
+        engine,
+        persistent,
+        global_rules,
+        &mut report.filter_ids.stealth,
+    )?;
+
+    Ok(report)
 }
 
 /// Install the optional Settings → Rules filters per the
 /// per-toggle config. Each enabled flag emits 2-4 filters at
 /// higher weight than per-app permits. See `GlobalRulesConfig`
-/// for the per-flag semantics.
+/// for the per-flag semantics. Stealth lives in its own helper
+/// because it needs distinct categorization for the
+/// `exclude_stealth` flag.
 fn install_global_rules(
     engine: &WfpEngine,
     persistent: bool,
     cfg: &GlobalRulesConfig,
+    ids: &mut Vec<u64>,
 ) -> Result<u32, InstallError> {
     use crate::wfp::condition::FilterCondition;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -369,7 +414,7 @@ fn install_global_rules(
     // so loopback still works when both flags are on.
     if cfg.block_outbound {
         for layer in &[FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6] {
-            filter::add(
+            let f = filter::add(
                 engine,
                 "amwall block-all-outbound",
                 "amwall: Settings -> Rules -> Block outbound for all",
@@ -381,6 +426,7 @@ fn install_global_rules(
                 persistent,
                 Some(14),
             )?;
+            ids.push(f.runtime_id());
             count += 1;
         }
     }
@@ -391,7 +437,7 @@ fn install_global_rules(
             FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
             FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
         ] {
-            filter::add(
+            let f = filter::add(
                 engine,
                 "amwall block-all-inbound",
                 "amwall: Settings -> Rules -> Block inbound for all",
@@ -403,6 +449,7 @@ fn install_global_rules(
                 persistent,
                 Some(14),
             )?;
+            ids.push(f.runtime_id());
             count += 1;
         }
     }
@@ -420,7 +467,7 @@ fn install_global_rules(
             prefix: Some(128),
         };
         for layer in &[FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4] {
-            filter::add(
+            let f = filter::add(
                 engine,
                 "amwall allow-loopback-v4",
                 "amwall: Settings -> Rules -> Allow loopback (v4)",
@@ -432,10 +479,11 @@ fn install_global_rules(
                 persistent,
                 Some(15),
             )?;
+            ids.push(f.runtime_id());
             count += 1;
         }
         for layer in &[FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6] {
-            filter::add(
+            let f = filter::add(
                 engine,
                 "amwall allow-loopback-v6",
                 "amwall: Settings -> Rules -> Allow loopback (v6)",
@@ -447,6 +495,7 @@ fn install_global_rules(
                 persistent,
                 Some(15),
             )?;
+            ids.push(f.runtime_id());
             count += 1;
         }
     }
@@ -464,7 +513,7 @@ fn install_global_rules(
                 FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
                 FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
             ] {
-                filter::add(
+                let f = filter::add(
                     engine,
                     "amwall allow-windows-update",
                     "amwall: Settings -> Rules -> Allow Windows Update (svchost.exe)",
@@ -476,6 +525,7 @@ fn install_global_rules(
                     persistent,
                     Some(15),
                 )?;
+                ids.push(f.runtime_id());
                 count += 1;
             }
         }
@@ -488,41 +538,56 @@ fn install_global_rules(
     // IP_PACKET plumbing lands.
     let _ = cfg.allow_6to4;
 
-    // Stealth mode — partial parity with upstream. Block outbound
-    // ICMP destination-unreachable (type 3), which is what UDP
-    // port scanners rely on to distinguish open from closed
-    // ports. Loopback exempt via FlagsNoneSet so localhost
-    // diagnostics still work. The TCP-RST silent-drop part of
-    // upstream's stealth mode is implemented as a kernel callout
-    // there (FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4_SILENT_DROP); we
-    // don't ship a callout driver, so it's not implemented here.
-    if cfg.use_stealth_mode {
-        let loopback_mask =
-            FWP_CONDITION_FLAG_IS_LOOPBACK | FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK;
-        let stealth_conds = [
-            FilterCondition::FlagsNoneSet(loopback_mask),
-            FilterCondition::IcmpType(3),
-        ];
-        for layer in &[
-            FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4,
-            FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
-        ] {
-            filter::add(
-                engine,
-                "amwall stealth-block-icmp-error",
-                "amwall: Settings -> Rules -> Use stealth mode (block ICMP type 3)",
-                layer,
-                &SUBLAYER_KEY,
-                Some(&PROVIDER_KEY),
-                &stealth_conds,
-                FilterAction::Block,
-                persistent,
-                Some(15),
-            )?;
-            count += 1;
-        }
-    }
+    Ok(count)
+}
 
+/// Stealth-mode filters — partial parity with upstream. Block
+/// outbound ICMP destination-unreachable (type 3) so UDP port
+/// scanners can't distinguish open from closed ports.
+/// Loopback exempt. The TCP-RST silent-drop part of upstream's
+/// stealth mode lives in their kernel callout
+/// FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4/V6_SILENT_DROP; amwall is
+/// user-mode only, so that piece isn't implemented.
+///
+/// Separate from `install_global_rules` so the resulting filter
+/// ids land in `CategorizedFilterIds.stealth` for the
+/// `exclude_stealth` flag to act on.
+fn install_stealth_filters(
+    engine: &WfpEngine,
+    persistent: bool,
+    cfg: &GlobalRulesConfig,
+    ids: &mut Vec<u64>,
+) -> Result<u32, InstallError> {
+    use crate::wfp::condition::FilterCondition;
+    if !cfg.use_stealth_mode {
+        return Ok(0);
+    }
+    let loopback_mask =
+        FWP_CONDITION_FLAG_IS_LOOPBACK | FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK;
+    let stealth_conds = [
+        FilterCondition::FlagsNoneSet(loopback_mask),
+        FilterCondition::IcmpType(3),
+    ];
+    let mut count = 0u32;
+    for layer in &[
+        FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4,
+        FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
+    ] {
+        let f = filter::add(
+            engine,
+            "amwall stealth-block-icmp-error",
+            "amwall: Settings -> Rules -> Use stealth mode (block ICMP type 3)",
+            layer,
+            &SUBLAYER_KEY,
+            Some(&PROVIDER_KEY),
+            &stealth_conds,
+            FilterAction::Block,
+            persistent,
+            Some(15),
+        )?;
+        ids.push(f.runtime_id());
+        count += 1;
+    }
     Ok(count)
 }
 
@@ -534,6 +599,7 @@ fn install_per_app_filters(
     engine: &WfpEngine,
     apps: &[crate::profile::App],
     persistent: bool,
+    ids: &mut Vec<u64>,
 ) -> Result<PerAppCounts, InstallError> {
     use crate::profile::AppKind;
 
@@ -593,7 +659,10 @@ fn install_per_app_filters(
                 None, // kernel-assigned mid-range weight
             );
             match result {
-                Ok(_) => counts.added += 1,
+                Ok(f) => {
+                    ids.push(f.runtime_id());
+                    counts.added += 1;
+                }
                 Err(e) if idx == 0 => {
                     // First layer failed — typically AppPath
                     // resolution (file missing). Treat as
@@ -631,7 +700,11 @@ struct PerAppCounts {
 /// permitted by a higher-weight per-app / system / blocklist Allow
 /// drops here. Mirrors upstream's `_app_install_filters` final
 /// pass at FW_WEIGHT_LOWEST.
-fn install_default_deny(engine: &WfpEngine, persistent: bool) -> Result<u32, InstallError> {
+fn install_default_deny(
+    engine: &WfpEngine,
+    persistent: bool,
+    ids: &mut Vec<u64>,
+) -> Result<u32, InstallError> {
     let layers = [
         FWPM_LAYER_ALE_AUTH_CONNECT_V4,
         FWPM_LAYER_ALE_AUTH_CONNECT_V6,
@@ -640,7 +713,7 @@ fn install_default_deny(engine: &WfpEngine, persistent: bool) -> Result<u32, Ins
     ];
     let mut count = 0u32;
     for layer in &layers {
-        filter::add(
+        let f = filter::add(
             engine,
             "amwall default-deny",
             "amwall: catch-all block at lowest weight",
@@ -652,6 +725,7 @@ fn install_default_deny(engine: &WfpEngine, persistent: bool) -> Result<u32, Ins
             persistent,
             Some(0), // FW_WEIGHT_LOWEST — every per-app permit wins
         )?;
+        ids.push(f.runtime_id());
         count += 1;
     }
     Ok(count)
@@ -685,6 +759,7 @@ fn install_one_rule(
     persistent: bool,
     rule: &Rule,
     action: FilterAction,
+    ids: &mut Vec<u64>,
 ) -> Result<u32, InstallError> {
     let remotes = parse_rule_string(&rule.name, rule.remote.as_deref())?;
     let locals = parse_rule_string(&rule.name, rule.local.as_deref())?;
@@ -742,7 +817,7 @@ fn install_one_rule(
                         continue;
                     }
 
-                    filter::add(
+                    let f = filter::add(
                         engine,
                         &rule.name,
                         rule.comment.as_deref().unwrap_or(""),
@@ -754,6 +829,7 @@ fn install_one_rule(
                         persistent,
                         None, // kernel-assigned weight
                     )?;
+                    ids.push(f.runtime_id());
                     count += 1;
                 }
             }

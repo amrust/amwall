@@ -248,6 +248,15 @@ struct WndState {
     /// Populated at WM_CREATE and refreshed after every successful
     /// install / uninstall.
     amwall_filter_ids: std::cell::RefCell<std::collections::HashSet<u64>>,
+    /// Same filter ids partitioned by which install path created
+    /// them. Drives the `Settings.exclude_blocklist` /
+    /// `exclude_custom` / `exclude_stealth` gates in
+    /// `auto_catalog_drops`. Populated only by fresh installs
+    /// (the startup-detection path can't recover categories from
+    /// a previous session, so this stays empty until the user
+    /// next clicks Enable filters).
+    categorized_filter_ids:
+        std::cell::RefCell<crate::install::CategorizedFilterIds>,
     /// `true` when amwall has filters live in WFP (i.e.
     /// `amwall_filter_ids` is non-empty). Drives the toolbar
     /// "Enable filters" ↔ "Disable filters" toggle.
@@ -339,6 +348,9 @@ impl WndState {
             ),
             resizing: Cell::new(false),
             amwall_filter_ids: std::cell::RefCell::new(std::collections::HashSet::new()),
+            categorized_filter_ids: std::cell::RefCell::new(
+                crate::install::CategorizedFilterIds::default(),
+            ),
             filters_active: Cell::new(false),
             services: std::cell::RefCell::new(Vec::new()),
             uwp_packages: std::cell::RefCell::new(Vec::new()),
@@ -1656,6 +1668,24 @@ fn auto_catalog_drops(
             };
             if !state.amwall_filter_ids.borrow().contains(&filter_id) {
                 continue;
+            }
+            // Settings -> Exclude gates. Drop the prompt for
+            // events whose source filter category the user has
+            // told us to ignore. The categorized sets are filled
+            // at install time; before the first install (this
+            // session) they're empty and these checks no-op.
+            {
+                let s = state.app.settings.borrow();
+                let cats = state.categorized_filter_ids.borrow();
+                if s.exclude_blocklist && cats.blocklist.contains(&filter_id) {
+                    continue;
+                }
+                if s.exclude_custom && cats.user_rules.contains(&filter_id) {
+                    continue;
+                }
+                if s.exclude_stealth && cats.stealth.contains(&filter_id) {
+                    continue;
+                }
             }
             let nt = match details.app_path.as_deref() {
                 Some(s) if !s.is_empty() => s,
@@ -3546,6 +3576,10 @@ fn on_enable_filters(hwnd: HWND) {
                 return;
             }
         };
+        // Stash categorized ids on state so drain_events can
+        // honor exclude_blocklist / exclude_custom /
+        // exclude_stealth without re-categorizing each event.
+        *state.categorized_filter_ids.borrow_mut() = report.filter_ids.clone();
         set_status_text(state.status.get(), 0, "Filters are enabled.");
         set_status_text(
             state.status.get(),
@@ -3648,6 +3682,7 @@ fn reinstall_filters_if_active(state: &WndState) {
         }
     };
     refresh_amwall_filter_ids_with(&engine, state);
+    *state.categorized_filter_ids.borrow_mut() = report.filter_ids.clone();
     set_status_text(
         state.status.get(),
         1,
@@ -4534,6 +4569,8 @@ fn on_emergency_reset(hwnd: HWND) {
     update_enable_filters_button(state, false);
     update_titlebar_icon(hwnd, false);
     state.amwall_filter_ids.borrow_mut().clear();
+    *state.categorized_filter_ids.borrow_mut() =
+        crate::install::CategorizedFilterIds::default();
 
     // 4. Repaint the affected tabs.
     populate_apps_tab(state);
