@@ -150,6 +150,44 @@ impl EventLogWriter {
         self.current_size = 0;
     }
 
+    /// Truncate the on-disk log file to zero bytes (and remove any
+    /// rotated `.bak`). Used by Edit -> Clear log. Best-effort: if
+    /// the file isn't there or can't be truncated, the in-memory
+    /// log clear has already happened on the caller side, so the
+    /// failure is logged and ignored.
+    pub fn truncate(&mut self) {
+        // Drop the open handle so File::create can supersede it on
+        // Windows.
+        let target = self
+            .current_path
+            .clone()
+            .unwrap_or_else(crate::paths::default_log_path);
+        self.close();
+        if !target.exists() {
+            return;
+        }
+        if let Err(e) = std::fs::File::create(&target) {
+            eprintln!(
+                "amwall: log: truncate failed for {}: {e}",
+                target.display()
+            );
+            return;
+        }
+        let bak = bak_path(&target);
+        let _ = std::fs::remove_file(&bak);
+    }
+}
+
+/// Public accessor for the resolved log path with the same
+/// fallback the writer uses internally — empty / whitespace-only
+/// `Settings.log_path` lands at `paths::default_log_path()`. Used
+/// by the GUI's "Show log" toolbar handler.
+pub fn default_log_path() -> PathBuf {
+    crate::paths::default_log_path()
+}
+
+impl EventLogWriter {
+
     fn open(&mut self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

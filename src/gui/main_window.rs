@@ -34,14 +34,15 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Controls::{
     ICC_BAR_CLASSES, ICC_COOL_CLASSES, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
+    HIMAGELIST,
     InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
-    LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_PARAM, LVIF_STATE, LVIF_TEXT, LVIS_STATEIMAGEMASK,
-    LVITEMW,
+    LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_IMAGE, LVIF_PARAM, LVIF_STATE, LVIF_TEXT,
+    LVIS_STATEIMAGEMASK, LVITEMW,
     LVM_DELETEALLITEMS, LVM_GETITEM, LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVN_COLUMNCLICK, LVN_KEYDOWN,
+    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_COLUMNCLICK, LVN_KEYDOWN, LVSIL_SMALL,
     LVIS_SELECTED, LVNI_SELECTED, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_REPORT,
+    LVS_REPORT, LVS_SHAREIMAGELISTS,
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW,
     LVS_SHOWSELALWAYS, NM_CUSTOMDRAW, NM_DBLCLK, NM_RCLICK, NMHDR, NMITEMACTIVATE,
     NMLVCUSTOMDRAW, NMLVKEYDOWN,
@@ -143,7 +144,7 @@ const LOGICAL_INITIAL_H: i32 = 600;
 /// computed at WM_CREATE time. Negative values in upstream were
 /// "percent-of-rect" hints; we translate them to fixed logical
 /// widths for the M5.2 baseline (M5.4 will revisit auto-sizing).
-const APPS_COL_WIDTHS: &[i32] = &[280, 150]; // Name, Added (date+time)
+const APPS_COL_WIDTHS: &[i32] = &[280, 150, 460]; // Name, Added (date+time), Path
 const RULES_COL_WIDTHS: &[i32] = &[280, 80, 80]; // Name, Protocol, Direction
 const NETWORK_COL_WIDTHS: &[i32] = &[
     180, // Name
@@ -290,6 +291,12 @@ struct WndState {
     /// before the popup menu shows and consumed by the IDM_*
     /// handlers. None after the menu dismisses (or never opened).
     context_target: std::cell::RefCell<Option<super::apps_context_menu::ContextTarget>>,
+    /// Cached per-path icon indices into the system small-icon
+    /// imagelist (same global imagelist Explorer uses). Filled
+    /// lazily on first row-render and reused across repaints,
+    /// so the populator pays the SHGetFileInfo cost once per
+    /// distinct path per session.
+    app_icon_cache: super::app_icons::IconCache,
     /// `true` once Shell_NotifyIcon(NIM_ADD) has accepted our
     /// tray icon. Gates NIM_MODIFY / NIM_DELETE so we don't
     /// double-add (which silently fails) or remove an icon we
@@ -344,6 +351,7 @@ impl WndState {
             signed_tx: std::cell::RefCell::new(None),
             tray_added: Cell::new(false),
             taskbar_created_msg: Cell::new(0),
+            app_icon_cache: super::app_icons::IconCache::new(),
         }
     }
 }
@@ -968,20 +976,40 @@ unsafe extern "system" fn wnd_proc(
 
 /// Handle a tray-icon callback message. lparam's LOWORD carries
 /// the underlying mouse / keyboard event the shell observed.
-/// Left-click toggles main-window visibility; right-click pops
-/// the tray context menu.
+/// `tray_single_click` decides which gesture toggles the window:
+///  - true: single-click toggles, double-click is a no-op (the
+///    second click of a double-click also dispatches WM_LBUTTONUP,
+///    so the toggle just bounces back to the previous state — the
+///    user effectively sees nothing happen).
+///  - false (default, matches upstream): single-click only
+///    foregrounds the window (when visible); double-click toggles.
+///
+/// Right-click always pops the context menu.
 fn on_tray_message(hwnd: HWND, lparam: LPARAM) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+        IsWindowVisible, SetForegroundWindow, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+        WM_RBUTTONUP,
     };
     let event = (lparam.0 as u32) & 0xFFFF;
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
         None => return,
     };
+    let single_click = state.app.settings.borrow().tray_single_click;
     match event {
-        WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
-            super::tray::toggle_main_window(hwnd);
+        WM_LBUTTONUP => {
+            if single_click {
+                super::tray::toggle_main_window(hwnd);
+            } else if unsafe { IsWindowVisible(hwnd).as_bool() } {
+                unsafe {
+                    let _ = SetForegroundWindow(hwnd);
+                }
+            }
+        }
+        WM_LBUTTONDBLCLK => {
+            if !single_click {
+                super::tray::toggle_main_window(hwnd);
+            }
         }
         WM_RBUTTONUP | WM_CONTEXTMENU => {
             super::tray::show_context_menu(hwnd, state.filters_active.get());
@@ -1537,6 +1565,9 @@ fn refresh_connected_paths(state: &WndState) {
 /// listview internal layout to recompute, which is the only
 /// reliable way to wake comctl up for fresh rows.
 fn force_active_apps_listview_jiggle(hwnd: HWND, state: &WndState) {
+    use windows::Win32::Graphics::Gdi::{
+        InvalidateRect, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow,
+    };
     let tab = state.tab.get();
     if tab.0 == 0 {
         return;
@@ -1547,8 +1578,38 @@ fn force_active_apps_listview_jiggle(hwnd: HWND, state: &WndState) {
     if lv.0 == 0 {
         return;
     }
+
+    // Synchronous pass — handles the simple cases (auto-catalog
+    // during a fully-painted listview).
+    //  1. MoveWindow jiggle — wakes the header subwindow so
+    //     column titles + sort arrows render after a resize.
+    //  2. InvalidateRect on the client — marks the rows dirty.
+    //  3. RedrawWindow with RDW_UPDATENOW — flushes the paint
+    //     synchronously instead of waiting for the next idle.
     if let Some((x, y, w, h)) = current_lv_rect_in_parent(lv, hwnd) {
         force_listview_repaint(lv, x, y, w, h);
+    }
+    unsafe {
+        let _ = InvalidateRect(lv, None, true);
+        let _ = RedrawWindow(
+            lv,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+    }
+
+    // Deferred pass — same trick the resize-end cleanup uses.
+    // After delete + populate, comctl32's internal paint state
+    // can be sticky enough that even a synchronous redraw doesn't
+    // land cleanly on the first try. Arming TIMER_RESIZE_CLEANUP
+    // re-fires repopulate_tab + on_tab_change ~100 ms later, by
+    // which point comctl32 has settled and the second redraw
+    // takes. This is the same path WM_SIZE already uses, so the
+    // user gets identical post-resize-end visual behavior after
+    // any delete / auto-catalog batch.
+    unsafe {
+        SetTimer(hwnd, TIMER_RESIZE_CLEANUP, RESIZE_CLEANUP_MS, None);
     }
 }
 
@@ -1668,6 +1729,27 @@ fn process_connect_prompts(
     }
 }
 
+/// True when the foreground application is in a fullscreen state
+/// the shell tells us we shouldn't disturb — D3D-fullscreen games,
+/// PowerPoint presentations, etc. Used by `drain_events` to gate
+/// the connect-prompt dialog when `notification_fullscreen_silent`
+/// is on. Falls back to "not fullscreen" on any API failure so a
+/// missing shell32 entry point doesn't suppress all prompts.
+fn is_user_in_fullscreen() -> bool {
+    use windows::Win32::UI::Shell::{
+        QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+        SHQueryUserNotificationState,
+    };
+    let state = match unsafe { SHQueryUserNotificationState() } {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    matches!(
+        state,
+        QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE | QUNS_BUSY
+    )
+}
+
 /// Handler for `WM_USER_CONNECT_ALLOW` posted by the connect-
 /// prompt dialog when the user clicks Allow. Reclaims the
 /// `Box<PathBuf>` the dialog stuffed into wparam, finds the
@@ -1774,7 +1856,18 @@ fn drain_events(hwnd: HWND, state: &WndState) {
     // newly-cataloged app. show_async returns immediately; the
     // user's Allow choice flows back via WM_USER_CONNECT_ALLOW
     // and is handled by `on_connect_allow` in the wndproc.
-    if filters_active && notify && !new_apps.is_empty() {
+    //
+    // notification_fullscreen_silent: skip the popup entirely
+    // when the user is in a fullscreen game / presentation. The
+    // app is still cataloged + persisted (so once the user exits
+    // fullscreen they'll see the new Blocked entry on the Apps
+    // tab) — only the modal-style interruption is suppressed.
+    if filters_active
+        && notify
+        && !new_apps.is_empty()
+        && !(state.app.settings.borrow().notification_fullscreen_silent
+            && is_user_in_fullscreen())
+    {
         process_connect_prompts(hwnd, &new_apps);
     }
 
@@ -2225,9 +2318,7 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
     }
     let id = id as u16;
     match id {
-        IDM_EXIT => unsafe {
-            let _ = DestroyWindow(hwnd);
-        },
+        IDM_EXIT => on_exit(hwnd),
         IDM_RELEASES => open_releases_page(hwnd),
         IDM_REFRESH => on_refresh(hwnd),
         IDM_IMPORT => on_import(hwnd),
@@ -2236,6 +2327,10 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         IDM_EMERGENCY_RESET => on_emergency_reset(hwnd),
         IDM_WEBSITE => open_website(hwnd),
         IDM_CHECKUPDATES => open_releases_page(hwnd),
+        IDM_PURGE_UNUSED => on_purge_unused(hwnd),
+        IDM_PURGE_TIMERS => on_purge_timers(hwnd),
+        IDM_LOGCLEAR | IDM_TRAY_LOGCLEAR => on_log_clear(hwnd),
+        IDM_TRAY_LOGSHOW => on_log_show(hwnd),
 
         // Toggleable View / Settings menu items. Each handler
         // flips the matching field in `state.app.settings`,
@@ -2856,6 +2951,12 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
     populate_services_tab(state);
     populate_uwp_tab(state);
     on_tab_change(hwnd);
+    // Same paint-pipeline jiggle the auto-catalog flow uses —
+    // populate + tab-change alone leave comctl32 in a half-
+    // painted state where deleted rows linger until the user
+    // scrolls or resizes. Forcing an InvalidateRect on the
+    // listview's parent rect re-runs the paint pipeline cleanly.
+    force_active_apps_listview_jiggle(hwnd, state);
     reinstall_filters_if_active(state);
     set_status_text(
         state.status.get(),
@@ -2916,6 +3017,22 @@ fn on_context_set_enabled(hwnd: HWND, enable: bool) {
     let paths = collect_selection_paths(state, target.listview_id, &target);
     if paths.is_empty() {
         return;
+    }
+
+    // confirm_allow: warn before flipping a previously-blocked app
+    // to Allow, since allowing malware is the asymmetric mistake
+    // (block-by-mistake is recoverable; allow-by-mistake leaks
+    // traffic the user just decided to ban).
+    if enable && state.app.settings.borrow().confirm_allow {
+        let was_blocked = {
+            let profile = state.app.profile.borrow();
+            paths
+                .iter()
+                .any(|p| profile.apps.iter().any(|a| &a.path == p && !a.is_enabled))
+        };
+        if was_blocked && !confirm_allow_traffic(hwnd, &paths) {
+            return;
+        }
     }
 
     let now = std::time::SystemTime::now()
@@ -3064,6 +3181,7 @@ fn on_context_remove(hwnd: HWND) {
     populate_services_tab(state);
     populate_uwp_tab(state);
     on_tab_change(hwnd);
+    force_active_apps_listview_jiggle(hwnd, state);
     reinstall_filters_if_active(state);
     set_status_text(
         state.status.get(),
@@ -3356,20 +3474,23 @@ fn on_enable_filters(hwnd: HWND) {
         }
     } else {
         // ---- Enable path ----
-        let blocklist = {
+        let (blocklist, persistent) = {
             let s = state.app.settings.borrow();
-            crate::install::BlocklistConfig {
-                spy: blocklist_mode_to_action(s.blocklist_spy),
-                update: blocklist_mode_to_action(s.blocklist_update),
-                extra: blocklist_mode_to_action(s.blocklist_extra),
-            }
+            (
+                crate::install::BlocklistConfig {
+                    spy: blocklist_mode_to_action(s.blocklist_spy),
+                    update: blocklist_mode_to_action(s.blocklist_update),
+                    extra: blocklist_mode_to_action(s.blocklist_extra),
+                },
+                s.install_boottime_filters,
+            )
         };
         let report = match crate::install::install_with_internal(
             &engine,
             &state.app.profile.borrow(),
             Some(&state.app.internal_profile),
             &blocklist,
-            true, // persistent: reboots keep the filters
+            persistent,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -3435,20 +3556,23 @@ fn reinstall_filters_if_active(state: &WndState) {
         return;
     }
 
-    let blocklist = {
+    let (blocklist, persistent) = {
         let s = state.app.settings.borrow();
-        crate::install::BlocklistConfig {
-            spy: blocklist_mode_to_action(s.blocklist_spy),
-            update: blocklist_mode_to_action(s.blocklist_update),
-            extra: blocklist_mode_to_action(s.blocklist_extra),
-        }
+        (
+            crate::install::BlocklistConfig {
+                spy: blocklist_mode_to_action(s.blocklist_spy),
+                update: blocklist_mode_to_action(s.blocklist_update),
+                extra: blocklist_mode_to_action(s.blocklist_extra),
+            },
+            s.install_boottime_filters,
+        )
     };
     let report = match crate::install::install_with_internal(
         &engine,
         &state.app.profile.borrow(),
         Some(&state.app.internal_profile),
         &blocklist,
-        true,
+        persistent,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -4036,6 +4160,263 @@ fn open_website(hwnd: HWND) {
 /// survives restart, (d) flips `filters_active` and updates the
 /// toolbar so the user sees the change. Use this when amwall has
 /// installed filters that are blocking something the user can't
+/// File → Exit. Honors `confirm_exit`: if filters are active and
+/// the setting is on, prompts before destroying the window. Other
+/// exit paths (tray "Exit amwall", Ctrl+Q accelerator) all funnel
+/// through this same handler.
+fn on_exit(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO,
+    };
+    if let Some(state) = unsafe { state_ref(hwnd) } {
+        let s = state.app.settings.borrow();
+        if s.confirm_exit && state.filters_active.get() {
+            drop(s);
+            let body = wide(
+                "Filters are currently enabled. Quitting amwall \
+                 will leave them in place (they survive process \
+                 exit). Continue?",
+            );
+            let title = wide("Exit amwall?");
+            let answer = unsafe {
+                MessageBoxW(
+                    hwnd,
+                    PCWSTR(body.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+                )
+            };
+            if answer != IDYES {
+                return;
+            }
+        }
+    }
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+/// Edit → Purge unused apps. Walks `profile.apps` and removes
+/// every entry whose binary no longer exists on disk (i.e. the
+/// "Invalid" rows the listview colorizer paints pink-red).
+/// Disabled rows are kept — they're an explicit user decision —
+/// only the broken-path rows are pruned. Re-installs filters if
+/// active so the kernel forgets the deleted apps' permits.
+fn on_purge_unused(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let removed = {
+        let mut profile = state.app.profile.borrow_mut();
+        let before = profile.apps.len();
+        profile.apps.retain(|a| a.path.exists());
+        before - profile.apps.len()
+    };
+    if removed == 0 {
+        set_status_text(state.status.get(), 0, "No unused apps to purge.");
+        return;
+    }
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+    force_active_apps_listview_jiggle(hwnd, state);
+    reinstall_filters_if_active(state);
+    set_status_text(
+        state.status.get(),
+        0,
+        &format!("Purged {removed} unused app(s)."),
+    );
+}
+
+/// Edit → Purge timers. Clears every app's expiration timer
+/// (the "this rule expires at <timestamp>" field on `App.timer`).
+/// Mirrors upstream's IDM_PURGE_TIMERS, which surfaces in the
+/// menu but never as a feature anyone reaches for unless they've
+/// been using timed Allow rules. Profile saved + filters
+/// re-installed so the kernel matches.
+fn on_purge_timers(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let cleared = {
+        let mut profile = state.app.profile.borrow_mut();
+        let mut count = 0usize;
+        for a in profile.apps.iter_mut() {
+            if a.timer != 0 {
+                a.timer = 0;
+                count += 1;
+            }
+        }
+        count
+    };
+    if cleared == 0 {
+        set_status_text(state.status.get(), 0, "No active timers.");
+        return;
+    }
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+    force_active_apps_listview_jiggle(hwnd, state);
+    reinstall_filters_if_active(state);
+    set_status_text(
+        state.status.get(),
+        0,
+        &format!("Cleared {cleared} app timer(s)."),
+    );
+}
+
+/// Edit → Clear log (also reachable via the toolbar's "Clear
+/// log" button). Wipes the in-memory event ring and truncates
+/// the on-disk log file. Honors `confirm_log_clear`.
+fn on_log_clear(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO,
+    };
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    if state.app.settings.borrow().confirm_log_clear {
+        let body = wide(
+            "Clear the packets log? This empties the in-memory log \
+             tab and truncates the on-disk log file. The action \
+             can't be undone.",
+        );
+        let title = wide("Clear log");
+        let answer = unsafe {
+            MessageBoxW(
+                hwnd,
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+            )
+        };
+        if answer != IDYES {
+            return;
+        }
+    }
+    state.event_log.borrow_mut().clear();
+    state.event_log_writer.borrow_mut().truncate();
+    populate_log_tab(state);
+    on_tab_change(hwnd);
+    set_status_text(state.status.get(), 0, "Log cleared.");
+}
+
+/// Toolbar "Show log" button. Opens the log file in the
+/// configured external viewer (`Settings.log_viewer`); falls back
+/// to the OS default handler when the viewer field is empty.
+/// Reports a status-bar message if the log path doesn't resolve
+/// (most commonly: `enable_log` is off and nothing has been
+/// written yet).
+fn on_log_show(hwnd: HWND) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let (log_path, viewer) = {
+        let s = state.app.settings.borrow();
+        (s.log_path.clone(), s.log_viewer.clone())
+    };
+    let resolved = if log_path.is_empty() {
+        super::event_log::default_log_path()
+    } else {
+        std::path::PathBuf::from(log_path)
+    };
+    if !resolved.is_file() {
+        set_status_text(
+            state.status.get(),
+            0,
+            "Log file not found — turn on packets logging first.",
+        );
+        return;
+    }
+
+    let path_w = wide(&resolved.display().to_string());
+    let result = if viewer.is_empty() {
+        // No configured viewer → ShellExecute "open" the file
+        // through whatever handler is registered for .log /
+        // text files (notepad on a default install).
+        unsafe {
+            ShellExecuteW(
+                hwnd,
+                w!("open"),
+                PCWSTR(path_w.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        }
+    } else {
+        // User picked a viewer (e.g. baretail.exe / mtputty) —
+        // pass the log path as that exe's command-line argument.
+        let viewer_w = wide(&viewer);
+        let arg_w = wide(&format!("\"{}\"", resolved.display()));
+        unsafe {
+            ShellExecuteW(
+                hwnd,
+                w!("open"),
+                PCWSTR(viewer_w.as_ptr()),
+                PCWSTR(arg_w.as_ptr()),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        }
+    };
+    // ShellExecute returns an HINSTANCE encoding the result —
+    // > 32 means success, <= 32 is a SE_ERR_* code.
+    if (result.0 as isize) <= 32 {
+        set_status_text(
+            state.status.get(),
+            0,
+            "Failed to launch log viewer (check Settings → Logging).",
+        );
+    }
+}
+
+/// Modal yes/no for the right-click Allow path when the target
+/// app was previously blocked. Returns true if the user
+/// confirmed the change. Used by `on_context_set_enabled`.
+fn confirm_allow_traffic(hwnd: HWND, paths: &[std::path::PathBuf]) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO,
+    };
+    let body_str = if paths.len() == 1 {
+        let name = paths[0]
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| paths[0].display().to_string());
+        format!(
+            "{} is currently blocked. Allowing it will let it \
+             reach the network the next time it tries.\n\n\
+             Continue?",
+            name
+        )
+    } else {
+        format!(
+            "{} previously-blocked apps will be set to Allow. \
+             They will reach the network the next time they try.\n\n\
+             Continue?",
+            paths.len()
+        )
+    };
+    let body = wide(&body_str);
+    let title = wide("Allow previously-blocked traffic?");
+    let answer = unsafe {
+        MessageBoxW(
+            hwnd,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+        )
+    };
+    answer == IDYES
+}
+
 /// figure out how to unblock — restores the system to its
 /// pre-amwall networking behaviour without uninstalling the app.
 fn on_emergency_reset(hwnd: HWND) {
@@ -4276,7 +4657,13 @@ fn create_tab_listview(parent: HWND, id: i32) -> Result<HWND, String> {
         let hinstance = GetModuleHandleW(PCWSTR::null())
             .map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
         // Created hidden — `on_tab_change` reveals the right one.
-        let style = WS_CHILD | WS_BORDER | WINDOW_STYLE(LVS_REPORT | LVS_SHOWSELALWAYS);
+        // LVS_SHAREIMAGELISTS so the listview doesn't ImageList_Destroy
+        // the shell's global system imagelist when it goes away —
+        // we attach that imagelist for per-row exe icons and we
+        // don't own it.
+        let style = WS_CHILD
+            | WS_BORDER
+            | WINDOW_STYLE(LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS);
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             WC_LISTVIEWW,
@@ -4322,6 +4709,28 @@ fn configure_listview(lv: HWND, id: i32, dpi: u32) -> Result<(), String> {
         IDC_APPS_PROFILE | IDC_APPS_SERVICE | IDC_APPS_UWP => {
             add_column(lv, 0, "Name", scale_dpi(APPS_COL_WIDTHS[0], dpi), false)?;
             add_column(lv, 1, "Added", scale_dpi(APPS_COL_WIDTHS[1], dpi), true)?;
+            add_column(lv, 2, "Path", scale_dpi(APPS_COL_WIDTHS[2], dpi), false)?;
+
+            // Attach the system small-icon imagelist so per-row
+            // LVITEMW.iImage indices resolve to whatever icon the
+            // shell would draw for that exe in Explorer. Free —
+            // we never own the imagelist, so no destroy needed.
+            let il = super::app_icons::system_small_imagelist();
+            if il != HIMAGELIST::default() {
+                unsafe {
+                    SendMessageW(
+                        lv,
+                        LVM_SETIMAGELIST,
+                        WPARAM(LVSIL_SMALL as usize),
+                        LPARAM(il.0),
+                    );
+                }
+            } else {
+                eprintln!(
+                    "amwall: system small-icon imagelist unavailable; \
+                     listview id {id} won't show per-row icons"
+                );
+            }
         }
         IDC_RULES_BLOCKLIST | IDC_RULES_SYSTEM | IDC_RULES_CUSTOM => {
             add_column(lv, 0, "Name", scale_dpi(RULES_COL_WIDTHS[0], dpi), false)?;
@@ -4735,6 +5144,16 @@ fn populate_apps_tab(state: &WndState) {
         // matching `stateMask` is the documented way to set this
         // alongside the row insert.
         let state_image_index = if app.is_enabled { 2u32 } else { 1u32 };
+        // Per-row iImage index into the system small-icon
+        // imagelist that configure_listview attached. `-1` =
+        // shell couldn't resolve the path; we drop LVIF_IMAGE
+        // from the mask in that case so comctl32 doesn't fire
+        // LVN_GETDISPINFO callbacks asking us to fill it in.
+        let icon_idx = state.app_icon_cache.index_for(&app.path);
+        let mut item_mask = LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM;
+        if icon_idx >= 0 {
+            item_mask |= LVIF_IMAGE;
+        }
         // `lParam` carries the original index in `profile.apps`.
         // The listview row index isn't a 1:1 map any more (the
         // AppKind filter and the search filter both skip rows),
@@ -4745,13 +5164,14 @@ fn populate_apps_tab(state: &WndState) {
         // marks on imported profiles — caught during M9.4
         // testing.
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM,
+            mask: item_mask,
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image_index << 12),
             iGroupId: super::listview_groups::app_group_id(app),
+            iImage: icon_idx.max(0),
             lParam: LPARAM(orig_idx as isize),
             ..Default::default()
         };
@@ -4770,6 +5190,9 @@ fn populate_apps_tab(state: &WndState) {
             String::new()
         };
         set_subitem(lv, idx as i32, 1, &added);
+        // Column 2: full path (independent of `show_filenames_only`,
+        // which only controls the Name column).
+        set_subitem(lv, idx as i32, 2, &app.path.display().to_string());
     }
     drop(profile);
     refresh_apps_group_headers(lv);
@@ -4824,14 +5247,27 @@ fn populate_services_tab(state: &WndState) {
             None => (super::listview_groups::GROUP_APP_BLOCKED, 1u32),
         };
 
+        // Look up the icon for the service's resolved binary
+        // path; -1 (no icon) is common here for driver-only
+        // services where image_path is empty.
+        let icon_idx = if svc.image_path.as_os_str().is_empty() {
+            -1
+        } else {
+            state.app_icon_cache.index_for(&svc.image_path)
+        };
+        let mut item_mask = LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM;
+        if icon_idx >= 0 {
+            item_mask |= LVIF_IMAGE;
+        }
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM,
+            mask: item_mask,
             iItem: i,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image << 12),
             iGroupId: group_id,
+            iImage: icon_idx.max(0),
             // Original index in `state.services` — see the
             // populate_apps_tab comment for why the listview row
             // can't be used as a direct index when the search
@@ -4848,6 +5284,13 @@ fn populate_services_tab(state: &WndState) {
             )
         };
         // "Added" column stays empty for system-discovered services.
+        // Path column shows the resolved binary path (svchost.exe
+        // host or the standalone exe), or empty when QueryServiceConfig
+        // couldn't resolve one (e.g. driver-only services).
+        let path_str = svc.image_path.display().to_string();
+        if !path_str.is_empty() {
+            set_subitem(lv, i, 2, &path_str);
+        }
     }
     drop(profile);
     drop(services);
@@ -4879,8 +5322,20 @@ fn populate_uwp_tab(state: &WndState) {
         let i = row;
         row += 1;
         let mut name_buf = wide(&pkg.display_name);
+        // Pull the icon off the package's install directory.
+        // Most UWP packages ship a square logo .png; the shell
+        // resolves that into a small icon for us.
+        let icon_idx = if pkg.install_path.as_os_str().is_empty() {
+            -1
+        } else {
+            state.app_icon_cache.index_for(&pkg.install_path)
+        };
+        let mut item_mask = LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM;
+        if icon_idx >= 0 {
+            item_mask |= LVIF_IMAGE;
+        }
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM,
+            mask: item_mask,
             iItem: i,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
@@ -4889,6 +5344,7 @@ fn populate_uwp_tab(state: &WndState) {
             // UWP packages have no path-based App match yet, so
             // they uniformly land in Blocked (default-deny).
             iGroupId: super::listview_groups::GROUP_APP_BLOCKED,
+            iImage: icon_idx.max(0),
             // Original index in `state.uwp_packages` — same
             // rationale as the apps / services populators.
             lParam: LPARAM(orig_idx as isize),
@@ -4902,6 +5358,12 @@ fn populate_uwp_tab(state: &WndState) {
                 LPARAM(&item as *const _ as isize),
             )
         };
+        // Path column for UWP shows the package install location
+        // (`C:\Program Files\WindowsApps\<package>...`).
+        let path_str = pkg.install_path.display().to_string();
+        if !path_str.is_empty() {
+            set_subitem(lv, i, 2, &path_str);
+        }
     }
     drop(packages);
     refresh_apps_group_headers(lv);
