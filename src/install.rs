@@ -19,8 +19,10 @@
 use std::path::PathBuf;
 
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
+    FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK, FWP_CONDITION_FLAG_IS_LOOPBACK,
     FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
     FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+    FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4, FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
 };
 use windows::core::GUID;
 
@@ -151,6 +153,13 @@ pub struct GlobalRulesConfig {
     /// activity through without the user authoring a per-app
     /// rule. Same approach upstream takes.
     pub allow_windows_update: bool,
+    /// "Prevent port scanning (stealth mode)". Blocks outbound
+    /// ICMP destination-unreachable (type 3) so UDP port scanners
+    /// can't tell open ports from closed ones. Loopback exempt.
+    /// The TCP-RST silent-drop part of upstream's stealth mode
+    /// needs a kernel callout driver we don't ship — only the
+    /// filter-engine-only ICMP block lands here.
+    pub use_stealth_mode: bool,
 }
 
 impl BlocklistConfig {
@@ -478,6 +487,41 @@ fn install_global_rules(
     // round-trip cleanly; install path is a no-op until the
     // IP_PACKET plumbing lands.
     let _ = cfg.allow_6to4;
+
+    // Stealth mode — partial parity with upstream. Block outbound
+    // ICMP destination-unreachable (type 3), which is what UDP
+    // port scanners rely on to distinguish open from closed
+    // ports. Loopback exempt via FlagsNoneSet so localhost
+    // diagnostics still work. The TCP-RST silent-drop part of
+    // upstream's stealth mode is implemented as a kernel callout
+    // there (FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4_SILENT_DROP); we
+    // don't ship a callout driver, so it's not implemented here.
+    if cfg.use_stealth_mode {
+        let loopback_mask =
+            FWP_CONDITION_FLAG_IS_LOOPBACK | FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK;
+        let stealth_conds = [
+            FilterCondition::FlagsNoneSet(loopback_mask),
+            FilterCondition::IcmpType(3),
+        ];
+        for layer in &[
+            FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4,
+            FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
+        ] {
+            filter::add(
+                engine,
+                "amwall stealth-block-icmp-error",
+                "amwall: Settings -> Rules -> Use stealth mode (block ICMP type 3)",
+                layer,
+                &SUBLAYER_KEY,
+                Some(&PROVIDER_KEY),
+                &stealth_conds,
+                FilterAction::Block,
+                persistent,
+                Some(15),
+            )?;
+            count += 1;
+        }
+    }
 
     Ok(count)
 }

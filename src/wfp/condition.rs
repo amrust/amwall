@@ -19,13 +19,21 @@ use std::path::{Path, PathBuf};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_BYTE_ARRAY16, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0,
     FWP_CONDITION_VALUE0_0, FWP_DIRECTION, FWP_DIRECTION_INBOUND, FWP_DIRECTION_OUTBOUND,
-    FWP_MATCH_EQUAL, FWP_MATCH_RANGE, FWP_RANGE0, FWP_RANGE_TYPE, FWP_UINT8, FWP_UINT16,
-    FWP_UINT32, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK,
-    FWP_VALUE0, FWP_VALUE0_0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_DIRECTION,
-    FWPM_CONDITION_IP_LOCAL_ADDRESS, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
-    FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER_CONDITION0,
-    FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
+    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_MATCH_RANGE, FWP_RANGE0, FWP_RANGE_TYPE,
+    FWP_UINT8, FWP_UINT16, FWP_UINT32, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK,
+    FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0, FWPM_CONDITION_ALE_APP_ID,
+    FWPM_CONDITION_DIRECTION, FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_LOCAL_ADDRESS,
+    FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL, FWPM_CONDITION_IP_REMOTE_ADDRESS,
+    FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER_CONDITION0, FwpmFreeMemory0,
+    FwpmGetAppIdFromFileName0,
 };
+
+/// At ICMP layers (`FWPM_LAYER_*ICMP_ERROR_*`), WFP repurposes
+/// `FWPM_CONDITION_IP_LOCAL_PORT` to carry the ICMP type. The
+/// Windows SDK `fwpmu.h` header defines `FWPM_CONDITION_ICMP_TYPE`
+/// as an alias for the local-port GUID; windows-rs only exposes
+/// the canonical GUID, so we reference that directly here.
+const FWPM_CONDITION_ICMP_TYPE: GUID = FWPM_CONDITION_IP_LOCAL_PORT;
 use windows::core::{GUID, PCWSTR};
 
 use super::WfpError;
@@ -111,6 +119,18 @@ pub enum FilterCondition {
     RemoteAddrV6 { addr: Ipv6Addr, prefix: Option<u8> },
     Direction(Direction),
     AppPath(PathBuf),
+    /// ICMP type (8-bit on the wire but the WFP condition is
+    /// `FWP_UINT16`). Used by stealth-mode filters at the
+    /// outbound-ICMP-error layers to block destination-unreachable
+    /// (type 3) replies that UDP port scanners rely on.
+    IcmpType(u16),
+    /// `FWPM_CONDITION_FLAGS` checked against `FWP_MATCH_FLAGS_NONE_SET`
+    /// — the filter passes only when **none** of the bits in the
+    /// supplied mask are set on the packet's flags. Stealth uses
+    /// this with `FWP_CONDITION_FLAG_IS_LOOPBACK |
+    /// FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK` so loopback
+    /// traffic is excluded from the block.
+    FlagsNoneSet(u32),
 }
 
 /// Compile a slice of `FilterCondition` into a parallel array of
@@ -196,6 +216,17 @@ pub(super) fn compile(
             }
 
             FilterCondition::AppPath(path) => storage.fc_app_id(path)?,
+
+            FilterCondition::IcmpType(t) => fc_uint16(FWPM_CONDITION_ICMP_TYPE, *t),
+
+            FilterCondition::FlagsNoneSet(mask) => FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_FLAGS,
+                matchType: FWP_MATCH_FLAGS_NONE_SET,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_UINT32,
+                    Anonymous: FWP_CONDITION_VALUE0_0 { uint32: *mask },
+                },
+            },
         };
         storage.natives.push(native);
     }

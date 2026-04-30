@@ -3526,6 +3526,7 @@ fn on_enable_filters(hwnd: HWND) {
                     allow_loopback: s.rule_allow_loopback,
                     allow_6to4: s.rule_allow_6to4,
                     allow_windows_update: s.rule_allow_windows_update,
+                    use_stealth_mode: s.use_stealth_mode,
                 },
                 s.install_boottime_filters,
             )
@@ -3616,6 +3617,7 @@ fn reinstall_filters_if_active(state: &WndState) {
                 allow_loopback: s.rule_allow_loopback,
                 allow_6to4: s.rule_allow_6to4,
                 allow_windows_update: s.rule_allow_windows_update,
+                use_stealth_mode: s.use_stealth_mode,
             },
             s.install_boottime_filters,
         )
