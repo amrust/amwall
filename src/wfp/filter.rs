@@ -8,8 +8,9 @@
 // lands in M1.5.
 
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWPM_ACTION0, FWPM_DISPLAY_DATA0,
-    FWPM_FILTER0, FWPM_FILTER_FLAG_PERSISTENT, FwpmFilterAdd0, FwpmFilterDeleteByKey0,
+    FWP_ACTION_BLOCK, FWP_ACTION_CALLOUT_TERMINATING, FWP_ACTION_PERMIT, FWP_ACTION_TYPE,
+    FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER_FLAG_PERSISTENT, FwpmFilterAdd0,
+    FwpmFilterDeleteByKey0,
 };
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows::Win32::System::Rpc::UuidCreate;
@@ -57,14 +58,30 @@ impl Filter {
     }
 }
 
-/// Filter action. M1.4 supports the two terminal actions. Callout
-/// actions (which dispatch to a kernel-mode driver to make a
-/// per-packet decision) are not used by upstream simplewall and are
-/// out of scope.
+/// Filter action. The two terminal actions (Block / Permit) are
+/// what most rules use. `CalloutTerminating` dispatches the packet
+/// to a callout (a kernel-mode component, but stock Windows ships
+/// several built-in ones — we don't carry our own driver) which
+/// makes a final accept-or-drop decision; the kernel honours that
+/// decision as terminal, no further filters at the layer run.
+///
+/// Used by stealth-mode for the TCP-RST silent drop, which routes
+/// inbound TCP discards through `FWPM_CALLOUT_WFP_TRANSPORT_LAYER_*_SILENT_DROP`
+/// — the built-in Windows callout that swallows the packet without
+/// emitting a TCP RST. This denies port scanners the open/closed
+/// distinction they get from the default kernel "no listener" RST.
 #[derive(Debug, Clone, Copy)]
 pub enum FilterAction {
     Block,
     Permit,
+    /// Dispatch to a built-in WFP callout. The callout itself
+    /// decides accept/drop; this filter type is "terminating" in
+    /// the sense that no further filters at the layer evaluate
+    /// after the callout returns. `callout_key` must reference a
+    /// callout already registered with the engine — built-in
+    /// callouts (the `FWPM_CALLOUT_WFP_*` GUIDs) are always
+    /// registered, so we don't need to install our own.
+    CalloutTerminating { callout_key: GUID },
 }
 
 impl FilterAction {
@@ -72,6 +89,7 @@ impl FilterAction {
         match self {
             Self::Block => FWP_ACTION_BLOCK,
             Self::Permit => FWP_ACTION_PERMIT,
+            Self::CalloutTerminating { .. } => FWP_ACTION_CALLOUT_TERMINATING,
         }
     }
 }
@@ -168,6 +186,12 @@ pub fn add(
         r#type: action.to_fwp(),
         ..unsafe { std::mem::zeroed() }
     };
+    // Callout-shaped actions need the calloutKey GUID stitched
+    // into FWPM_ACTION0. Block / Permit leave it zeroed (the
+    // kernel ignores the field for terminal-only actions).
+    if let FilterAction::CalloutTerminating { callout_key } = action {
+        filter.action.Anonymous.calloutKey = callout_key;
+    }
     // providerKey is `*mut GUID`. The kernel reads but does not write
     // through this pointer; same justification as in sublayer::add.
     if let Some(pk) = provider_key {

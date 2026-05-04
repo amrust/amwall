@@ -19,10 +19,13 @@
 use std::path::PathBuf;
 
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK, FWP_CONDITION_FLAG_IS_LOOPBACK,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
-    FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4, FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
+    FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK, FWP_CONDITION_FLAG_IS_IPSEC_SECURED,
+    FWP_CONDITION_FLAG_IS_LOOPBACK, FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4_SILENT_DROP,
+    FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V6_SILENT_DROP, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_LAYER_INBOUND_TRANSPORT_V4_DISCARD,
+    FWPM_LAYER_INBOUND_TRANSPORT_V6_DISCARD, FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4,
+    FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
 };
 use windows::core::GUID;
 
@@ -611,13 +614,31 @@ fn install_global_rules(
     Ok(count)
 }
 
-/// Stealth-mode filters — partial parity with upstream. Block
-/// outbound ICMP destination-unreachable (type 3) so UDP port
-/// scanners can't distinguish open from closed ports.
-/// Loopback exempt. The TCP-RST silent-drop part of upstream's
-/// stealth mode lives in their kernel callout
-/// FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4/V6_SILENT_DROP; amwall is
-/// user-mode only, so that piece isn't implemented.
+/// Stealth-mode filters — full parity with upstream simplewall
+/// `wfp.c:2064-2141`. Two parts:
+///
+///   1. UDP-port-scan defence: block outbound ICMP type 3
+///      (Destination Unreachable). Without these the kernel's
+///      "no listener" reply tells a scanner which UDP ports are
+///      closed; suppressing the ICMP keeps closed ports
+///      indistinguishable from filtered ports.
+///
+///   2. TCP-port-scan defence: route inbound TCP discards
+///      through the built-in `FWPM_CALLOUT_WFP_TRANSPORT_LAYER_*_SILENT_DROP`
+///      callout. The callout swallows the packet without
+///      emitting a TCP RST — without this filter the kernel's
+///      default "RST on no listener" tells a scanner which TCP
+///      ports are closed.
+///
+/// Both parts exempt loopback and (Win8+) appcontainer-loopback
+/// via `FWP_CONDITION_FLAG_IS_LOOPBACK | …_APPCONTAINER_LOOPBACK`.
+/// The TCP-RST half also exempts IPsec-secured packets so VPN /
+/// IPSec tunnels stay functional — matching upstream's
+/// `FWP_CONDITION_FLAG_IS_IPSEC_SECURED` OR-in.
+///
+/// The callout half is built-in to Windows (no driver shipped
+/// with amwall), so user-mode is enough — no kernel-mode code
+/// needed.
 ///
 /// Separate from `install_global_rules` so the resulting filter
 /// ids land in `CategorizedFilterIds.stealth` for the
@@ -634,7 +655,7 @@ fn install_stealth_filters(
     }
     let loopback_mask =
         FWP_CONDITION_FLAG_IS_LOOPBACK | FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK;
-    let stealth_conds = [
+    let icmp_stealth_conds = [
         FilterCondition::FlagsNoneSet(loopback_mask),
         FilterCondition::IcmpType(3),
     ];
@@ -650,8 +671,44 @@ fn install_stealth_filters(
             layer,
             &SUBLAYER_KEY,
             Some(&PROVIDER_KEY),
-            &stealth_conds,
+            &icmp_stealth_conds,
             FilterAction::Block,
+            persistent,
+            Some(15),
+        )?;
+        ids.push(f.runtime_id());
+        count += 1;
+    }
+
+    // TCP-RST silent-drop (the kernel's default behaviour on a
+    // closed port is to RST; this filter routes the would-be RST
+    // through the SILENT_DROP callout instead so the port reads
+    // as filtered, not closed). Exempt loopback AND IPsec —
+    // upstream wfp.c:2112 OR's IPSEC_SECURED into the same
+    // FlagsNoneSet mask so encrypted traffic is never silenced.
+    let tcp_rst_mask = loopback_mask | FWP_CONDITION_FLAG_IS_IPSEC_SECURED;
+    let tcp_rst_conds = [FilterCondition::FlagsNoneSet(tcp_rst_mask)];
+    for (layer, callout_key) in &[
+        (
+            FWPM_LAYER_INBOUND_TRANSPORT_V4_DISCARD,
+            FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4_SILENT_DROP,
+        ),
+        (
+            FWPM_LAYER_INBOUND_TRANSPORT_V6_DISCARD,
+            FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V6_SILENT_DROP,
+        ),
+    ] {
+        let f = filter::add(
+            engine,
+            "amwall stealth-tcp-rst-silent-drop",
+            "amwall: Settings -> Rules -> Use stealth mode (TCP-RST silent drop)",
+            layer,
+            &SUBLAYER_KEY,
+            Some(&PROVIDER_KEY),
+            &tcp_rst_conds,
+            FilterAction::CalloutTerminating {
+                callout_key: *callout_key,
+            },
             persistent,
             Some(15),
         )?;
