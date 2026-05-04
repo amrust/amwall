@@ -35,6 +35,72 @@ pub enum BlocklistMode {
     Block,
 }
 
+/// View → Layout. Maps to comctl32's `LV_VIEW_*` modes — the
+/// listview's overall presentation. Mirrors upstream's
+/// IDM_VIEW_DETAILS/_ICON/_TILE radio group at main.c:3337.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewType {
+    /// `LV_VIEW_DETAILS` — multi-column report table. The default
+    /// upstream and the only mode amwall has had since M5.
+    #[default]
+    Details,
+    /// `LV_VIEW_ICON` — large square icons in a flow layout.
+    Icon,
+    /// `LV_VIEW_TILE` — icon + name + 2-line subtitle in a flow
+    /// layout. Halfway between Details and Icon.
+    Tile,
+}
+
+impl ViewType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ViewType::Details => "details",
+            ViewType::Icon => "icon",
+            ViewType::Tile => "tile",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "details" => Some(Self::Details),
+            "icon" => Some(Self::Icon),
+            "tile" => Some(Self::Tile),
+            _ => None,
+        }
+    }
+}
+
+/// View → Size. Controls which system imagelist (16/32/48 px)
+/// gets attached as `LVSIL_NORMAL` / `LVSIL_SMALL`. Upstream
+/// IDM_SIZE_SMALL/_LARGE/_EXTRALARGE radio group at main.c:3365.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IconSize {
+    /// 16×16 — default Details-mode size.
+    #[default]
+    Small,
+    /// 32×32 — default Icon/Tile-mode size.
+    Large,
+    /// 48×48 — `SHIL_EXTRALARGE` from `SHGetImageList`.
+    ExtraLarge,
+}
+
+impl IconSize {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IconSize::Small => "small",
+            IconSize::Large => "large",
+            IconSize::ExtraLarge => "extralarge",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "small" => Some(Self::Small),
+            "large" => Some(Self::Large),
+            "extralarge" => Some(Self::ExtraLarge),
+            _ => None,
+        }
+    }
+}
+
 impl BlocklistMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -69,6 +135,12 @@ pub struct Settings {
     pub show_filenames_only: bool,
     /// View → Use dark theme.
     pub use_dark_theme: bool,
+    /// View → Layout (Details / Icon / Tile).
+    pub view_type: ViewType,
+    /// View → Size (Small / Large / ExtraLarge). Only renders
+    /// visibly different in `Icon` and `Tile` view types; in
+    /// `Details` the icon column is fixed at 16×16 regardless.
+    pub icon_size: IconSize,
 
     // ---- Settings → General ----
     pub load_on_startup: bool,
@@ -156,6 +228,8 @@ impl Default for Settings {
             show_search_bar: true,
             show_filenames_only: true,
             use_dark_theme: false,
+            view_type: ViewType::Details,
+            icon_size: IconSize::Small,
             load_on_startup: false,
             start_minimized: false,
             skip_uac_warning: false,
@@ -257,6 +331,8 @@ impl Settings {
         kv(&mut buf, "show_search_bar", self.show_search_bar);
         kv(&mut buf, "show_filenames_only", self.show_filenames_only);
         kv(&mut buf, "use_dark_theme", self.use_dark_theme);
+        kv_str(&mut buf, "view_type", self.view_type.as_str());
+        kv_str(&mut buf, "icon_size", self.icon_size.as_str());
         kv(&mut buf, "load_on_startup", self.load_on_startup);
         kv(&mut buf, "start_minimized", self.start_minimized);
         kv(&mut buf, "skip_uac_warning", self.skip_uac_warning);
@@ -334,6 +410,18 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
         "blocklist_extra" => {
             if let Some(m) = BlocklistMode::parse(value) {
                 s.blocklist_extra = m;
+            }
+            return;
+        }
+        "view_type" => {
+            if let Some(v) = ViewType::parse(value) {
+                s.view_type = v;
+            }
+            return;
+        }
+        "icon_size" => {
+            if let Some(v) = IconSize::parse(value) {
+                s.icon_size = v;
             }
             return;
         }

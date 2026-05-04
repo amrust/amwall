@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::UI::Controls::HIMAGELIST;
 use windows::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    SHFILEINFOW, SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE,
 };
 use windows::core::PCWSTR;
 
@@ -88,6 +89,55 @@ pub fn system_small_imagelist() -> HIMAGELIST {
         return HIMAGELIST::default();
     }
     HIMAGELIST(il as isize)
+}
+
+/// Same as `system_small_imagelist` but for the 32×32 system
+/// imagelist (LV_VIEW_ICON / LV_VIEW_TILE default size). Returns
+/// the global system large-icon imagelist; cache the handle the
+/// caller's listview attaches as LVSIL_NORMAL.
+pub fn system_large_imagelist() -> HIMAGELIST {
+    let wpath = wide("dummy.exe");
+    let mut sfi = SHFILEINFOW::default();
+    let il = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wpath.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut sfi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES,
+        )
+    };
+    if il == 0 {
+        eprintln!("amwall: SHGetFileInfo(LARGE SYSICONINDEX) returned 0");
+        return HIMAGELIST::default();
+    }
+    HIMAGELIST(il as isize)
+}
+
+/// 48×48 ("extralarge") system imagelist. Win10's HiDPI display
+/// settings ramp this to 64×64+ on high-DPI screens, which is
+/// what upstream's Extra-large view uses. `SHGetImageList`
+/// returns an `IImageList` COM handle that wraps the same
+/// underlying HIMAGELIST; we transmute through the COM pointer
+/// to get the raw handle the listview needs.
+pub fn system_extralarge_imagelist() -> HIMAGELIST {
+    let result: windows::core::Result<windows::Win32::UI::Controls::IImageList> =
+        unsafe { SHGetImageList(SHIL_EXTRALARGE as i32) };
+    match result {
+        Ok(list) => {
+            // IImageList is a COM newtype around the underlying
+            // HIMAGELIST handle. Cast through usize so we extract
+            // the raw pointer the listview wants.
+            let raw: *mut std::ffi::c_void =
+                unsafe { std::mem::transmute_copy(&list) };
+            std::mem::forget(list); // shell owns the imagelist; don't AddRef/Release it
+            HIMAGELIST(raw as isize)
+        }
+        Err(_) => {
+            eprintln!("amwall: SHGetImageList(SHIL_EXTRALARGE) failed");
+            HIMAGELIST::default()
+        }
+    }
 }
 
 /// Cache of resolved per-path icon indices. Lookups go through

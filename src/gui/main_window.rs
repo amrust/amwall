@@ -82,10 +82,11 @@ use super::ids::{
     IDM_REMOVE_FROM_PROFILE,
     IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK,
     IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SETTINGS,
-    IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SKIPUACWARNING_CHK,
-    IDM_STARTMINIMIZED_CHK, IDM_TRAY_ENABLELOG_CHK, IDM_TRAY_ENABLENOTIFICATIONS_CHK,
-    IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGSHOW, IDM_TRAY_SHOW, IDM_TRAY_START,
-    IDM_USEDARKTHEME_CHK, IDM_WEBSITE, TAB_LISTVIEW_IDS,
+    IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SIZE_EXTRALARGE, IDM_SIZE_LARGE,
+    IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TRAY_ENABLELOG_CHK,
+    IDM_TRAY_ENABLENOTIFICATIONS_CHK, IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR,
+    IDM_TRAY_LOGSHOW, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_USEDARKTHEME_CHK, IDM_VIEW_DETAILS,
+    IDM_VIEW_ICON, IDM_VIEW_TILE, IDM_WEBSITE, TAB_LISTVIEW_IDS,
 };
 use super::dialogs;
 use super::toolbar::{self, Toolbar};
@@ -570,6 +571,14 @@ fn build_main_menu() -> Option<HMENU> {
         append_string(view, IDM_AUTOSIZECOLUMNS_CHK, "&Autosize columns");
         append_string(view, IDM_SHOWFILENAMESONLY_CHK, "Show &filenames only");
         append_string(view, IDM_SHOWSEARCHBAR_CHK, "Show &search bar");
+        append_separator(view);
+        append_string(view, IDM_VIEW_DETAILS, "Layout: &Details");
+        append_string(view, IDM_VIEW_ICON, "Layout: &Icons");
+        append_string(view, IDM_VIEW_TILE, "Layout: &Tiles");
+        append_separator(view);
+        append_string(view, IDM_SIZE_SMALL, "Icon size: S&mall");
+        append_string(view, IDM_SIZE_LARGE, "Icon size: &Large");
+        append_string(view, IDM_SIZE_EXTRALARGE, "Icon size: &Extra-large");
         append_separator(view);
         append_string(view, IDM_FONT, "&Font…");
         append_popup(menu, view, "&View");
@@ -2185,6 +2194,11 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
     // apply. Other tabs aren't affected.
     populate_apps_tab(state);
 
+    // View → Layout / Size persistence. Sends LVM_SETVIEW +
+    // LVM_SETIMAGELIST(LVSIL_NORMAL) to the Apps tab listviews,
+    // and toggles the radio checks on the View menu.
+    apply_view_settings(hwnd, state);
+
     if autosize {
         autosize_active_listview_columns(state);
     }
@@ -2584,6 +2598,8 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         IDM_TRAY_START => on_enable_filters(hwnd),
         IDM_TRAY_SHOW => super::tray::toggle_main_window(hwnd),
         IDM_FONT => on_pick_font(hwnd),
+        IDM_VIEW_DETAILS | IDM_VIEW_ICON | IDM_VIEW_TILE => on_pick_view_type(hwnd, id),
+        IDM_SIZE_SMALL | IDM_SIZE_LARGE | IDM_SIZE_EXTRALARGE => on_pick_icon_size(hwnd, id),
         IDM_OPENRULESEDITOR => on_create_rule(hwnd),
         IDM_SETTINGS => on_open_settings(hwnd),
         IDM_ADD_FILE => on_add_app(hwnd),
@@ -4692,6 +4708,149 @@ fn on_log_show(hwnd: HWND) {
 /// `font::apply_recursive`, deletes the old HFONT, and persists
 /// the user's choice into `Settings.font_face` /
 /// `Settings.font_height` so it survives restart.
+/// View → Layout radio-pick handler. Updates `Settings.view_type`,
+/// persists, and reapplies to all three apps-tab listviews via
+/// `LVM_SETVIEW`. Mirrors upstream simplewall's `IDM_VIEW_*` arm
+/// at `main.c:3337-3363`.
+fn on_pick_view_type(hwnd: HWND, id: u16) {
+    use crate::gui::settings::ViewType;
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let new_view = match id {
+        IDM_VIEW_ICON => ViewType::Icon,
+        IDM_VIEW_TILE => ViewType::Tile,
+        _ => ViewType::Details,
+    };
+    {
+        let mut s = state.app.settings.borrow_mut();
+        if s.view_type == new_view {
+            return;
+        }
+        s.view_type = new_view;
+    }
+    let path = state.app.settings_path.borrow().clone();
+    if let Err(e) = state.app.settings.borrow().save(&path) {
+        eprintln!("amwall: settings: save view_type failed: {e}");
+    }
+    apply_view_settings(hwnd, state);
+}
+
+/// View → Size radio-pick handler. Updates `Settings.icon_size`,
+/// persists, and reapplies. Mirrors upstream's `IDM_SIZE_*` arm
+/// at `main.c:3365`.
+fn on_pick_icon_size(hwnd: HWND, id: u16) {
+    use crate::gui::settings::IconSize;
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let new_size = match id {
+        IDM_SIZE_LARGE => IconSize::Large,
+        IDM_SIZE_EXTRALARGE => IconSize::ExtraLarge,
+        _ => IconSize::Small,
+    };
+    {
+        let mut s = state.app.settings.borrow_mut();
+        if s.icon_size == new_size {
+            return;
+        }
+        s.icon_size = new_size;
+    }
+    let path = state.app.settings_path.borrow().clone();
+    if let Err(e) = state.app.settings.borrow().save(&path) {
+        eprintln!("amwall: settings: save icon_size failed: {e}");
+    }
+    apply_view_settings(hwnd, state);
+}
+
+/// Push the current `view_type` + `icon_size` settings to the
+/// three Apps tab listviews via `LVM_SETVIEW` and `LVM_SETIMAGELIST`.
+/// Also sets the radio check marks on the View menu.
+///
+/// Listviews other than Apps (Rules / Connections / Log) stay
+/// in `LV_VIEW_DETAILS` always — those are pure tabular data,
+/// the icon/tile modes don't make sense there.
+fn apply_view_settings(hwnd: HWND, state: &WndState) {
+    use crate::gui::settings::{IconSize, ViewType};
+    use windows::Win32::UI::Controls::{
+        LV_VIEW_DETAILS, LV_VIEW_ICON, LV_VIEW_TILE, LVSIL_NORMAL,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::CheckMenuRadioItem;
+
+    const LVM_SETVIEW: u32 = 0x108E; // see CommCtrl.h: LVM_FIRST + 142
+
+    let s = state.app.settings.borrow();
+    let view_value: u32 = match s.view_type {
+        ViewType::Details => LV_VIEW_DETAILS,
+        ViewType::Icon => LV_VIEW_ICON,
+        ViewType::Tile => LV_VIEW_TILE,
+    };
+    let large_il = match s.icon_size {
+        IconSize::Small => super::app_icons::system_small_imagelist(),
+        IconSize::Large => super::app_icons::system_large_imagelist(),
+        IconSize::ExtraLarge => super::app_icons::system_extralarge_imagelist(),
+    };
+    drop(s);
+
+    // Apply view + LVSIL_NORMAL on Apps Profile / Services / UWP.
+    for slot in 0..=2 {
+        let lv = state.listviews[slot].get();
+        if lv.0 == 0 {
+            continue;
+        }
+        unsafe {
+            SendMessageW(lv, LVM_SETVIEW, WPARAM(view_value as usize), LPARAM(0));
+            if large_il != HIMAGELIST::default() {
+                SendMessageW(
+                    lv,
+                    LVM_SETIMAGELIST,
+                    WPARAM(LVSIL_NORMAL as usize),
+                    LPARAM(large_il.0),
+                );
+            }
+        }
+    }
+
+    // Radio-check the menu items so the user sees the current
+    // pick. CheckMenuRadioItem operates on a contiguous range of
+    // IDs; we have two ranges (3 view types, 3 icon sizes).
+    let s = state.app.settings.borrow();
+    let view_id = match s.view_type {
+        ViewType::Details => IDM_VIEW_DETAILS,
+        ViewType::Icon => IDM_VIEW_ICON,
+        ViewType::Tile => IDM_VIEW_TILE,
+    };
+    let size_id = match s.icon_size {
+        IconSize::Small => IDM_SIZE_SMALL,
+        IconSize::Large => IDM_SIZE_LARGE,
+        IconSize::ExtraLarge => IDM_SIZE_EXTRALARGE,
+    };
+    drop(s);
+    let menu = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetMenu(hwnd)
+    };
+    if !menu.is_invalid() {
+        unsafe {
+            let _ = CheckMenuRadioItem(
+                menu,
+                IDM_VIEW_DETAILS as u32,
+                IDM_VIEW_TILE as u32,
+                view_id as u32,
+                windows::Win32::UI::WindowsAndMessaging::MF_BYCOMMAND.0,
+            );
+            let _ = CheckMenuRadioItem(
+                menu,
+                IDM_SIZE_SMALL as u32,
+                IDM_SIZE_EXTRALARGE as u32,
+                size_id as u32,
+                windows::Win32::UI::WindowsAndMessaging::MF_BYCOMMAND.0,
+            );
+        }
+    }
+}
+
 fn on_pick_font(hwnd: HWND) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
