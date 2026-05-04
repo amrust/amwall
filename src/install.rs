@@ -531,12 +531,82 @@ fn install_global_rules(
         }
     }
 
-    // Allow IPv6 6to4 (protocol 41) — not yet implemented.
-    // Tunneled-IPv6-in-IPv4 lives at the IP_PACKET layer, which
-    // we don't currently install at. Toggle persists so settings
-    // round-trip cleanly; install path is a no-op until the
-    // IP_PACKET plumbing lands.
-    let _ = cfg.allow_6to4;
+    // Allow IPv6 redirections (6to4) — five-filter bundle that
+    // keeps the IPv6 stack functional under default-deny. Mirrors
+    // upstream simplewall wfp.c:1965-2062 exactly. All filters at
+    // weight 15 (same as the other Settings -> Rules allows).
+    //
+    //   1. Permit protocol 41 (IPPROTO_IPV6 — "IPv6 header") at
+    //      ALE_AUTH_RECV_ACCEPT_V4. This is the actual 6to4
+    //      tunnel: an IPv6 packet wrapped in an IPv4 outer header.
+    //
+    //   2-5. Permit ICMPv6 types 133/134/135/136 at
+    //      ALE_AUTH_RECV_ACCEPT_V6 — the four neighbor- and
+    //      router-discovery messages the IPv6 stack needs to
+    //      function. Without these the v6 stack can't resolve
+    //      link-local neighbors or learn about routers, which
+    //      breaks IPv6 connectivity even when the rest of the
+    //      profile would allow it.
+    //
+    // ICMPv6 condition uses FWPM_CONDITION_ICMP_TYPE (which is
+    // an alias for FWPM_CONDITION_IP_LOCAL_PORT at the ICMP
+    // layers — see wfp::condition).
+    if cfg.allow_6to4 {
+        // 1. IPv6-in-IPv4 encapsulation. Protocol 41 is the
+        //    "IPv6 header" IANA assignment; in WinSDK this is
+        //    IPPROTO_IPV6. Carried by IpProto::Other(41) since
+        //    our IpProto::IcmpV6 (58) is the v6 control plane,
+        //    not the encapsulating outer protocol.
+        let ipv6_in_ipv4 = FilterCondition::Protocol(
+            crate::wfp::condition::IpProto::Other(41),
+        );
+        let f = filter::add(
+            engine,
+            "amwall allow-6to4-ipv6-encap",
+            "amwall: Settings -> Rules -> Allow IPv6 redirections (6to4 protocol 41)",
+            &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+            &SUBLAYER_KEY,
+            Some(&PROVIDER_KEY),
+            std::slice::from_ref(&ipv6_in_ipv4),
+            FilterAction::Permit,
+            persistent,
+            Some(15),
+        )?;
+        ids.push(f.runtime_id());
+        count += 1;
+
+        // 2-5. ICMPv6 neighbor / router discovery permits.
+        //   133 — Router Solicitation
+        //   134 — Router Advertisement
+        //   135 — Neighbor Solicitation
+        //   136 — Neighbor Advertisement
+        for (icmp_type, name) in &[
+            (133u16, "router-sol"),
+            (134u16, "router-adv"),
+            (135u16, "neighbor-sol"),
+            (136u16, "neighbor-adv"),
+        ] {
+            let cond = FilterCondition::IcmpType(*icmp_type);
+            let display_name = format!("amwall allow-6to4-icmpv6-{name}");
+            let description = format!(
+                "amwall: Settings -> Rules -> Allow IPv6 redirections (ICMPv6 type {icmp_type})"
+            );
+            let f = filter::add(
+                engine,
+                &display_name,
+                &description,
+                &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+                &SUBLAYER_KEY,
+                Some(&PROVIDER_KEY),
+                std::slice::from_ref(&cond),
+                FilterAction::Permit,
+                persistent,
+                Some(15),
+            )?;
+            ids.push(f.runtime_id());
+            count += 1;
+        }
+    }
 
     Ok(count)
 }
