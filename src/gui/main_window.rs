@@ -85,8 +85,9 @@ use super::ids::{
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SIZE_EXTRALARGE, IDM_SIZE_LARGE,
     IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TRAY_ENABLELOG_CHK,
     IDM_TRAY_ENABLENOTIFICATIONS_CHK, IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR,
-    IDM_TRAY_LOGSHOW, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_USEDARKTHEME_CHK, IDM_VIEW_DETAILS,
-    IDM_VIEW_ICON, IDM_VIEW_TILE, IDM_WEBSITE, TAB_LISTVIEW_IDS,
+    IDM_TRAY_LOGSHOW, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_USECERTIFICATES_CHK,
+    IDM_USEDARKTHEME_CHK, IDM_USEHASHES_CHK, IDM_VIEW_DETAILS, IDM_VIEW_ICON, IDM_VIEW_TILE,
+    IDM_WEBSITE, TAB_LISTVIEW_IDS,
 };
 use super::dialogs;
 use super::toolbar::{self, Toolbar};
@@ -289,9 +290,22 @@ struct WndState {
     /// read; missing entries paint as "not signed" until the
     /// worker fills them in. `Arc<Mutex<...>>` instead of
     /// `RefCell` because the worker writes from another thread.
+    ///
+    /// The `SignedInfo` value carries both the chain-valid bool
+    /// (used by the row colorizer) and an optional signer-display
+    /// name (filled when `Settings.use_certificates` is on,
+    /// surfaced in App Properties / connect prompt / Connections
+    /// "Signature" column). The pair lives in a single cache
+    /// entry so we don't re-walk the trust state machine twice.
     signed_cache: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>,
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, SignedInfo>>,
     >,
+    /// Mirror of `Settings.use_certificates` shared with the
+    /// signed worker. Atomic so the toggle handler can flip it
+    /// without restarting the thread; the worker reads it
+    /// per-path before deciding whether to extract the signer
+    /// display name.
+    use_certificates_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Sends file paths to the background WinVerifyTrust worker.
     /// `None` until the worker spawns at WM_CREATE; populator
     /// code enqueues every File-kind app path once.
@@ -375,6 +389,9 @@ impl WndState {
             signed_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            use_certificates_flag: std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
             signed_tx: std::cell::RefCell::new(None),
             tray_added: Cell::new(false),
             taskbar_created_msg: Cell::new(0),
@@ -589,6 +606,17 @@ fn build_main_menu() -> Option<HMENU> {
         append_string(settings, IDM_STARTMINIMIZED_CHK, "Start &minimized");
         append_string(settings, IDM_SKIPUACWARNING_CHK, "Skip UAC warning");
         append_string(settings, IDM_CHECKUPDATES_CHK, "Check for &updates");
+        append_separator(settings);
+        append_string(
+            settings,
+            IDM_USECERTIFICATES_CHK,
+            "Check apps for digital &signatures",
+        );
+        append_string(
+            settings,
+            IDM_USEHASHES_CHK,
+            "Check apps for SHA-256 &hash",
+        );
         append_separator(settings);
 
         let rules = CreatePopupMenu().ok()?;
@@ -1223,7 +1251,15 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // tab signed-row colorizer can fill its cache without
     // blocking the GUI thread. Stores the sender on `state` so
     // populator code can enqueue paths.
-    let tx = spawn_signed_worker(hwnd, state.signed_cache.clone());
+    state.use_certificates_flag.store(
+        state.app.settings.borrow().use_certificates,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let tx = spawn_signed_worker(
+        hwnd,
+        state.signed_cache.clone(),
+        state.use_certificates_flag.clone(),
+    );
     *state.signed_tx.borrow_mut() = Some(tx);
 
     // Reverse-DNS worker: fills `dns_cache` on a background
@@ -1593,12 +1629,20 @@ const WM_USER_SIGNED_REFRESH: u32 =
 /// repaints. Coalesces refresh notifications: only posts one
 /// every ~10 paths or after `rx` returns Empty for >50 ms,
 /// which keeps the GUI responsive without spamming repaints.
+///
+/// `extract_signer_flag` is a shared atomic that mirrors
+/// `Settings.use_certificates`. The main thread flips it when
+/// the toggle changes; the worker reads it per-path so the
+/// signer field gets populated/skipped without restarting the
+/// worker.
 fn spawn_signed_worker(
     main_hwnd: HWND,
     cache: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>,
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, SignedInfo>>,
     >,
+    extract_signer_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::sync::mpsc::Sender<std::path::PathBuf> {
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc::{Receiver, Sender, channel};
     let (tx, rx): (Sender<std::path::PathBuf>, Receiver<std::path::PathBuf>) = channel();
     // Snapshot the HWND as a usize since HWND isn't Send. We
@@ -1610,15 +1654,22 @@ fn spawn_signed_worker(
         let mut since_last_post = 0u32;
         // Channel-closed (app shutting down) breaks the loop.
         while let Ok(path) = rx.recv() {
-            // Skip if already cached.
+            // Skip if already cached AND the cached entry has
+            // (or doesn't need) a signer. Re-verify when the
+            // user just turned use_certificates on so we
+            // backfill the signer for previously-cached rows.
+            let want_signer = extract_signer_flag.load(Ordering::Relaxed);
             if let Ok(g) = cache.lock() {
-                if g.contains_key(&path) {
-                    continue;
+                if let Some(prev) = g.get(&path) {
+                    let already_complete = !want_signer || prev.signer.is_some() || !prev.signed;
+                    if already_complete {
+                        continue;
+                    }
                 }
             }
-            let signed = win_verify_trust(&path);
+            let info = verify_signature(&path, want_signer);
             if let Ok(mut g) = cache.lock() {
-                g.insert(path, signed);
+                g.insert(path, info);
             }
             since_last_post += 1;
             if since_last_post >= BATCH_FOR_REFRESH {
@@ -1895,7 +1946,14 @@ fn process_connect_prompts(
         if silenced {
             continue;
         }
-        super::connect_dialog::show_async(hwnd, path, remote);
+        // Pull cached signer for the prompt's "Signed by X" line.
+        // Cache will usually have the entry by now since the
+        // path was just auto-cataloged and the worker keeps a
+        // few hundred ms ahead of the populator on warm runs;
+        // first-ever drop will see None and the prompt renders
+        // without the signer line.
+        let signer = path_signer_cached(state, path);
+        super::connect_dialog::show_async(hwnd, path, remote, signer.as_deref());
     }
 }
 
@@ -2168,6 +2226,8 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
         (IDM_RULE_ALLOWLOOPBACK, s.rule_allow_loopback),
         (IDM_RULE_ALLOW6TO4, s.rule_allow_6to4),
         (IDM_RULE_ALLOWWINDOWSUPDATE, s.rule_allow_windows_update),
+        (IDM_USECERTIFICATES_CHK, s.use_certificates),
+        (IDM_USEHASHES_CHK, s.use_hashes),
     ];
     for (id, v) in pairs {
         set_menu_check(hwnd, id, v);
@@ -2947,9 +3007,36 @@ fn path_is_signed_cached(state: &WndState, path: &std::path::Path) -> bool {
         return false;
     }
     match state.signed_cache.lock() {
-        Ok(g) => g.get(path).copied().unwrap_or(false),
+        Ok(g) => g.get(path).map(|info| info.signed).unwrap_or(false),
         Err(_) => false,
     }
+}
+
+/// Cached signer display name for `path`, or `None` if the
+/// worker hasn't seen it yet, the binary isn't signed, or
+/// `Settings.use_certificates` is off (worker skipped the
+/// extraction). Used by App Properties / Connections / connect-
+/// prompt for the signer surface.
+fn path_signer_cached(state: &WndState, path: &std::path::Path) -> Option<String> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    match state.signed_cache.lock() {
+        Ok(g) => g.get(path).and_then(|info| info.signer.clone()),
+        Err(_) => None,
+    }
+}
+
+/// Result of `verify_signature`. Carries both the trust verdict
+/// (chain valid?) and, when use_certificates is on AND the chain
+/// is valid, the leaf certificate's "simple display name" — what
+/// upstream simplewall surfaces in the Apps Properties dialog
+/// and the Connections tab. Mirrors upstream's pair of
+/// IsCertificatesEnabled-gated outputs at helper.c:1875+1931.
+#[derive(Debug, Clone, Default)]
+pub struct SignedInfo {
+    pub signed: bool,
+    pub signer: Option<String>,
 }
 
 /// `WinVerifyTrust(WINTRUST_ACTION_GENERIC_VERIFY_V2)` returning
@@ -2958,13 +3045,26 @@ fn path_is_signed_cached(state: &WndState, path: &std::path::Path) -> bool {
 /// treat it as unsigned. We pass `WTD_REVOKE_NONE` to skip the
 /// revocation network check — keeps each call latency-bounded
 /// and avoids hangs on offline machines.
-fn win_verify_trust(path: &std::path::Path) -> bool {
+///
+/// When `extract_signer` is true (settings.use_certificates), the
+/// state-data emitted by VERIFY is walked via
+/// `WTHelperProvDataFromStateData` -> `WTHelperGetProvSignerFromChain`
+/// -> `WTHelperGetProvCertFromChain` -> `CertGetNameStringW`
+/// (`CERT_NAME_SIMPLE_DISPLAY_TYPE`) to pull the leaf cert's
+/// display name (typically the publisher org, e.g. "Microsoft
+/// Corporation" or "GitHub, Inc."). When false, signer is None
+/// even for signed binaries.
+fn verify_signature(path: &std::path::Path, extract_signer: bool) -> SignedInfo {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::HWND;
+    use windows::Win32::Security::Cryptography::{
+        CERT_NAME_SIMPLE_DISPLAY_TYPE, CertGetNameStringW,
+    };
     use windows::Win32::Security::WinTrust::{
         WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
         WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
-        WinVerifyTrust,
+        WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
+        WTHelperProvDataFromStateData, WinVerifyTrust,
     };
     use windows::core::{GUID, PCWSTR};
 
@@ -2999,9 +3099,75 @@ fn win_verify_trust(path: &std::path::Path) -> bool {
             &mut data as *mut _ as *mut std::ffi::c_void,
         )
     };
+    let signed = result == 0;
+
+    // Pull the signer's display name out of the state data while
+    // it's still valid (between VERIFY and CLOSE). Only worth the
+    // walk when the chain verified AND the user opted into
+    // certificate extraction.
+    let signer = if signed && extract_signer {
+        let prov_data = unsafe { WTHelperProvDataFromStateData(data.hWVTStateData) };
+        if prov_data.is_null() {
+            None
+        } else {
+            let signer_ptr = unsafe {
+                WTHelperGetProvSignerFromChain(prov_data, 0, false, 0)
+            };
+            if signer_ptr.is_null() {
+                None
+            } else {
+                let cert_ptr = unsafe { WTHelperGetProvCertFromChain(signer_ptr, 0) };
+                if cert_ptr.is_null() {
+                    None
+                } else {
+                    let cert_context = unsafe { (*cert_ptr).pCert };
+                    if cert_context.is_null() {
+                        None
+                    } else {
+                        // Probe for required size, then read.
+                        let needed = unsafe {
+                            CertGetNameStringW(
+                                cert_context,
+                                CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                                0,
+                                None,
+                                None,
+                            )
+                        };
+                        if needed <= 1 {
+                            None
+                        } else {
+                            let mut buf = vec![0u16; needed as usize];
+                            let written = unsafe {
+                                CertGetNameStringW(
+                                    cert_context,
+                                    CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                                    0,
+                                    None,
+                                    Some(&mut buf),
+                                )
+                            };
+                            if written <= 1 {
+                                None
+                            } else {
+                                // Strip trailing NUL the API includes
+                                // in the count.
+                                let len = written as usize - 1;
+                                Some(String::from_utf16_lossy(&buf[..len]))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     // Always close the trust state to release the cached
-    // signature data WinVerifyTrust holds onto.
+    // signature data WinVerifyTrust holds onto. MUST happen
+    // after the WTHelper* walk above — `prov_data` is the same
+    // backing storage Win32 reclaims on STATEACTION_CLOSE.
     data.dwStateAction = WTD_STATEACTION_CLOSE;
     unsafe {
         WinVerifyTrust(
@@ -3011,7 +3177,7 @@ fn win_verify_trust(path: &std::path::Path) -> bool {
         );
     }
 
-    result == 0
+    SignedInfo { signed, signer }
 }
 
 /// WSL "Pico" process detection. Path-only classification can't
@@ -3538,7 +3704,8 @@ fn on_context_properties(hwnd: HWND) {
         }
     };
 
-    let updated = match super::app_properties::open(hwnd, &initial) {
+    let signer = path_signer_cached(state, &target.binary_path);
+    let updated = match super::app_properties::open(hwnd, &initial, signer.as_deref()) {
         Some(u) => u,
         None => return, // Close / no edits.
     };
@@ -3644,6 +3811,8 @@ fn on_toggle(hwnd: HWND, id: u16) {
             IDM_RULE_ALLOWLOOPBACK => &mut s.rule_allow_loopback,
             IDM_RULE_ALLOW6TO4 => &mut s.rule_allow_6to4,
             IDM_RULE_ALLOWWINDOWSUPDATE => &mut s.rule_allow_windows_update,
+            IDM_USECERTIFICATES_CHK => &mut s.use_certificates,
+            IDM_USEHASHES_CHK => &mut s.use_hashes,
             _ => return,
         };
         *field = !*field;
@@ -3696,7 +3865,49 @@ fn on_toggle(hwnd: HWND, id: u16) {
             // filters" by hand.
             reinstall_filters_if_active(state);
         }
+        IDM_USECERTIFICATES_CHK => {
+            // Update the worker's atomic flag, then re-enqueue
+            // every File-kind app so signers get backfilled (if
+            // turning on) or can be left alone (if turning off
+            // — the worker checks the flag per-path and skips
+            // the certificate walk; existing cached signers
+            // remain visible until cache eviction).
+            state
+                .use_certificates_flag
+                .store(new_value, std::sync::atomic::Ordering::Relaxed);
+            if new_value {
+                requeue_signed_paths(state);
+            }
+        }
+        IDM_USEHASHES_CHK => {
+            // Hash drift check runs on save; trigger one now so
+            // the user sees the effect of flipping the toggle
+            // immediately. update_hashes_if_enabled is a no-op
+            // when use_hashes is off.
+            save_profile_to_disk(state);
+        }
         _ => {}
+    }
+}
+
+/// Re-enqueue every File-kind app's path on the signed worker so
+/// the cache gets refreshed with the newly-requested signer
+/// metadata. Used when the user flips `use_certificates` on
+/// after launch — the worker's per-path "already cached?" check
+/// recognises that the cached entry lacks a signer and re-runs
+/// the trust state machine to extract one.
+fn requeue_signed_paths(state: &WndState) {
+    use crate::profile::AppKind;
+    let tx_borrow = state.signed_tx.borrow();
+    let tx = match tx_borrow.as_ref() {
+        Some(t) => t,
+        None => return,
+    };
+    let profile = state.app.profile.borrow();
+    for app in &profile.apps {
+        if app.kind() == AppKind::File && !app.path.as_os_str().is_empty() {
+            let _ = tx.send(app.path.clone());
+        }
     }
 }
 

@@ -112,12 +112,23 @@ struct DialogState {
 /// connecting to `remote`. Returns immediately (modeless) — the
 /// user's Allow choice arrives at `parent` as
 /// `WM_USER_CONNECT_ALLOW`. Block / dismiss is silent.
-pub fn show_async(parent: HWND, app_path: &Path, remote: &str) {
+///
+/// `signer` is the leaf certificate display name from the
+/// WinVerifyTrust cache when `Settings.use_certificates` is on.
+/// When `Some`, the dialog appends "Signed by X" beneath the
+/// remote endpoint so the user can decide based on whether the
+/// publisher is trusted, not just the path. `None` falls back to
+/// the prior behaviour (no signer line).
+pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&str>) {
+    let displayed_remote = match signer {
+        Some(s) if !s.is_empty() => format!("{remote}\nSigned by {s}"),
+        _ => remote.to_string(),
+    };
     let state = Box::new(DialogState {
         parent,
         path: app_path.to_path_buf(),
         path_text: wrap_path_for_display(&app_path.display().to_string(), 60),
-        remote: remote.to_string(),
+        remote: displayed_remote,
         armed: Cell::new(false),
         remaining_ms: Cell::new(SAFETY_TIMEOUT_MS),
     });

@@ -47,17 +47,29 @@ const IDC_SAVE: i32 = 1; // IDOK
 const IDC_CLOSE: i32 = 2; // IDCANCEL
 
 /// Dialog state pointed to by GWLP_USERDATA. Holds the original
-/// app and a slot for the edited version on Save.
+/// app, an optional signer display name (M12.1 — surfaced in the
+/// dialog title when present), and a slot for the edited version
+/// on Save.
 struct DialogState {
     initial: ProfileApp,
+    signer: Option<String>,
     result: RefCell<Option<ProfileApp>>,
 }
 
-/// Open the App properties modal. Returns `Some(updated_app)` if
-/// the user clicked Save with changes, otherwise `None`.
-pub fn open(parent: HWND, app: &ProfileApp) -> Option<ProfileApp> {
+/// Open the App properties modal. `signer` is the leaf certificate
+/// display name from the WinVerifyTrust cache (or `None` if the
+/// binary is unsigned, the worker hasn't seen it yet, or
+/// `Settings.use_certificates` is off). When provided, it's
+/// appended to the dialog title bar — mirrors upstream simplewall's
+/// signer display in the App-properties UI.
+pub fn open(
+    parent: HWND,
+    app: &ProfileApp,
+    signer: Option<&str>,
+) -> Option<ProfileApp> {
     let state = DialogState {
         initial: app.clone(),
+        signer: signer.map(str::to_string),
         result: RefCell::new(None),
     };
     let state_ptr = &state as *const DialogState as isize;
@@ -91,6 +103,18 @@ unsafe extern "system" fn dialog_proc(
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, lparam.0);
             }
             let state = unsafe { &*(lparam.0 as *const DialogState) };
+
+            // Append signer info to the dialog title when known —
+            // upstream surfaces the certificate display name on
+            // its App Properties UI; we route through the title
+            // bar to avoid touching the .rc dialog template.
+            if let Some(signer) = state.signer.as_deref() {
+                let title = format!("amwall - Properties (signed by {signer})");
+                let mut wtitle = wide(&title);
+                unsafe {
+                    let _ = SetWindowTextW(hwnd, PCWSTR(wtitle.as_mut_ptr()));
+                }
+            }
 
             // Path: read-only edit, single-line. Show the full path;
             // truncation is handled by the edit's horizontal scroll.
