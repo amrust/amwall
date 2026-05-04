@@ -1,0 +1,156 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Rebuild amwall (clean + release, stderr → swaplog.txt)",
+            "type": "shell",
+            "command": "chcp 65001 >nul && cargo clean && cargo build --release && cargo run --release 1> \"${workspaceFolder}\\swaplog.txt\" 2>&1",
+            "group": "build",
+            "problemMatcher": "$rustc",
+            "options": {
+                "shell": {
+                    "executable": "cmd.exe",
+                    "args": ["/C"]
+                },
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "Build amwall (release, stderr → swaplog.txt)",
+            "type": "shell",
+            "command": "chcp 65001 >nul && cargo build --release && cargo run --release 1> \"${workspaceFolder}\\swaplog.txt\" 2>&1",
+            "group": "build",
+            "problemMatcher": "$rustc",
+            "options": {
+                "shell": {
+                    "executable": "cmd.exe",
+                    "args": ["/C"]
+                },
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "Build + run amwall ELEVATED (UAC, stderr → swaplog.txt)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                ".vscode/run-elevated.ps1"
+            ],
+            "group": "build",
+            "problemMatcher": "$rustc",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "detail": "Builds in release, then launches amwall.exe via UAC. The elevated cmd.exe wrapper handles stderr redirection (Start-Process -Verb RunAs can't redirect stdio directly). Helper script: .vscode/run-elevated.ps1"
+        },
+        {
+            // Idempotent: cargo install with --locked is a fast
+            // no-op when cargo-wix is already at the locked
+            // version, so chaining this in front of every MSI
+            // build costs <1s on warm runs. The Get-Command
+            // guard skips even that on subsequent presses.
+            "label": "amwall: ensure cargo-wix",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "if (-not (Get-Command cargo-wix -ErrorAction SilentlyContinue)) { Write-Host 'Installing cargo-wix...'; cargo install cargo-wix --locked } else { Write-Host 'cargo-wix already installed' }"
+            ],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "amwall: cargo build --release (msvc target)",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--release",
+                "--target",
+                "x86_64-pc-windows-msvc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "echo": true
+            },
+            "problemMatcher": "$rustc",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            // Default build task — what Ctrl+Shift+B runs.
+            // Chains the two prep tasks above (`dependsOrder:
+            // sequence` forces sequential, not parallel), then
+            // invokes `cargo wix`. --no-build skips a redundant
+            // rebuild since the previous task already produced
+            // the release binary.
+            //
+            // Output: target\wix\amwall-<version>-x86_64.msi
+            //
+            // Prerequisite the task can't auto-install: WiX
+            // Toolset 3.x (candle.exe / light.exe). The
+            // PowerShell wrapper detects its absence and prints
+            // install instructions instead of failing with a
+            // cryptic "command not found".
+            "label": "Build MSI installer",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) { Write-Error 'WiX Toolset 3.x not found on PATH. Install via:`n  choco install wixtoolset -y  (run from an elevated shell)`nor download from https://github.com/wixtoolset/wix3/releases'; exit 1 }; cargo wix --no-build --nocapture --target x86_64-pc-windows-msvc; if ($LASTEXITCODE -eq 0) { $msi = Get-ChildItem -Path target/wix -Filter *.msi | Select-Object -Last 1; if ($msi) { Write-Host \"`nMSI built: $($msi.FullName)\" -ForegroundColor Green } }"
+            ],
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "amwall: ensure cargo-wix",
+                "amwall: cargo build --release (msvc target)"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "echo": true
+            },
+            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            // Convenience side-task: opens target\wix in
+            // Explorer with the freshest MSI selected. Not the
+            // default; reach via Ctrl+Shift+P -> "Tasks: Run
+            // Task" -> "Reveal MSI in Explorer".
+            "label": "Reveal MSI in Explorer",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "$msi = Get-ChildItem -Path target/wix -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -Last 1; if ($msi) { Start-Process explorer.exe -ArgumentList \"/select,$($msi.FullName)\" } else { Write-Error 'No MSI found under target/wix - run \"Build MSI installer\" first.' }"
+            ],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            },
+            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        }
+    ]
+}

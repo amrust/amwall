@@ -4,7 +4,13 @@
 Cargo.lock.bak
 
 # Editor / IDE
-.vscode/
+# `.vscode/` is intentionally tracked — we ship project-specific
+# build tasks (Ctrl+Shift+B builds the MSI installer, the
+# build-and-run-elevated task, the WiX prerequisites check) so
+# contributors pick up the same workflow on first checkout. Keep
+# per-user overrides + IntelliSense / history caches out:
+.vscode/*.local
+.vscode/.history/
 .idea/
 .claude/
 *.swp

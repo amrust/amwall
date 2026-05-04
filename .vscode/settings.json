@@ -1,0 +1,15 @@
+{
+    "task.autoDetect": "off",
+
+    // CMake Tools extension auto-registers itself as a build-task
+    // provider on every workspace, polluting the Ctrl+Shift+B
+    // picker with "[Build] / [Configure] / etc." entries even
+    // when no CMakeLists.txt exists. amwall is pure
+    // cargo, so silence it across the board.
+    "cmake.configureOnOpen": false,
+    "cmake.automaticReconfigure": false,
+    "cmake.useCMakePresets": "never",
+    "cmake.statusbar.visibility": "hidden",
+    "cmake.showOptionsMovedNotification": false,
+    "cmake.showSystemKits": false
+}
