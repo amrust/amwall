@@ -20,12 +20,13 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_BYTE_ARRAY16, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0,
     FWP_CONDITION_VALUE0_0, FWP_DIRECTION, FWP_DIRECTION_INBOUND, FWP_DIRECTION_OUTBOUND,
     FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_MATCH_RANGE, FWP_RANGE0, FWP_RANGE_TYPE,
-    FWP_SID, FWP_UINT8, FWP_UINT16, FWP_UINT32, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK,
-    FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
-    FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_ALE_PACKAGE_ID, FWPM_CONDITION_DIRECTION,
-    FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_LOCAL_ADDRESS, FWPM_CONDITION_IP_LOCAL_PORT,
-    FWPM_CONDITION_IP_PROTOCOL, FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT,
-    FWPM_FILTER_CONDITION0, FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
+    FWP_SECURITY_DESCRIPTOR_TYPE, FWP_SID, FWP_UINT8, FWP_UINT16, FWP_UINT32,
+    FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0,
+    FWP_VALUE0_0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_ALE_PACKAGE_ID,
+    FWPM_CONDITION_ALE_USER_ID, FWPM_CONDITION_DIRECTION, FWPM_CONDITION_FLAGS,
+    FWPM_CONDITION_IP_LOCAL_ADDRESS, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
+    FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER_CONDITION0,
+    FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
 };
 
 /// At ICMP layers (`FWPM_LAYER_*ICMP_ERROR_*`), WFP repurposes
@@ -139,6 +140,16 @@ pub enum FilterCondition {
     /// reads the bytes without us having to keep a Win32 `LocalFree`-
     /// owned buffer alive.
     PackageSid(Vec<u8>),
+    /// Windows-service security descriptor — matches against
+    /// `FWPM_CONDITION_ALE_USER_ID` with `FWP_SECURITY_DESCRIPTOR_TYPE`.
+    /// Carries the raw self-relative security descriptor bytes
+    /// produced by `BuildSecurityDescriptorW` granting
+    /// `FWP_ACTRL_MATCH_FILTER` to a service SID. The kernel
+    /// matches when the packet's principal SID has that access
+    /// right under this DACL — i.e., the originating process is
+    /// running under the named service. Mirrors upstream
+    /// simplewall's per-service filter at `wfp.c:1029-1048`.
+    ServiceSecurityDescriptor(Vec<u8>),
 }
 
 /// Compile a slice of `FilterCondition` into a parallel array of
@@ -166,6 +177,8 @@ pub(super) fn compile(
         app_id_blobs: Vec::new(),
         ranges: Vec::new(),
         package_sids: Vec::new(),
+        sd_data: Vec::new(),
+        sd_blobs: Vec::new(),
         natives: Vec::with_capacity(conditions.len()),
     };
 
@@ -238,6 +251,10 @@ pub(super) fn compile(
             },
 
             FilterCondition::PackageSid(bytes) => storage.fc_package_sid(bytes),
+
+            FilterCondition::ServiceSecurityDescriptor(bytes) => {
+                storage.fc_service_security_descriptor(bytes)
+            }
         };
         storage.natives.push(native);
     }
@@ -282,6 +299,15 @@ pub(super) struct CompiledConditions {
     /// allocation address stable as the outer `Vec` grows, same
     /// rationale as `v4_masks`.
     package_sids: Vec<Box<Vec<u8>>>,
+    /// Self-relative security-descriptor bytes referenced by
+    /// `sd_blobs[i].data`. The `Vec<u8>` is boxed so the buffer
+    /// has a stable address even as `sd_data` grows.
+    sd_data: Vec<Box<Vec<u8>>>,
+    /// `FWP_BYTE_BLOB` headers wrapping the matching `sd_data[i]`.
+    /// One blob per `ServiceSecurityDescriptor` condition. Boxed
+    /// for stable address — the FWPM_FILTER_CONDITION0 carries a
+    /// raw pointer to one of these.
+    sd_blobs: Vec<Box<FWP_BYTE_BLOB>>,
     /// The compiled native conditions, in the same order as the
     /// input slice. Pointers within these reference into the three
     /// `Box` vecs above and into the WFP-heap blobs.
@@ -438,6 +464,34 @@ impl CompiledConditions {
                 Anonymous: FWP_CONDITION_VALUE0_0 { byteBlob: blob_ptr },
             },
         })
+    }
+
+    /// Build a `FWPM_CONDITION_ALE_USER_ID` condition pointing at
+    /// our owned copy of the security-descriptor bytes, wrapped in
+    /// a stable-address `FWP_BYTE_BLOB` header. The kernel reads
+    /// both the header (size + data ptr) and the data buffer
+    /// directly. Mirrors the upstream simplewall byte-blob shape
+    /// in `wfp.c:1033-1038`.
+    fn fc_service_security_descriptor(
+        &mut self,
+        bytes: &[u8],
+    ) -> FWPM_FILTER_CONDITION0 {
+        let owned = Box::new(bytes.to_vec());
+        let blob = Box::new(FWP_BYTE_BLOB {
+            size: owned.len() as u32,
+            data: owned.as_ptr() as *mut u8,
+        });
+        let blob_ptr: *mut FWP_BYTE_BLOB = blob.as_ref() as *const _ as *mut _;
+        self.sd_data.push(owned);
+        self.sd_blobs.push(blob);
+        FWPM_FILTER_CONDITION0 {
+            fieldKey: FWPM_CONDITION_ALE_USER_ID,
+            matchType: FWP_MATCH_EQUAL,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_SECURITY_DESCRIPTOR_TYPE,
+                Anonymous: FWP_CONDITION_VALUE0_0 { sd: blob_ptr },
+            },
+        }
     }
 
     /// Build a `FWPM_CONDITION_ALE_PACKAGE_ID` condition pointing

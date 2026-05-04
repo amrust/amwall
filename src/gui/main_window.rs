@@ -3069,10 +3069,11 @@ fn on_apps_select_all(hwnd: HWND, listview_id: i32) {
 /// Per-tab semantics:
 ///   - Apps Profile: drops the matching `profile.apps[]` slots.
 ///   - Services: removes any `profile.apps[]` whose `path`
-///     matches the selected services' `image_path` — does NOT
+///     matches the selected services' SCM short name — does NOT
 ///     touch the SCM service itself.
-///   - UWP: nothing to remove from profile yet (UWP entries
-///     can't be path-matched until the data-model expands).
+///   - UWP: removes any `profile.apps[]` whose `path` matches
+///     the selected packages' SID. SID-less rows (registry hive
+///     incomplete) silently no-op.
 fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
@@ -3135,15 +3136,19 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
             }
         }
         x if x == IDC_APPS_SERVICE => {
-            // Collect the matched service paths first, then
+            // Collect the matched service short-names first, then
             // retain-by-not-in-set on profile.apps. Avoids the
             // index-shift issue and cleanly handles services
-            // whose image_path doesn't have a profile entry
-            // (no-op for those rows).
+            // whose name doesn't have a profile entry (no-op for
+            // those rows).
             let services = state.services.borrow();
             let paths: Vec<std::path::PathBuf> = source_indices
                 .into_iter()
-                .filter_map(|i| services.get(i).map(|s| s.image_path.clone()))
+                .filter_map(|i| {
+                    services
+                        .get(i)
+                        .map(|s| std::path::PathBuf::from(&s.service_name))
+                })
                 .collect();
             let mut profile = state.app.profile.borrow_mut();
             let before = profile.apps.len();
@@ -3151,8 +3156,23 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
             removed = before - profile.apps.len();
         }
         x if x == IDC_APPS_UWP => {
-            // No profile entry tied to UWP rows yet — nothing
-            // to delete. Status bar reflects 0 removed.
+            // Match by package SID — same identifier the right-
+            // click and install paths use.
+            let uwp = state.uwp_packages.borrow();
+            let sids: Vec<std::path::PathBuf> = source_indices
+                .into_iter()
+                .filter_map(|i| {
+                    uwp.get(i)
+                        .and_then(|p| p.package_sid.as_deref())
+                        .map(std::path::PathBuf::from)
+                })
+                .collect();
+            if !sids.is_empty() {
+                let mut profile = state.app.profile.borrow_mut();
+                let before = profile.apps.len();
+                profile.apps.retain(|a| !sids.contains(&a.path));
+                removed = before - profile.apps.len();
+            }
         }
         _ => return,
     }

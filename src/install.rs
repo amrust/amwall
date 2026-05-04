@@ -56,6 +56,133 @@ const PROVIDER_DESCRIPTION: &str =
     "Rust port of simplewall — Windows Filtering Platform firewall";
 const SUBLAYER_NAME: &str = "amwall sublayer";
 
+/// Build the self-relative security descriptor that upstream
+/// simplewall installs on per-service filters. The SD has a
+/// single ACE granting `FWP_ACTRL_MATCH_FILTER` (= 1) to the
+/// service-specific SID derived from the service name.
+///
+/// Service-SID derivation goes through `LookupAccountNameW` with
+/// the `"NT SERVICE\\<name>"` form — the public Win32 spelling
+/// of `RtlCreateServiceSid`'s output. The resulting SID is what
+/// the kernel sees as the principal of svchost.exe processes
+/// running that service, so a `FWPM_CONDITION_ALE_USER_ID` filter
+/// keyed on this SD distinguishes (e.g.) Dnscache from BITS even
+/// though both share `svchost.exe`.
+///
+/// Returns `None` if the service name doesn't resolve to a SID
+/// (typo / missing service / Win32 error). Errors are not bubbled
+/// because per-service install failures should be local to the
+/// row, not aborting the whole `-install`.
+///
+/// Mirrors upstream `simplewall-master/src/packages.c:610-657`
+/// (the `_app_package_getserviceslist` SD-build sequence).
+fn service_security_descriptor(service_name: &str) -> Option<Vec<u8>> {
+    use std::mem::MaybeUninit;
+
+    use windows::Win32::Foundation::{HLOCAL, LocalFree, PSID};
+    use windows::Win32::Security::Authorization::{
+        BuildSecurityDescriptorW, EXPLICIT_ACCESS_W, GRANT_ACCESS, TRUSTEE_IS_SID,
+        TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    };
+    use windows::Win32::Security::{
+        LookupAccountNameW, NO_INHERITANCE, PSECURITY_DESCRIPTOR, SID_NAME_USE,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    // Account name format the LSA accepts for service SIDs.
+    // Anything that doesn't resolve via this path won't be a real
+    // service.
+    let account_name = format!("NT SERVICE\\{service_name}");
+    let wname: Vec<u16> =
+        account_name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // Probe call: gets sizes for the SID + referenced-domain
+    // buffers without writing anything.
+    let mut sid_len: u32 = 0;
+    let mut domain_len: u32 = 0;
+    let mut name_use = SID_NAME_USE::default();
+    let probe = unsafe {
+        LookupAccountNameW(
+            PCWSTR::null(),
+            PCWSTR(wname.as_ptr()),
+            PSID::default(),
+            &mut sid_len,
+            PWSTR::null(),
+            &mut domain_len,
+            &mut name_use,
+        )
+    };
+    // Probe always fails (insufficient buffer); we just need the
+    // sizes. If the function reports a real failure (account
+    // doesn't exist), sid_len stays 0 and we bail.
+    let _ = probe;
+    if sid_len == 0 {
+        return None;
+    }
+
+    let mut sid_buf = vec![0u8; sid_len as usize];
+    let mut domain_buf: Vec<u16> = vec![0u16; domain_len.max(1) as usize];
+    if unsafe {
+        LookupAccountNameW(
+            PCWSTR::null(),
+            PCWSTR(wname.as_ptr()),
+            PSID(sid_buf.as_mut_ptr() as *mut _),
+            &mut sid_len,
+            PWSTR(domain_buf.as_mut_ptr()),
+            &mut domain_len,
+            &mut name_use,
+        )
+    }
+    .is_err()
+    {
+        return None;
+    }
+
+    // EXPLICIT_ACCESS_W granting FWP_ACTRL_MATCH_FILTER to the
+    // service SID. TRUSTEE_W carries the SID by raw pointer; the
+    // sid_buf must outlive the BuildSecurityDescriptorW call.
+    let trustee = TRUSTEE_W {
+        TrusteeForm: TRUSTEE_IS_SID,
+        TrusteeType: TRUSTEE_IS_UNKNOWN,
+        ptstrName: PWSTR(sid_buf.as_mut_ptr() as *mut u16),
+        ..TRUSTEE_W::default()
+    };
+
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions:
+            windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_ACTRL_MATCH_FILTER,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: trustee,
+    };
+
+    let mut sd_size: u32 = 0;
+    let mut sd: PSECURITY_DESCRIPTOR =
+        unsafe { MaybeUninit::zeroed().assume_init() };
+    let result = unsafe {
+        BuildSecurityDescriptorW(
+            None,
+            None,
+            Some(std::slice::from_ref(&access)),
+            None,
+            PSECURITY_DESCRIPTOR(std::ptr::null_mut()),
+            &mut sd_size,
+            &mut sd,
+        )
+    };
+    // BuildSecurityDescriptorW returns a WIN32_ERROR; 0 == ERROR_SUCCESS.
+    if result.0 != 0 || sd.0.is_null() || sd_size == 0 {
+        return None;
+    }
+    let bytes =
+        unsafe { std::slice::from_raw_parts(sd.0 as *const u8, sd_size as usize) }
+            .to_vec();
+    unsafe {
+        let _ = LocalFree(HLOCAL(sd.0));
+    }
+    Some(bytes)
+}
+
 /// Convert a textual SID like `"S-1-15-2-…"` into the raw byte
 /// sequence WFP wants for `FWP_SID`. Wraps `ConvertStringSidToSidW`
 /// (advapi32) and copies the kernel-allocated SID into our own
@@ -807,12 +934,29 @@ fn install_per_app_filters(
                 }
             }
             AppKind::Service => {
-                // Service-shaped entries need svc_name -> exe-path
-                // resolution AND a service-SID security descriptor
-                // condition. Out of scope for the UWP follow-up;
-                // tracked separately.
-                counts.skipped += 1;
-                continue;
+                // app.path holds the service short name
+                // (e.g. "Dnscache"). Build the security descriptor
+                // upstream uses for FWPM_CONDITION_ALE_USER_ID,
+                // which keys on the service-specific SID — that's
+                // how we distinguish svchost-hosted services from
+                // each other even though they share the same exe.
+                let svc_name = app.path.to_string_lossy();
+                match service_security_descriptor(&svc_name) {
+                    Some(bytes) => {
+                        vec![
+                            crate::wfp::condition::FilterCondition::ServiceSecurityDescriptor(
+                                bytes,
+                            ),
+                        ]
+                    }
+                    None => {
+                        eprintln!(
+                            "amwall: per-service permit skipped for `{svc_name}` (could not resolve service SID)"
+                        );
+                        counts.skipped += 1;
+                        continue;
+                    }
+                }
             }
         };
 
@@ -1287,6 +1431,34 @@ mod tests {
         // Revision byte is always 1; subAuthorityCount byte is 2.
         assert_eq!(bytes[0], 1);
         assert_eq!(bytes[1], 2);
+    }
+
+    /// `service_security_descriptor` returns a non-empty buffer
+    /// for a well-known always-present service. `EventLog` ships
+    /// with every Windows install since NT and is registered
+    /// under `NT SERVICE\EventLog`. A successful round-trip means
+    /// LookupAccountNameW resolved the service SID and
+    /// BuildSecurityDescriptorW produced a valid self-relative
+    /// SD — that's everything install_per_app_filters needs.
+    #[test]
+    fn service_security_descriptor_well_known_service() {
+        let sd = service_security_descriptor("EventLog")
+            .expect("EventLog service should resolve");
+        // Self-relative SD has at least a 20-byte header
+        // (SECURITY_DESCRIPTOR_RELATIVE) plus the DACL with one
+        // ACE — total well over 32 bytes for any non-trivial SID.
+        assert!(sd.len() >= 32, "SD too small: {}", sd.len());
+        // Revision byte is always 1.
+        assert_eq!(sd[0], 1);
+    }
+
+    #[test]
+    fn service_security_descriptor_rejects_unknown_service() {
+        // Service names can't contain spaces or special chars, so
+        // this won't collide with any real service.
+        assert!(
+            service_security_descriptor("amwall_definitely_not_a_real_service_xyz").is_none()
+        );
     }
 
     #[test]

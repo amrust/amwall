@@ -234,18 +234,23 @@ pub fn target_from_source(
             } else {
                 svc.display_name.clone()
             };
-            // Match against existing profile by image_path. Many
-            // services share svchost.exe — that's an inherent limit
-            // of the path-based App model, matching upstream.
-            let existing = profile
-                .apps
-                .iter()
-                .find(|a| a.path == svc.image_path);
+            // Identifier is the service short name (e.g.
+            // "Dnscache"), not its image path. Upstream simplewall
+            // stores service rows the same way (profile.c:441 —
+            // anything without a path separator and without the
+            // "S-1-" SID prefix is classified DATA_APP_SERVICE).
+            // The install path then derives a service-specific SID
+            // from the name (`NT SERVICE\<name>`) and emits a
+            // FWPM_CONDITION_ALE_USER_ID filter, which is what
+            // distinguishes svchost-hosted services from each
+            // other.
+            let svc_path = std::path::PathBuf::from(&svc.service_name);
+            let existing = profile.apps.iter().find(|a| a.path == svc_path);
             Some(ContextTarget {
                 listview_id,
                 row,
                 display_name: display,
-                binary_path: svc.image_path.clone(),
+                binary_path: svc_path,
                 in_profile: existing.is_some(),
                 current_is_enabled: existing.map(|a| a.is_enabled).unwrap_or(false),
             })
@@ -325,19 +330,29 @@ mod tests {
     }
 
     #[test]
-    fn service_row_matches_profile_by_image_path() {
+    fn service_row_routes_through_short_name_not_image_path() {
+        // Two services sharing svchost.exe: only the matching
+        // service-NAME entry should mark in_profile=true. This
+        // is the parity behaviour upstream gets via the
+        // service-SID security descriptor — multiple svchost
+        // services don't collide.
         let svc = super::super::services_enum::ServiceEntry {
             service_name: "Audiosrv".into(),
             display_name: "Windows Audio".into(),
             image_path: PathBuf::from(r"C:\Windows\system32\svchost.exe"),
         };
-        let profile =
-            fixture_profile(vec![sample_app(r"C:\Windows\system32\svchost.exe", false)]);
+        let profile = fixture_profile(vec![
+            // An old svchost-as-path entry — should NOT match.
+            sample_app(r"C:\Windows\system32\svchost.exe", false),
+            // The new service-name-as-path entry — should match.
+            sample_app("Audiosrv", true),
+        ]);
         let tgt =
             target_from_source(IDC_APPS_SERVICE, 0, 0, &profile, std::slice::from_ref(&svc), &[])
                 .unwrap();
-        assert!(tgt.in_profile, "image path matches an existing App entry");
-        assert!(!tgt.current_is_enabled, "should reflect the App's is_enabled");
+        assert_eq!(tgt.binary_path, PathBuf::from("Audiosrv"));
+        assert!(tgt.in_profile);
+        assert!(tgt.current_is_enabled, "matched the service-name entry, not svchost");
         assert_eq!(tgt.display_name, "Windows Audio");
     }
 
