@@ -63,16 +63,16 @@ embed-resource = "2.5"
 proptest = { version = "1", default-features = false, features = ["std"] }
 
 # cargo-wix configuration. M9.2 — `cargo wix` reads this section
-# to know which template to use, where to put the MSI, and what
-# license / EULA dialog (if any) to inject. Matching workflow
-# lives at .github/workflows/release.yml.
+# to know how to package the binary; matching workflow lives at
+# .github/workflows/release.yml.
 [package.metadata.wix]
-# Path is relative to the manifest. We commit a hand-tuned
-# template (Start Menu shortcut, Add/Remove Programs metadata,
-# WixUI_InstallDir UI flow) rather than the cargo-wix default.
-include = ["wix/main.wxs"]
 # `eula = false` tells cargo-wix not to look for a default EULA
 # dialog template; we use WixUI_InstallDir which doesn't have a
 # license screen. Same reasoning for license = false.
 eula = false
 license = false
+# Note: we DON'T list `include = ["wix/main.wxs"]` here. cargo-wix
+# auto-discovers wix/main.wxs as the default template; explicitly
+# including it would compile the file twice (once by auto-discovery
+# and once via the explicit list), producing a duplicate-output
+# CNDL0351 error from candle.exe.
