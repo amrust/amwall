@@ -24,4 +24,6 @@ pub mod gui;
 #[cfg(windows)]
 pub mod install;
 #[cfg(windows)]
+pub mod skipuac;
+#[cfg(windows)]
 pub mod wfp;

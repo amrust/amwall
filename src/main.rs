@@ -69,6 +69,14 @@ mod cli {
         },
         /// `-uninstall [-silent]`.
         Uninstall { silent: bool },
+        /// `-skipuac-register` — register the Task Scheduler entry
+        /// that lets unelevated launches relaunch silently as
+        /// admin. Requires admin (auto-elevated via UAC). Used by
+        /// the Settings -> Skip UAC warning toggle when the user
+        /// turns it on.
+        SkipUacRegister,
+        /// `-skipuac-unregister` — remove the entry above.
+        SkipUacUnregister,
         /// Argparse failed with a message — print to stderr, exit 2.
         Error(String),
     }
@@ -85,6 +93,8 @@ mod cli {
             "-h" | "--help" => Command::Help,
             "-install" => parse_install_flags(&args[2..]),
             "-uninstall" => parse_uninstall_flags(&args[2..]),
+            "-skipuac-register" => Command::SkipUacRegister,
+            "-skipuac-unregister" => Command::SkipUacUnregister,
             other => Command::Error(format!("unknown command `{other}`")),
         }
     }
@@ -170,6 +180,30 @@ mod cli {
                     return exit;
                 }
                 handle_uninstall(silent)
+            }
+            Command::SkipUacRegister => {
+                if let Err(exit) = ensure_admin(true) {
+                    return exit;
+                }
+                match amwall::skipuac::register() {
+                    Ok(()) => ExitCode::from(0),
+                    Err(e) => {
+                        eprintln!("amwall: skipuac register failed: {e}");
+                        ExitCode::from(1)
+                    }
+                }
+            }
+            Command::SkipUacUnregister => {
+                if let Err(exit) = ensure_admin(true) {
+                    return exit;
+                }
+                match amwall::skipuac::unregister() {
+                    Ok(()) => ExitCode::from(0),
+                    Err(e) => {
+                        eprintln!("amwall: skipuac unregister failed: {e}");
+                        ExitCode::from(1)
+                    }
+                }
             }
             Command::Error(msg) => {
                 eprintln!("amwall: {msg}");

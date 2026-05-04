@@ -71,17 +71,42 @@ pub fn run(default_profile_path: PathBuf) -> ExitCode {
     // bounce off ERROR_ACCESS_DENIED (user-mode). `IsUserAnAdmin`
     // returns TRUE only when the process is running with the
     // unfiltered admin token under UAC — i.e. true elevation.
-    {
+    let admin = {
         use windows::Win32::UI::Shell::IsUserAnAdmin;
-        let admin = unsafe { IsUserAnAdmin() }.as_bool();
+        let v = unsafe { IsUserAnAdmin() }.as_bool();
         eprintln!(
             "amwall: starting GUI ({})",
-            if admin {
+            if v {
                 "elevated / admin"
             } else {
                 "user mode — filter management + WFP event subscription will fail"
             }
         );
+        v
+    };
+
+    // "Skip UAC warning" silent elevation. When the user has
+    // previously enabled this option (one-time UAC prompt to
+    // register a Task Scheduler task with RunLevel = HIGHEST),
+    // we relaunch ourselves through that task and exit. The new
+    // process spawns elevated without a UAC prompt — same trick
+    // upstream simplewall uses (`_r_skipuac_run`).
+    //
+    // Skipped when we're already elevated (no need) or when the
+    // task isn't registered (toggle was never enabled, or was
+    // unenabled).
+    if !admin && crate::skipuac::is_registered() {
+        match crate::skipuac::run_via_task() {
+            Ok(()) => {
+                eprintln!("amwall: relaunching elevated via skipuac task; exiting unelevated copy");
+                return ExitCode::from(0);
+            }
+            Err(e) => {
+                eprintln!(
+                    "amwall: skipuac relaunch failed ({e}); continuing as unelevated GUI"
+                );
+            }
+        }
     }
 
     // Per-Monitor v2 DPI awareness: hi-DPI displays (4K @ 200%+ scaling)

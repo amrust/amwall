@@ -2288,7 +2288,13 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
         (IDM_USEDARKTHEME_CHK, s.use_dark_theme),
         (IDM_LOADONSTARTUP_CHK, s.load_on_startup),
         (IDM_STARTMINIMIZED_CHK, s.start_minimized),
-        (IDM_SKIPUACWARNING_CHK, s.skip_uac_warning),
+        // Skip UAC: derived from "is the task registered?", not
+        // from a saved bool. The persisted `skip_uac_warning`
+        // field is still updated on toggle so the settings file
+        // mirrors reality, but the task itself is the source of
+        // truth — a user could remove the task from Task Scheduler
+        // directly, and the menu should then show unchecked.
+        (IDM_SKIPUACWARNING_CHK, crate::skipuac::is_registered()),
         (IDM_CHECKUPDATES_CHK, s.check_updates),
         (IDM_RULE_BLOCKOUTBOUND, s.rule_block_outbound),
         (IDM_RULE_BLOCKINBOUND, s.rule_block_inbound),
@@ -3955,6 +3961,18 @@ fn on_toggle(hwnd: HWND, id: u16) {
                 requeue_signed_paths(state);
             }
         }
+        IDM_SKIPUACWARNING_CHK => {
+            // Register/unregister the Task Scheduler entry that
+            // lets unelevated launches relaunch silently as
+            // admin. Both calls require admin on the first
+            // attempt; if amwall isn't already elevated, Windows
+            // bounces the COM call with E_ACCESSDENIED. We
+            // detect that, ShellExecuteEx-runas a tiny helper
+            // shell command that re-runs the toggle, and then
+            // refresh our checkbox to reflect the actual task
+            // state.
+            apply_skipuac_toggle(hwnd, state, new_value);
+        }
         IDM_USEHASHES_CHK => {
             // Hash drift check runs on save; trigger one now so
             // the user sees the effect of flipping the toggle
@@ -3964,6 +3982,94 @@ fn on_toggle(hwnd: HWND, id: u16) {
         }
         _ => {}
     }
+}
+
+/// Skip-UAC toggle: register or unregister the Task Scheduler
+/// entry that lets future amwall launches elevate without a UAC
+/// prompt. The first time this is enabled, Windows shows a UAC
+/// prompt because writing a HIGHEST-runlevel task requires admin;
+/// every subsequent launch is silent.
+///
+/// Implementation: the actual register/unregister calls happen in
+/// a child amwall.exe process (via `-skipuac-register` /
+/// `-skipuac-unregister`) so we get auto-elevation through the
+/// existing `ensure_admin` ShellExecuteEx-runas helper. We wait
+/// for the child to finish, then re-check the task state and
+/// reflect it on the menu.
+///
+/// If the child returned non-zero (user cancelled UAC, or
+/// register/unregister failed) we revert the menu check to match
+/// the actual task state — so the user doesn't see a misleading
+/// "enabled" tick when nothing happened.
+fn apply_skipuac_toggle(hwnd: HWND, state: &WndState, requested: bool) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        INFINITE, WaitForSingleObject,
+    };
+    use windows::Win32::UI::Shell::{
+        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use windows::core::PCWSTR;
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("amwall: skipuac: cannot resolve own exe: {e}");
+            // Snap the menu back to the actual task state.
+            set_menu_check(hwnd, IDM_SKIPUACWARNING_CHK, crate::skipuac::is_registered());
+            return;
+        }
+    };
+    let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let verb_w: Vec<u16> = "runas\0".encode_utf16().collect();
+    let arg = if requested {
+        "-skipuac-register"
+    } else {
+        "-skipuac-unregister"
+    };
+    let arg_w: Vec<u16> = arg.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb_w.as_ptr()),
+        lpFile: PCWSTR(exe_w.as_ptr()),
+        lpParameters: PCWSTR(arg_w.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+
+    let exec_ok = unsafe { ShellExecuteExW(&mut sei) };
+    if exec_ok.is_err() || sei.hProcess.0 == 0 {
+        eprintln!("amwall: skipuac: ShellExecuteExW(runas) failed (UAC denied?)");
+        set_menu_check(hwnd, IDM_SKIPUACWARNING_CHK, crate::skipuac::is_registered());
+        return;
+    }
+    unsafe {
+        let _ = WaitForSingleObject(sei.hProcess, INFINITE);
+        let _ = CloseHandle(sei.hProcess);
+    }
+
+    // Re-query so the menu reflects reality, even if the child
+    // failed mid-call.
+    let actual = crate::skipuac::is_registered();
+    set_menu_check(hwnd, IDM_SKIPUACWARNING_CHK, actual);
+    {
+        let mut s = state.app.settings.borrow_mut();
+        s.skip_uac_warning = actual;
+    }
+    let path = state.app.settings_path.borrow().clone();
+    if let Err(e) = state.app.settings.borrow().save(&path) {
+        eprintln!("amwall: settings: save skip_uac_warning failed: {e}");
+    }
+    let label = if actual {
+        "Skip UAC: enabled. Future launches won't show UAC for admin users."
+    } else {
+        "Skip UAC: disabled. Future launches will show UAC for admin actions."
+    };
+    set_status_text(state.status.get(), 0, label);
 }
 
 /// Re-enqueue every File-kind app's path on the signed worker so

@@ -1,6 +1,6 @@
 [package]
 name = "amwall"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 description = "Rust port of simplewall, a Windows Filtering Platform (WFP) firewall"
 license = "GPL-3.0-or-later"
@@ -42,8 +42,10 @@ windows = { version = "0.54", features = [
     "Win32_System_Registry",
     "Win32_System_Rpc",
     "Win32_System_Services",
+    "Win32_System_TaskScheduler",
     "Win32_System_Threading",
     "Win32_System_Time",
+    "Win32_System_Variant",
     "Win32_UI_Controls",
     "Win32_UI_Controls_Dialogs",
     "Win32_UI_HiDpi",
