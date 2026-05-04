@@ -907,6 +907,10 @@ unsafe extern "system" fn wnd_proc(
             on_connect_block(hwnd, wparam);
             LRESULT(0)
         }
+        m if m == super::update_check::WM_USER_UPDATE_AVAILABLE => {
+            on_update_available(hwnd, wparam);
+            LRESULT(0)
+        }
         m if m == super::tray::WM_USER_TRAYICON => {
             on_tray_message(hwnd, lparam);
             LRESULT(0)
@@ -1275,6 +1279,17 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // install (gated on `Settings.first_run_done`) so we don't
     // pester returning users.
     maybe_run_first_run_wizard(hwnd, state);
+
+    // Update check: ping GitHub's releases/latest in a worker
+    // thread; if newer than our compiled-in version, post
+    // WM_USER_UPDATE_AVAILABLE back here. Failures are silent.
+    // amwall NEVER auto-downloads / auto-installs — the prompt
+    // just offers to open the releases page in the user's
+    // browser. Gated by `Settings.check_updates` (default on,
+    // matches upstream simplewall's `IsCheckUpdates`).
+    if state.app.settings.borrow().check_updates {
+        super::update_check::check_async(hwnd, env!("CARGO_PKG_VERSION"));
+    }
 
     Ok(())
 }
@@ -1976,6 +1991,60 @@ fn is_user_in_fullscreen() -> bool {
         state,
         QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE | QUNS_BUSY
     )
+}
+
+/// Handler for `WM_USER_UPDATE_AVAILABLE` — the update-check
+/// worker found a newer release tag on GitHub. Reclaims the
+/// `Box<UpdateInfo>` from wparam, pops a Yes/No MessageBox
+/// asking if the user wants to open the releases page, and if
+/// they say yes, hands the URL to ShellExecuteW so it opens in
+/// their default browser. No is silent — we don't re-prompt
+/// until the next time amwall starts.
+///
+/// Explicitly never downloads or installs anything: amwall is
+/// a firewall, and a firewall that auto-updates is one that can
+/// be MITM'd into installing whatever an attacker controls.
+fn on_update_available(hwnd: HWND, wparam: WPARAM) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_ICONINFORMATION, MB_YESNO, MessageBoxW,
+    };
+
+    let raw = wparam.0 as *mut super::update_check::UpdateInfo;
+    if raw.is_null() {
+        return;
+    }
+    let info = unsafe { Box::from_raw(raw) };
+
+    let body = format!(
+        "amwall {} is available (you're running {}).\n\n\
+         Open the releases page in your browser?",
+        info.latest_tag,
+        env!("CARGO_PKG_VERSION"),
+    );
+    let mut wbody = wide(&body);
+    let mut wtitle = wide("amwall - update available");
+    let result = unsafe {
+        MessageBoxW(
+            hwnd,
+            windows::core::PCWSTR(wbody.as_mut_ptr()),
+            windows::core::PCWSTR(wtitle.as_mut_ptr()),
+            MB_YESNO | MB_ICONINFORMATION,
+        )
+    };
+    if result == IDYES {
+        let mut wurl = wide(&info.releases_url);
+        let mut wverb = wide("open");
+        unsafe {
+            windows::Win32::UI::Shell::ShellExecuteW(
+                hwnd,
+                windows::core::PCWSTR(wverb.as_mut_ptr()),
+                windows::core::PCWSTR(wurl.as_mut_ptr()),
+                windows::core::PCWSTR::null(),
+                windows::core::PCWSTR::null(),
+                windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            );
+        }
+    }
 }
 
 /// Handler for `WM_USER_CONNECT_BLOCK` — user clicked Block on

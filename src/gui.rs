@@ -37,6 +37,7 @@ pub mod settings_dialog;
 pub mod startup;
 pub mod toolbar;
 pub mod tray;
+pub mod update_check;
 pub mod uwp_enum;
 
 use std::path::PathBuf;
