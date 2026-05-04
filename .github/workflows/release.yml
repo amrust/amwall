@@ -1,0 +1,120 @@
+# amwall — release builder.
+# Copyright (C) 2026  amwall contributors. Licensed GPL-3.0-or-later.
+#
+# Builds the amwall MSI installer on a Windows runner and attaches
+# it to a GitHub Release. Triggered ONLY by an explicit version tag
+# push (`git tag v0.1.0 && git push origin v0.1.0`) — pushes to
+# main don't run this workflow.
+#
+# Output: target\wix\amwall-<version>-x86_64.msi attached to the
+# tag's GitHub Release as the only asset.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  # Needed by softprops/action-gh-release to create the Release
+  # and attach the MSI as an asset. Read-only `contents: read` is
+  # the workflow default; releases need contents: write.
+  contents: write
+
+jobs:
+  build-msi:
+    name: Build MSI installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # Pin to 1.85 to match Cargo.toml's rust-version. dtolnay's
+        # action is the maintained shim; rustup is preinstalled on
+        # the windows-latest runner so this resolves quickly.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Includes the cargo-wix install we run below so the
+          # tool isn't re-downloaded on every release. The key
+          # changes when Cargo.lock or rust-toolchain changes,
+          # invalidating the cache automatically.
+          cache-on-failure: true
+
+      - name: Run gates
+        # Mirror the local gating commands (build / clippy / test)
+        # so a tag pointing at a broken commit fails fast before
+        # we burn time on the WiX build. The local repo runs the
+        # same three checks before each commit.
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+          cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+          cargo test --target x86_64-pc-windows-msvc
+
+      - name: Ensure WiX Toolset 3.x is on PATH
+        # windows-latest typically ships with WiX 3.11 preinstalled
+        # under "C:\Program Files (x86)\WiX Toolset v3.11\bin", but
+        # GitHub's runner image contents drift over time. choco
+        # treats an already-installed package as a no-op (~2s),
+        # so this is cheap insurance against a runner-image update
+        # that drops WiX. cargo-wix invokes candle.exe / light.exe
+        # by name, so they need to be on PATH.
+        shell: pwsh
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            choco install wixtoolset --no-progress -y
+            Write-Host "Added WiX bin dir to GITHUB_PATH"
+            "C:\Program Files (x86)\WiX Toolset v3.11\bin" >> $env:GITHUB_PATH
+          } else {
+            Write-Host "candle.exe already on PATH"
+          }
+
+      - name: Install cargo-wix
+        # `--locked` uses the upstream Cargo.lock so we get a
+        # reproducible cargo-wix version. Cached by rust-cache
+        # above so steady-state cost is ~5 seconds.
+        run: cargo install cargo-wix --locked
+
+      - name: Build MSI
+        # --no-build skips a redundant cargo build (we already
+        # built in "Run gates"). --target makes cargo-wix resolve
+        # $(var.CargoTargetBinDir) to
+        # target\x86_64-pc-windows-msvc\release, which matches
+        # main.wxs's File Source path. --nocapture passes through
+        # WiX's stdout/stderr so candle/light errors are visible
+        # in the workflow log.
+        run: cargo wix --no-build --nocapture --target x86_64-pc-windows-msvc
+
+      - name: Locate MSI
+        id: msi
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Path "target/wix" -Filter "*.msi" | Select-Object -First 1
+          if (-not $msi) {
+            Write-Error "No MSI found under target/wix"
+            exit 1
+          }
+          "path=$($msi.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($msi.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Create draft release with MSI
+        # `draft: true` so the user reviews the release before
+        # publishing — first-time releases especially. Switch to
+        # false once the workflow is proven for the project.
+        # `generate_release_notes: true` autopopulates the body
+        # from commits since the previous tag.
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: ${{ steps.msi.outputs.path }}
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}

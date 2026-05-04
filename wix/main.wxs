@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  amwall WiX installer template.
+  Copyright (C) 2026  amwall contributors. Licensed GPL-3.0-or-later.
+
+  Built into a standalone MSI by `cargo wix`. The build chain is:
+
+    cargo build --release --target x86_64-pc-windows-msvc
+    cargo wix --no-build --nocapture --target x86_64-pc-windows-msvc
+
+  cargo-wix injects $(var.Version) from Cargo.toml's `version = "..."`
+  and $(var.CargoTargetBinDir) which resolves to
+  `target\x86_64-pc-windows-msvc\release` for the command above.
+
+  GUIDs:
+    - UpgradeCode is stable across versions — never regenerate it,
+      that's how the MSI knows "this is an upgrade of amwall, remove
+      the old one first" instead of "this is a different product".
+    - Component GUIDs (MainExecutable / LicenseFile / Shortcut) must
+      stay stable per file/folder identity. Changing one would tell
+      the installer to keep both old and new on uninstall.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="amwall"
+    UpgradeCode="A8F3E2C1-9B4D-4C7E-8F1A-3D2C5B6E7F81"
+    Language="1033"
+    Codepage="1252"
+    Version="$(var.Version)"
+    Manufacturer="amwall contributors">
+
+    <Package
+      Id="*"
+      Keywords="Installer,Firewall,WFP,simplewall"
+      Description="amwall - Rust port of simplewall (Windows Filtering Platform firewall)"
+      Manufacturer="amwall contributors"
+      InstallerVersion="450"
+      Languages="1033"
+      Compressed="yes"
+      InstallScope="perMachine"
+      SummaryCodepage="1252" />
+
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="A newer version of amwall is already installed. Uninstall it first if you want to downgrade." />
+
+    <Media Id="1" Cabinet="amwall.cab" EmbedCab="yes" />
+
+    <!-- Filesystem layout: C:\Program Files\amwall\amwall.exe + LICENSE -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="APPLICATIONFOLDER" Name="amwall">
+          <Component Id="MainExecutable" Guid="3E8D4F29-7C5A-4B1E-9D2F-6A4B8C1E5D3A" Win64="yes">
+            <File Id="amwallEXE"
+                  Name="amwall.exe"
+                  Source="$(var.CargoTargetBinDir)\amwall.exe"
+                  KeyPath="yes" />
+          </Component>
+          <Component Id="LicenseFile" Guid="5D7E3F1A-8B2C-4D9E-A1F5-7B3C9E2D6A4F" Win64="yes">
+            <File Id="LICENSE"
+                  Name="LICENSE"
+                  Source="LICENSE"
+                  KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <!-- Start Menu: Programs\amwall\amwall -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="amwall">
+          <Component Id="ApplicationShortcut" Guid="F2A1B9C4-3D5E-4F8A-B7C1-2E9D4A6F3B8C">
+            <Shortcut Id="ApplicationStartMenuShortcut"
+                      Name="amwall"
+                      Description="Rust port of simplewall (Windows Filtering Platform firewall)"
+                      Target="[#amwallEXE]"
+                      WorkingDirectory="APPLICATIONFOLDER" />
+            <!-- RemoveFolder on uninstall: clean up the empty
+                 Programs\amwall directory once the shortcut is gone. -->
+            <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+            <!-- KeyPath has to be a registry value (not a file)
+                 for advertised shortcuts; HKCU\Software\amwall\installed
+                 doubles as a "did the per-user install complete"
+                 sentinel that Windows uses for shortcut repair. -->
+            <RegistryValue Root="HKCU"
+                           Key="Software\amwall"
+                           Name="installed"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="MainProgram" Title="amwall" Level="1"
+             Description="Install amwall.exe and create Start Menu shortcut"
+             ConfigurableDirectory="APPLICATIONFOLDER">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="LicenseFile" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+
+    <!-- WixUI_InstallDir: standard install UI with a folder picker.
+         Flow is Welcome -> InstallDir -> Verify -> Progress -> Finish.
+         No license dialog (GPL-3.0 doesn't require click-through;
+         LICENSE ships next to amwall.exe and is also on GitHub). -->
+    <UI>
+      <UIRef Id="WixUI_InstallDir" />
+    </UI>
+    <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
+
+    <!-- Add/Remove Programs metadata. Without explicit values,
+         WiX synthesises some from <Package> attributes; setting
+         them explicitly makes the entry behave nicely under
+         winget search amwall etc. -->
+    <Property Id="ARPCONTACT" Value="https://github.com/amrust/amwall" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/amrust/amwall/issues" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/amrust/amwall" />
+  </Product>
+</Wix>

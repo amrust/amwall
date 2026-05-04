@@ -60,3 +60,18 @@ embed-resource = "2.5"
 # `default-features = false` drops the timeout/fork machinery
 # we don't use, which keeps the dev-build dep tree small.
 proptest = { version = "1", default-features = false, features = ["std"] }
+
+# cargo-wix configuration. M9.2 — `cargo wix` reads this section
+# to know which template to use, where to put the MSI, and what
+# license / EULA dialog (if any) to inject. Matching workflow
+# lives at .github/workflows/release.yml.
+[package.metadata.wix]
+# Path is relative to the manifest. We commit a hand-tuned
+# template (Start Menu shortcut, Add/Remove Programs metadata,
+# WixUI_InstallDir UI flow) rather than the cargo-wix default.
+include = ["wix/main.wxs"]
+# `eula = false` tells cargo-wix not to look for a default EULA
+# dialog template; we use WixUI_InstallDir which doesn't have a
+# license screen. Same reasoning for license = false.
+eula = false
+license = false
