@@ -41,9 +41,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateDialogParamW, DestroyWindow, GWLP_USERDATA, GetDlgItem, GetWindowLongPtrW, KillTimer,
-    PostMessageW, SW_SHOWNA, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
-    WM_COMMAND, WM_DRAWITEM, WM_INITDIALOG, WM_NCDESTROY, WM_TIMER,
+    CreateDialogParamW, DestroyWindow, GWLP_USERDATA, GetDlgItem, GetWindowLongPtrW,
+    HWND_NOTOPMOST, HWND_TOPMOST, KillTimer, PostMessageW, SW_SHOWNA, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, WM_COMMAND, WM_DRAWITEM, WM_INITDIALOG, WM_NCDESTROY, WM_TIMER,
 };
 use windows::core::PCWSTR;
 
@@ -165,6 +166,38 @@ pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&s
     // whatever the user was typing into.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNA);
+    }
+
+    // Pop to the top of z-order on appear. Without this, the
+    // SW_SHOWNA + WS_EX_NOACTIVATE pair creates the window
+    // *behind* whatever the user has focused, which means a
+    // user typing into a maximised browser / IDE never sees the
+    // prompt. The HWND_TOPMOST -> HWND_NOTOPMOST pair is the
+    // standard Win32 pattern for "appear at top once, then
+    // accept normal z-order": SetWindowPos to TOPMOST raises
+    // the window above all non-topmost windows, then NOTOPMOST
+    // clears the sticky flag while preserving the just-moved
+    // position. SWP_NOACTIVATE keeps focus on the user's
+    // active window (preserves the WS_EX_NOACTIVATE intent).
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 
