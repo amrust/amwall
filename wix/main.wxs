@@ -3,22 +3,28 @@
   amwall WiX installer template.
   Copyright (C) 2026  amwall contributors. Licensed GPL-3.0-or-later.
 
-  Built into a standalone MSI by `cargo wix`. The build chain is:
+  Built into a standalone MSI by `cargo wix`. See
+  .github/workflows/release.yml and .vscode/tasks.json for the
+  exact invocation (release-target build, then cargo wix with
+  no-build / nocapture / x86_64-pc-windows-msvc).
 
-    cargo build --release --target x86_64-pc-windows-msvc
-    cargo wix --no-build --nocapture --target x86_64-pc-windows-msvc
-
-  cargo-wix injects $(var.Version) from Cargo.toml's `version = "..."`
-  and $(var.CargoTargetBinDir) which resolves to
-  `target\x86_64-pc-windows-msvc\release` for the command above.
+  cargo-wix injects $(var.Version) from Cargo.toml's version
+  field and $(var.CargoTargetBinDir) which resolves to
+  `target\x86_64-pc-windows-msvc\release` for the build above.
 
   GUIDs:
-    - UpgradeCode is stable across versions — never regenerate it,
-      that's how the MSI knows "this is an upgrade of amwall, remove
-      the old one first" instead of "this is a different product".
-    - Component GUIDs (MainExecutable / LicenseFile / Shortcut) must
-      stay stable per file/folder identity. Changing one would tell
-      the installer to keep both old and new on uninstall.
+    * UpgradeCode is stable across versions; never regenerate it.
+      That stable id is how the MSI recognises "this is an upgrade
+      of amwall, remove the old one first" instead of "this is a
+      different product".
+    * Component GUIDs (MainExecutable / LicenseFile / Shortcut)
+      must stay stable per file or folder identity. Changing one
+      would tell the installer to keep both old and new on
+      uninstall.
+
+  XML comments cannot contain a double-dash (it's the end-of-comment
+  marker), so flag-style examples in this header use prose rather
+  than literal `option-name` syntax.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
