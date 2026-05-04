@@ -4305,6 +4305,16 @@ fn on_delete_selected_rule(hwnd: HWND) {
 /// stands either way (the user can still re-save via
 /// File > Export).
 fn save_profile_to_disk(state: &WndState) {
+    // M12.2: when use_hashes is on, compute SHA-256 for File-
+    // kind apps that don't yet have a stored hash AND check for
+    // drift on apps that do. Mirrors upstream simplewall's
+    // `_app_getfilehashinfo` -> `<item hash="..."/>` flow at
+    // db.c:1027 + helper.c:1882. Cheap on a typical exe (a few
+    // ms each); we run it inline on save rather than spawning a
+    // worker since the user expects "save" to mean "everything
+    // is on disk now", not "queued".
+    update_hashes_if_enabled(state);
+
     let path = state.app.profile_path.borrow().clone();
     let xml = crate::profile::to_string(&state.app.profile.borrow());
     if let Some(parent) = path.parent() {
@@ -4316,6 +4326,70 @@ fn save_profile_to_disk(state: &WndState) {
             path.display()
         );
         set_status_text(state.status.get(), 0, "Auto-save failed.");
+    }
+}
+
+/// M12.2 use_hashes worker: walk File-kind apps in the profile,
+/// compute current SHA-256, compare against stored. Three cases:
+///
+/// - `app.hash` empty + file readable: store the computed hash.
+/// - `app.hash` non-empty + file readable + matches: no-op.
+/// - `app.hash` non-empty + file readable + differs: log a
+///   warning to stderr (caught by swaplog) and surface in the
+///   status bar. The stored hash is NOT overwritten — drift
+///   detection is a one-shot signal; the user clears it by
+///   editing or removing the App entry.
+///
+/// No-op when `use_hashes` is off or the app isn't File-shaped.
+fn update_hashes_if_enabled(state: &WndState) {
+    use crate::profile::AppKind;
+
+    if !state.app.settings.borrow().use_hashes {
+        return;
+    }
+    let mut profile = state.app.profile.borrow_mut();
+    let mut drifted: Vec<String> = Vec::new();
+    for app in profile.apps.iter_mut() {
+        if app.kind() != AppKind::File {
+            continue;
+        }
+        let Some(current) = crate::hash::sha256_file(&app.path) else {
+            // Unreadable file — skip, leave any existing hash
+            // alone. Don't surface as drift (the file might
+            // simply have been uninstalled).
+            continue;
+        };
+        match &app.hash {
+            None => {
+                app.hash = Some(current);
+            }
+            Some(stored) if stored.eq_ignore_ascii_case(&current) => {
+                // Match — nothing to do.
+            }
+            Some(_) => {
+                let name = app
+                    .path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| app.path.display().to_string());
+                eprintln!(
+                    "amwall: hash drift detected for {} ({}): \
+                     stored hash differs from current binary",
+                    name,
+                    app.path.display()
+                );
+                drifted.push(name);
+            }
+        }
+    }
+    drop(profile);
+    if !drifted.is_empty() {
+        let msg = if drifted.len() == 1 {
+            format!("Hash drift: {}", drifted[0])
+        } else {
+            format!("Hash drift on {} apps (see log)", drifted.len())
+        };
+        set_status_text(state.status.get(), 0, &msg);
     }
 }
 
