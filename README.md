@@ -24,7 +24,7 @@
 
 A Rust port of [simplewall](https://github.com/henrypp/simplewall), a lightweight tool for configuring [Windows Filtering Platform (WFP)](https://learn.microsoft.com/en-us/windows/win32/fwp/windows-filtering-platform-start-page) — the kernel-level network filtering API that sits underneath Windows Firewall.
 
-> **Status:** v1.0.x — feature-complete parity port of upstream simplewall v3.8.7. Live progress is tracked in [issue #1](https://github.com/amrust/amwall/issues/1); installer downloads at [Releases](https://github.com/amrust/amwall/releases).
+> **Status:** v1.1 — feature-complete parity port of upstream simplewall v3.8.7, plus community-wishlist items upstream has accepted but not shipped (e.g. auto-allow Microsoft-signed binaries). Live progress is tracked in [issue #1](https://github.com/amrust/amwall/issues/1); installer downloads at [Releases](https://github.com/amrust/amwall/releases).
 
 ## Goal
 
@@ -158,7 +158,7 @@ Tracked in GitHub issues. The high-level milestones are:
 
 Issues and PRs welcome.
 
-**Scope.** amwall is a parity port: the goal is to behave like upstream [henrypp/simplewall v3.8.7](https://github.com/henrypp/simplewall) in idiomatic Rust, not to invent new features. PRs that add functionality not present in upstream are out of scope; PRs that fix gaps relative to upstream, fix bugs, or improve the Rust-side internals are exactly what this project wants. When in doubt, cross-reference the upstream behaviour against the C source before changing semantics.
+**Scope.** amwall started as a strict parity port of upstream [henrypp/simplewall v3.8.7](https://github.com/henrypp/simplewall) and v1.0 reached that bar. From v1.1 onward the scope expanded to also include **community-wishlist items upstream has accepted but not shipped** — features that have an open issue / "+1" history in the henrypp/simplewall tracker but that henrypp hasn't had time to land. New mechanisms with no upstream basis (proprietary protocols, paid features, alternative profile formats, etc.) remain out of scope. When in doubt, cross-reference the upstream issue tracker before opening a PR.
 
 **Local setup.**
 

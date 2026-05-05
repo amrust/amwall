@@ -72,7 +72,8 @@ use super::app::App;
 use super::ids::{
     IDC_APPS_PROFILE, IDC_APPS_SERVICE, IDC_APPS_UWP, IDC_LOG, IDC_NETWORK,
     IDC_RULES_BLOCKLIST, IDC_RULES_CUSTOM, IDC_RULES_SYSTEM, IDC_SEARCH, IDC_STATUSBAR, IDC_TAB,
-    IDM_ABOUT, IDM_ADD_FILE, IDM_ALWAYSONTOP_CHK, IDM_AUTOSIZECOLUMNS_CHK, IDM_EMERGENCY_RESET,
+    IDM_ABOUT, IDM_ADD_FILE, IDM_ALWAYSONTOP_CHK, IDM_AUTOALLOW_MICROSOFT_CHK,
+    IDM_AUTOSIZECOLUMNS_CHK, IDM_EMERGENCY_RESET,
     IDM_BLOCKLIST_EXTRA_ALLOW, IDM_BLOCKLIST_EXTRA_BLOCK, IDM_BLOCKLIST_EXTRA_DISABLE,
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
     IDM_ALLOW, IDM_BLOCK, IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK,
@@ -606,6 +607,11 @@ fn build_main_menu() -> Option<HMENU> {
         append_string(settings, IDM_STARTMINIMIZED_CHK, "Start &minimized");
         append_string(settings, IDM_SKIPUACWARNING_CHK, "Skip UAC warning");
         append_string(settings, IDM_CHECKUPDATES_CHK, "Check for &updates");
+        append_string(
+            settings,
+            IDM_AUTOALLOW_MICROSOFT_CHK,
+            "Auto-allow &Microsoft-signed programs",
+        );
         append_separator(settings);
         append_string(
             settings,
@@ -1828,6 +1834,38 @@ fn expire_timed_apps(hwnd: HWND, state: &WndState) {
     );
 }
 
+/// Return true if `path` is signed by Microsoft. Wraps the same
+/// `verify_signature` helper the use_certificates worker uses,
+/// but called synchronously on the GUI thread — typical
+/// WinVerifyTrust call is 50-200 ms which is acceptable in the
+/// auto-catalog path (runs on a 500 ms drain timer, at most a
+/// handful of new apps per tick).
+///
+/// Match heuristic: leaf certificate's "simple display name"
+/// starts with `"Microsoft "` (note the trailing space). That
+/// catches "Microsoft Corporation", "Microsoft Windows",
+/// "Microsoft Windows Hardware Compatibility Publisher", and
+/// the few other variants Microsoft uses, while not matching
+/// "Microsoft365 Surveillance Corp" or other lookalikes.
+///
+/// Used by the M9.5 / amwall-extension auto-allow flow gated
+/// on `Settings.auto_allow_microsoft_signed`. Not present in
+/// upstream simplewall (that project's longstanding wishlist
+/// item that henrypp hasn't shipped).
+fn is_microsoft_signed(path: &std::path::Path) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    let info = verify_signature(path, true);
+    if !info.signed {
+        return false;
+    }
+    match info.signer {
+        Some(s) => s.starts_with("Microsoft "),
+        None => false,
+    }
+}
+
 fn auto_catalog_drops(
     state: &WndState,
     events: &[crate::wfp::events::NetEvent],
@@ -1904,24 +1942,68 @@ fn auto_catalog_drops(
         return new_apps;
     }
 
+    let auto_allow_msft = state.app.settings.borrow().auto_allow_microsoft_signed;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let mut profile = state.app.profile.borrow_mut();
-    for (path, _) in &new_apps {
-        profile.apps.push(crate::profile::App {
-            path: path.clone(),
-            is_enabled: false,
-            is_silent: false,
-            is_undeletable: false,
-            timestamp: now,
-            timer: 0,
-            hash: None,
-            comment: None,
-        });
+
+    // Partition the newly-detected apps into "auto-allow"
+    // (Microsoft-signed when the setting is on) and "needs
+    // prompt" (everything else). Auto-allowed apps go straight
+    // into profile.apps with is_enabled=true and don't get
+    // returned to the caller, so the connect prompt never
+    // shows. Needs-prompt apps go in with is_enabled=false
+    // (Blocked) like before.
+    let mut for_prompt: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut auto_allowed_count: usize = 0;
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        for (path, remote) in new_apps.into_iter() {
+            let auto_allow = auto_allow_msft && is_microsoft_signed(&path);
+            profile.apps.push(crate::profile::App {
+                path: path.clone(),
+                is_enabled: auto_allow,
+                is_silent: false,
+                is_undeletable: false,
+                timestamp: now,
+                timer: 0,
+                hash: None,
+                comment: None,
+            });
+            if auto_allow {
+                auto_allowed_count += 1;
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                eprintln!(
+                    "amwall: auto-allowed Microsoft-signed binary {name} ({})",
+                    path.display(),
+                );
+            } else {
+                for_prompt.push((path, remote));
+            }
+        }
     }
-    new_apps
+
+    if auto_allowed_count > 0 {
+        // Push the new permits to the kernel so the next
+        // connection attempt from these apps actually succeeds.
+        // Without this, the freshly-cataloged Allowed entries
+        // sit in profile.apps but no per-app permit filter
+        // exists in WFP yet, so the very next packet still gets
+        // dropped by the default-deny.
+        reinstall_filters_if_active(state);
+        let label = if auto_allowed_count == 1 {
+            "Auto-allowed 1 Microsoft-signed app".to_string()
+        } else {
+            format!("Auto-allowed {auto_allowed_count} Microsoft-signed apps")
+        };
+        set_status_text(state.status.get(), 0, &label);
+    }
+
+    for_prompt
 }
 
 /// Show the centered Allow/Block dialog once per app in
@@ -2303,6 +2385,7 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
         (IDM_RULE_ALLOWWINDOWSUPDATE, s.rule_allow_windows_update),
         (IDM_USECERTIFICATES_CHK, s.use_certificates),
         (IDM_USEHASHES_CHK, s.use_hashes),
+        (IDM_AUTOALLOW_MICROSOFT_CHK, s.auto_allow_microsoft_signed),
     ];
     for (id, v) in pairs {
         set_menu_check(hwnd, id, v);
@@ -2731,6 +2814,7 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         | IDM_STARTMINIMIZED_CHK
         | IDM_SKIPUACWARNING_CHK
         | IDM_CHECKUPDATES_CHK
+        | IDM_AUTOALLOW_MICROSOFT_CHK
         | IDM_RULE_BLOCKOUTBOUND
         | IDM_RULE_BLOCKINBOUND
         | IDM_RULE_ALLOWLOOPBACK
@@ -3895,6 +3979,7 @@ fn on_toggle(hwnd: HWND, id: u16) {
             IDM_RULE_ALLOWWINDOWSUPDATE => &mut s.rule_allow_windows_update,
             IDM_USECERTIFICATES_CHK => &mut s.use_certificates,
             IDM_USEHASHES_CHK => &mut s.use_hashes,
+            IDM_AUTOALLOW_MICROSOFT_CHK => &mut s.auto_allow_microsoft_signed,
             _ => return,
         };
         *field = !*field;

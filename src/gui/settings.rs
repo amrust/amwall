@@ -176,6 +176,15 @@ pub struct Settings {
     pub use_certificates: bool,
     pub use_hashes: bool,
     pub use_network_resolution: bool,
+    /// Auto-allow Microsoft-signed binaries on first connection
+    /// without prompting. New feature beyond upstream simplewall
+    /// — addresses the longstanding upstream issue where users
+    /// have to Allow svchost / Experience Host / etc. one by
+    /// one. When on, the auto-catalog flow checks the leaf
+    /// signature subject; if it starts with "Microsoft ", the
+    /// app is added with is_enabled=true (Allowed) and the
+    /// connect prompt is skipped.
+    pub auto_allow_microsoft_signed: bool,
 
     // ---- Settings → Blocklist (tri-state radio groups) ----
     pub blocklist_spy: BlocklistMode,
@@ -252,6 +261,7 @@ impl Default for Settings {
             use_certificates: false,
             use_hashes: false,
             use_network_resolution: false,
+            auto_allow_microsoft_signed: false,
             // Match upstream simplewall's defaults: Spy = Block (the
             // WindowsSpyBlocker telemetry blocks are the headline
             // reason most users install simplewall in the first place);
@@ -359,6 +369,11 @@ impl Settings {
         kv(&mut buf, "use_certificates", self.use_certificates);
         kv(&mut buf, "use_hashes", self.use_hashes);
         kv(&mut buf, "use_network_resolution", self.use_network_resolution);
+        kv(
+            &mut buf,
+            "auto_allow_microsoft_signed",
+            self.auto_allow_microsoft_signed,
+        );
         kv_str(&mut buf, "blocklist_spy", self.blocklist_spy.as_str());
         kv_str(&mut buf, "blocklist_update", self.blocklist_update.as_str());
         kv_str(&mut buf, "blocklist_extra", self.blocklist_extra.as_str());
@@ -501,6 +516,7 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
         "use_certificates" => s.use_certificates = b,
         "use_hashes" => s.use_hashes = b,
         "use_network_resolution" => s.use_network_resolution = b,
+        "auto_allow_microsoft_signed" => s.auto_allow_microsoft_signed = b,
         "enable_notifications" => s.enable_notifications = b,
         "notification_sound" => s.notification_sound = b,
         "notification_fullscreen_silent" => s.notification_fullscreen_silent = b,

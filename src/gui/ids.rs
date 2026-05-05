@@ -106,6 +106,12 @@ pub const IDM_USECERTIFICATES_CHK: u16 = 287;
 pub const IDM_KEEPUNUSED_CHK: u16 = 288;
 pub const IDM_USEHASHES_CHK: u16 = 289;
 pub const IDM_USEAPPMONITOR_CHK: u16 = 290;
+/// Auto-allow Microsoft-signed binaries — amwall extension
+/// (no upstream simplewall counterpart). 350-355 are the
+/// listview right-click menu IDM_*; 360+ is currently
+/// unallocated by both upstream and amwall, so amwall-only
+/// extensions live there.
+pub const IDM_AUTOALLOW_MICROSOFT_CHK: u16 = 360;
 
 // Blocklist
 pub const IDM_BLOCKLIST_SPY_DISABLE: u16 = 291;
