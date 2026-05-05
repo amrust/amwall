@@ -41,10 +41,12 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateDialogParamW, DestroyWindow, GWLP_USERDATA, GetDlgItem, GetWindowLongPtrW,
-    HWND_NOTOPMOST, HWND_TOPMOST, KillTimer, PostMessageW, SW_SHOWNA, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-    ShowWindow, WM_COMMAND, WM_DRAWITEM, WM_INITDIALOG, WM_NCDESTROY, WM_TIMER,
+    AppendMenuW, CreateDialogParamW, CreatePopupMenu, DestroyMenu, DestroyWindow, GWLP_USERDATA,
+    GetDlgItem, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOPMOST, KillTimer, MF_STRING,
+    PostMessageW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN,
+    TrackPopupMenu, WM_COMMAND, WM_CONTEXTMENU, WM_DRAWITEM, WM_INITDIALOG, WM_NCDESTROY,
+    WM_TIMER,
 };
 use windows::core::PCWSTR;
 
@@ -56,6 +58,11 @@ const IDC_PROMPT_REMOTE: i32 = 1201;
 const IDC_PROMPT_COUNTDOWN: i32 = 1202;
 const IDC_PROMPT_ALLOW: i32 = 1;
 const IDC_PROMPT_BLOCK: i32 = 2;
+/// Context-menu command IDs. Picked above the IDC_PROMPT_* range
+/// so a stray click never conflicts with the dialog's own
+/// controls. Returned via TPM_RETURNCMD so the menu's value lives
+/// only inside `dialog_proc`'s WM_CONTEXTMENU branch.
+const IDM_PROMPT_COPY_DETAILS: i32 = 4001;
 
 /// Safety timer — buttons are visibly disabled (greyed) for this
 /// many milliseconds after the dialog appears. Prevents the user
@@ -320,6 +327,81 @@ unsafe extern "system" fn dialog_proc(
                 }
             };
             paint_action_button(dis, armed);
+            1
+        }
+        WM_CONTEXTMENU => {
+            // Right-click anywhere on the dialog body. Show a small
+            // "Copy details" popup so the user can grab the path +
+            // remote endpoint + signer (if known) as a multi-line
+            // string. Mouse-driven path is necessary because the
+            // dialog has WS_EX_NOACTIVATE and never accepts keyboard
+            // focus — a Ctrl+C accelerator wouldn't reach us.
+            let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+            if raw == 0 {
+                return 0;
+            }
+            let state = unsafe { &*(raw as *const DialogState) };
+            // lparam packs cursor coords (LOWORD = x, HIWORD = y) in
+            // screen coordinates already, which is what TrackPopupMenu
+            // wants.
+            let raw_xy = lparam.0 as u32;
+            let mut x = (raw_xy & 0xFFFF) as i16 as i32;
+            let mut y = ((raw_xy >> 16) & 0xFFFF) as i16 as i32;
+            // Some right-click sources (Shift+F10 keyboard chord,
+            // for example) pass `(-1, -1)` meaning "use the
+            // default location". Map that to the dialog's own
+            // top-left so the menu still appears somewhere
+            // visible. Mouse right-clicks always pass real coords.
+            if x == -1 && y == -1 {
+                use windows::Win32::Foundation::RECT;
+                use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+                let mut rect = RECT::default();
+                if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok() {
+                    x = rect.left + 8;
+                    y = rect.top + 32;
+                }
+            }
+            let menu = match unsafe { CreatePopupMenu() } {
+                Ok(m) => m,
+                Err(_) => return 0,
+            };
+            let mut wlabel = super::wide("&Copy details");
+            unsafe {
+                let _ = AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    IDM_PROMPT_COPY_DETAILS as usize,
+                    windows::core::PCWSTR(wlabel.as_mut_ptr()),
+                );
+            }
+            let cmd = unsafe {
+                TrackPopupMenu(
+                    menu,
+                    TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+                    x,
+                    y,
+                    0,
+                    hwnd,
+                    None,
+                )
+            };
+            unsafe {
+                let _ = DestroyMenu(menu);
+            }
+            if cmd.0 as i32 == IDM_PROMPT_COPY_DETAILS {
+                // Build the multi-line clipboard payload. The
+                // `state.remote` field already includes the signer
+                // line (when known) — show_async appends "Signed
+                // by X" to it at construction time, matching what
+                // the dialog displays. So just stitch the path
+                // and the (possibly multi-line) remote together.
+                let bundle = format!(
+                    "Path: {}\n{}",
+                    state.path.display(),
+                    state.remote
+                );
+                super::main_window::set_clipboard_text(state.parent, &bundle);
+            }
             1
         }
         WM_NCDESTROY => {

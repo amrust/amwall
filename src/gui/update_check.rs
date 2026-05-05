@@ -40,6 +40,23 @@ use super::wide;
 /// handler reclaims and frees it.
 pub const WM_USER_UPDATE_AVAILABLE: u32 = WM_USER + 0x150;
 
+/// Posted to the main HWND when the manual "Check for updates"
+/// menu finishes its check and concludes amwall is already on
+/// the latest release. The auto-check at startup never posts
+/// this — it stays quiet on no-update so the user isn't pestered
+/// every launch. `wparam` carries a `Box<UpdateInfo>` whose
+/// `latest_tag` is the tag matched against (handler shows it in
+/// the "you're up to date" message).
+pub const WM_USER_UPDATE_UPTODATE: u32 = WM_USER + 0x151;
+
+/// Posted when the manual check failed to reach GitHub at all
+/// (no DNS, no network, rate limited, malformed JSON, etc.).
+/// Auto-check stays silent on errors; manual check tells the
+/// user something went wrong so they can retry. `wparam = 0`,
+/// `lparam = 0` — no payload; the message text is hard-coded
+/// in the handler.
+pub const WM_USER_UPDATE_ERROR: u32 = WM_USER + 0x152;
+
 /// Payload heap-allocated by the worker, reclaimed by the wndproc.
 /// Carries both the latest tag (for the dialog text) and the URL
 /// to open if the user accepts.
@@ -53,28 +70,69 @@ pub struct UpdateInfo {
 const REPO_OWNER: &str = "amrust";
 const REPO_NAME: &str = "amwall";
 
-/// Spawn a one-shot worker that asks GitHub for the latest tag
-/// and posts `WM_USER_UPDATE_AVAILABLE` if it's newer than
-/// `current_version` (typically `env!("CARGO_PKG_VERSION")`).
-/// Returns immediately. No-op effects on the GUI thread —
-/// failures are silent.
+/// Auto-check variant — fires from `gui::run` at startup. Posts
+/// `WM_USER_UPDATE_AVAILABLE` only when a newer release exists;
+/// stays silent on "up to date" or "couldn't reach GitHub".
+/// Designed so a user with `Settings.check_updates` on never
+/// gets a "we couldn't check today" popup blocking their
+/// launch — auto-check failures are noise, manual-check
+/// failures are signal.
 pub fn check_async(main_hwnd: HWND, current_version: &str) {
+    spawn_check(main_hwnd, current_version, false);
+}
+
+/// Manual-check variant — fires from the `Help -> Check for
+/// updates` menu item. Always reports something:
+///
+/// - newer release exists → `WM_USER_UPDATE_AVAILABLE` (same
+///   payload + handler as the auto-check)
+/// - already on the latest tag → `WM_USER_UPDATE_UPTODATE`
+/// - couldn't reach GitHub at all → `WM_USER_UPDATE_ERROR`
+///
+/// The handler in main_window.rs shows a fitting MessageBox
+/// per case, so the user always gets explicit feedback when
+/// they asked. Mirrors the upstream simplewall menu entry's
+/// expected behaviour: clicking "Check for updates" should
+/// say something, not silently open the releases page.
+pub fn check_async_manual(main_hwnd: HWND, current_version: &str) {
+    spawn_check(main_hwnd, current_version, true);
+}
+
+fn spawn_check(main_hwnd: HWND, current_version: &str, manual: bool) {
     let current = current_version.to_string();
     // PostMessage is thread-safe; pass the HWND as a usize so the
     // closure is Send.
     let hwnd_raw = main_hwnd.0 as usize;
     std::thread::spawn(move || {
+        let releases_url =
+            format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest");
         let Some(latest) = fetch_latest_tag(REPO_OWNER, REPO_NAME) else {
+            // Couldn't even fetch the tag — surface only on
+            // the manual path; auto-check stays silent.
+            if manual {
+                unsafe {
+                    let _ = PostMessageW(
+                        HWND(hwnd_raw as isize),
+                        WM_USER_UPDATE_ERROR,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
             return;
         };
-        if !is_strictly_newer(&latest, &current) {
+        let newer = is_strictly_newer(&latest, &current);
+        let msg = if newer {
+            WM_USER_UPDATE_AVAILABLE
+        } else if manual {
+            WM_USER_UPDATE_UPTODATE
+        } else {
+            // Auto-check + already up to date = silently exit.
             return;
-        }
+        };
         let info = Box::new(UpdateInfo {
             latest_tag: latest,
-            releases_url: format!(
-                "https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest"
-            ),
+            releases_url,
         });
         let raw = Box::into_raw(info) as *mut c_void as usize;
         unsafe {
@@ -83,7 +141,7 @@ pub fn check_async(main_hwnd: HWND, current_version: &str) {
             // the box in that case so it doesn't leak.
             if PostMessageW(
                 HWND(hwnd_raw as isize),
-                WM_USER_UPDATE_AVAILABLE,
+                msg,
                 WPARAM(raw),
                 LPARAM(0),
             )

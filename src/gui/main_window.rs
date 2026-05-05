@@ -917,6 +917,14 @@ unsafe extern "system" fn wnd_proc(
             on_update_available(hwnd, wparam);
             LRESULT(0)
         }
+        m if m == super::update_check::WM_USER_UPDATE_UPTODATE => {
+            on_update_uptodate(hwnd, wparam);
+            LRESULT(0)
+        }
+        m if m == super::update_check::WM_USER_UPDATE_ERROR => {
+            on_update_error(hwnd);
+            LRESULT(0)
+        }
         m if m == super::tray::WM_USER_TRAYICON => {
             on_tray_message(hwnd, lparam);
             LRESULT(0)
@@ -2129,6 +2137,85 @@ fn on_update_available(hwnd: HWND, wparam: WPARAM) {
     }
 }
 
+/// Manual `Help -> Check for updates` entry point. Fires the
+/// async update-check worker with the manual flag set, so the
+/// worker reports back regardless of outcome (newer / same /
+/// fetch failed). Surfaces an immediate "Checking for updates..."
+/// in the status bar so the user knows the click registered
+/// before the (typically <1 s) HTTP round-trip completes.
+fn on_check_updates_manual(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    set_status_text(state.status.get(), 0, "Checking for updates...");
+    super::update_check::check_async_manual(hwnd, env!("CARGO_PKG_VERSION"));
+}
+
+/// Handler for `WM_USER_UPDATE_UPTODATE` — manual check
+/// concluded amwall is already on the latest tag. Shows a
+/// MessageBox with both the running version and the GitHub
+/// `releases/latest` tag so the user can verify the comparison.
+/// Auto-check at startup never reaches this path.
+fn on_update_uptodate(hwnd: HWND, wparam: WPARAM) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MB_ICONINFORMATION, MB_OK, MessageBoxW,
+    };
+
+    let raw = wparam.0 as *mut super::update_check::UpdateInfo;
+    if raw.is_null() {
+        return;
+    }
+    let info = unsafe { Box::from_raw(raw) };
+
+    let body = format!(
+        "Current version: {}\nLatest version: {}\n\nAlready up to date.",
+        env!("CARGO_PKG_VERSION"),
+        info.latest_tag,
+    );
+    let mut wbody = wide(&body);
+    let mut wtitle = wide("amwall - Check for updates");
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            windows::core::PCWSTR(wbody.as_mut_ptr()),
+            windows::core::PCWSTR(wtitle.as_mut_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+    if let Some(state) = unsafe { state_ref(hwnd) } {
+        set_status_text(state.status.get(), 0, "Up to date.");
+    }
+}
+
+/// Handler for `WM_USER_UPDATE_ERROR` — the manual check
+/// couldn't reach GitHub (offline, DNS, rate limit, etc.).
+/// Shows an explanatory MessageBox so the user knows the click
+/// produced a real failure, not a silent no-op.
+fn on_update_error(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MB_ICONWARNING, MB_OK, MessageBoxW,
+    };
+    let mut wbody = wide(
+        "Could not reach GitHub to check for updates.\n\n\
+         Possible causes: no internet, the firewall blocking amwall \
+         from outbound HTTPS, or GitHub's API rate limit (60 anonymous \
+         requests per hour). Try again later.",
+    );
+    let mut wtitle = wide("amwall - Check for updates");
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            windows::core::PCWSTR(wbody.as_mut_ptr()),
+            windows::core::PCWSTR(wtitle.as_mut_ptr()),
+            MB_OK | MB_ICONWARNING,
+        );
+    }
+    if let Some(state) = unsafe { state_ref(hwnd) } {
+        set_status_text(state.status.get(), 0, "Update check failed.");
+    }
+}
+
 /// Handler for `WM_USER_CONNECT_BLOCK` — user clicked Block on
 /// the connect prompt. Sets `is_silent = true` on the matching
 /// `profile.apps` entry so future drops for the same exe don't
@@ -2795,7 +2882,7 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         IDM_ABOUT => on_about(hwnd),
         IDM_EMERGENCY_RESET => on_emergency_reset(hwnd),
         IDM_WEBSITE => open_website(hwnd),
-        IDM_CHECKUPDATES => open_releases_page(hwnd),
+        IDM_CHECKUPDATES => on_check_updates_manual(hwnd),
         IDM_PURGE_UNUSED => on_purge_unused(hwnd),
         IDM_PURGE_TIMERS => on_purge_timers(hwnd),
         IDM_LOGCLEAR | IDM_TRAY_LOGCLEAR => on_log_clear(hwnd),
@@ -3900,7 +3987,7 @@ fn on_context_properties(hwnd: HWND) {
 /// → `GlobalLock` + memcpy → `GlobalUnlock` → `SetClipboardData`
 /// (which takes ownership of the HGLOBAL on success). On failure the
 /// HGLOBAL is freed locally so we don't leak.
-fn set_clipboard_text(hwnd: HWND, text: &str) {
+pub(crate) fn set_clipboard_text(hwnd: HWND, text: &str) {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,

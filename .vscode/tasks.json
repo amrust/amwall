@@ -116,10 +116,12 @@
                 "amwall: ensure cargo-wix",
                 "amwall: cargo build --release (msvc target)"
             ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
+            // No `isDefault: true` here — every build-group task is
+            // a peer, so Ctrl+Shift+B always shows the picker
+            // instead of auto-running one (and instead of nagging
+            // "select an instance to terminate" when the previous
+            // default was already running).
+            "group": "build",
             "presentation": {
                 "reveal": "always",
                 "panel": "shared",
