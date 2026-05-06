@@ -107,13 +107,57 @@
       <ComponentRef Id="ApplicationShortcut" />
     </Feature>
 
-    <!-- WixUI_InstallDir: standard install UI with a folder picker.
-         Flow is Welcome -> License -> InstallDir -> Verify -> Progress
-         -> Finish. WixUILicenseRtf points at wix/License.rtf, which
-         is generated from LICENSE (GPL-3.0) so the dialog shows the
-         actual license text instead of WiX's Lorem ipsum default. -->
+    <!-- WixUI_InstallDir flow extended with a custom changelog page:
+         Welcome -> License -> Changelog -> InstallDir -> Verify
+         -> Progress -> Finish. WixUILicenseRtf points at
+         wix/License.rtf (GPL-3.0). The Changelog page reads
+         wix/Changelog.rtf with the latest version pinned at the
+         top, so users can see what's new before they confirm
+         the install path. -->
     <UI>
       <UIRef Id="WixUI_InstallDir" />
+
+      <Dialog Id="ChangelogDlg" Width="370" Height="270"
+              Title="amwall - What's new"
+              NoMinimize="yes">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15"
+                 Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}What's new in amwall" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="Highlights from the current release and recent versions." />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44"
+                 TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <Control Id="ChangelogText" Type="ScrollableText"
+                 X="20" Y="55" Width="330" Height="170"
+                 Sunken="yes" TabSkip="no">
+          <Text SourceFile="wix\Changelog.rtf" />
+        </Control>
+
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17"
+                 Text="&amp;Back">
+          <Publish Event="NewDialog" Value="LicenseAgreementDlg">1</Publish>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="&amp;Next">
+          <Publish Event="NewDialog" Value="InstallDirDlg">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- Splice ChangelogDlg between LicenseAgreementDlg and
+           InstallDirDlg. The default WixUI_InstallDir routing
+           wires License -> InstallDir directly; Order="3" pushes
+           our routing ahead of the built-in Order="1"/"2". -->
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog"
+               Value="ChangelogDlg" Order="3">LicenseAccepted = "1"</Publish>
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog"
+               Value="ChangelogDlg" Order="3">1</Publish>
     </UI>
     <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
     <WixVariable Id="WixUILicenseRtf" Value="wix\License.rtf" />

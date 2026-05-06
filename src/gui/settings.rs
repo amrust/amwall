@@ -277,7 +277,12 @@ impl Default for Settings {
             notification_timeout: 30,
             notification_x: i32::MIN,
             notification_y: i32::MIN,
-            enable_log: false,
+            // M9.2 / v1.1.2 default-on: makes installed-mode bug
+            // reports actionable (the packet log writes a per-event
+            // record under `%APPDATA%\amwall\amwall.log`, alongside
+            // the always-on session log under `\logs\`). Bounded by
+            // `log_size_limit` (4 MiB), so stays small.
+            enable_log: true,
             log_path: String::new(),
             log_size_limit: 4096,
             log_viewer: String::new(),

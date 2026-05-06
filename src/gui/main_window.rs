@@ -7101,7 +7101,14 @@ fn create_status_bar(parent: HWND) -> Result<HWND, String> {
 /// through `Path::display()` so non-UTF-8 path components (rare on
 /// Windows but possible) round-trip lossily without panicking.
 fn format_window_title(path: &std::path::Path) -> String {
-    format!("amwall \u{2014} {}", path.display())
+    // Version baked in at compile time via env!("CARGO_PKG_VERSION")
+    // so a user reporting an issue can read the version straight off
+    // their title bar without opening Help -> About.
+    format!(
+        "amwall v{} \u{2014} {}",
+        env!("CARGO_PKG_VERSION"),
+        path.display(),
+    )
 }
 
 /// Replace the main window's title, e.g. after Open Profile…

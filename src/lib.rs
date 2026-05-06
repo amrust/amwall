@@ -18,6 +18,8 @@ pub mod rules;
 
 #[cfg(windows)]
 pub mod hash;
+#[cfg(windows)]
+pub mod logging;
 
 #[cfg(windows)]
 pub mod gui;

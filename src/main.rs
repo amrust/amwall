@@ -148,16 +148,23 @@ mod cli {
 
     pub fn run(args: Vec<String>) -> ExitCode {
         let parsed = parse_args(args);
-        // Always attach to the parent console (if any). With
-        // windows_subsystem = "windows" we have no inherited stdio
-        // handles by default, so eprintln! goes nowhere even when
-        // the parent shell did `> log` / `2>> log` redirection.
-        // AttachConsole + re-binding stdio gives us a working
-        // stderr in both CLI mode (printing operation results) and
-        // GUI mode (debug logging into swaplog.txt).
-        // No-op if launched from Explorer / Start Menu — there's
-        // no parent console to attach to.
-        attach_to_parent_console();
+        // GUI mode (no CLI subcommand): redirect stdout + stderr
+        // to a fresh timestamped session log under
+        // `%APPDATA%\amwall\logs\` so eprintln!s aren't lost in
+        // installed mode (windows_subsystem = "windows" leaves
+        // stderr pointing at INVALID_HANDLE_VALUE by default).
+        // The session log includes OS / RAM / CPU info in its
+        // header to make bug reports actionable.
+        //
+        // CLI mode (-install / -uninstall / -h / etc.): keep the
+        // parent-console attach so operation output reaches the
+        // calling shell. Sending those messages to a log file
+        // would surprise scripted callers who pipe stderr.
+        if matches!(parsed, Command::Gui) {
+            amwall::logging::init_debug_log();
+        } else {
+            attach_to_parent_console();
+        }
         match parsed {
             // No CLI subcommand → launch the GUI. The GUI doesn't
             // require admin to start (admin is only needed for the

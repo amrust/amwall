@@ -1,0 +1,46 @@
+{\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
+What's new in amwall v1.1.2 (current)\par
+\par
+  - Detailed session log under %APPDATA%\\amwall\\logs\\\par
+  - Captures every eprintln / println from the running app\par
+  - Header includes OS version, RAM, CPU info for bug reports\par
+  - Last 10 timestamped session logs kept; older pruned\par
+  - Packet log enabled by default\par
+\par
+What's new in amwall v1.1.1\par
+\par
+  - Right-click "Copy details" on the connect prompt to grab\par
+    path + remote endpoint + signer in one paste\par
+  - Help -> Check for updates actually checks the GitHub API\par
+    and shows current vs latest version (was hardwired to\par
+    just open the releases page)\par
+  - Ctrl+Shift+B in VS Code always shows the task picker\par
+\par
+What's new in amwall v1.1.0\par
+\par
+  - Settings -> Auto-allow Microsoft-signed programs\par
+    (closes upstream wishlist item: stop being asked to allow\par
+    svchost / Experience Host / etc. one by one)\par
+\par
+What's new in amwall v1.0.2\par
+\par
+  - Settings -> Skip UAC warning silently elevates via\par
+    Task Scheduler (one UAC prompt to enable, then no more)\par
+\par
+What's new in amwall v1.0.1\par
+\par
+  - Real GPL-3.0 EULA in the installer (the v1.0.0 MSI shipped\par
+    with placeholder Lorem ipsum)\par
+\par
+What's new in amwall v1.0.0\par
+\par
+  - First tagged release. Feature-complete parity port of\par
+    upstream simplewall v3.8.7.\par
+  - WFP per-app filtering, UWP packages, services\par
+  - Authenticode signer extraction\par
+  - SHA-256 hash drift detection\par
+  - Stealth mode (TCP-RST silent-drop callouts)\par
+  - Reverse-DNS for Connections / Log tabs\par
+  - Tray icon, close-to-tray\par
+  - Silent GitHub update check on startup (notify-only)\par
+}
