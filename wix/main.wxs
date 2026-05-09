@@ -45,7 +45,7 @@
       Languages="1033"
       Compressed="yes"
       InstallScope="perMachine"
-      SummaryCodepage="65001" />
+      SummaryCodepage="1252" />
 
     <MajorUpgrade
       Schedule="afterInstallInitialize"
