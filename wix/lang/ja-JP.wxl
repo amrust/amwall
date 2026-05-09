@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WixLocalization Culture="ja-JP" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<WixLocalization Culture="ja-JP" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
   <String Id="ChangelogDlgTitle">amwall - 更新情報</String>
   <String Id="ChangelogTitle">amwall の更新情報</String>
   <String Id="ChangelogDesc">現在のリリースと過去のバージョンのハイライト。</String>

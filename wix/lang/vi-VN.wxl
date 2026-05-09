@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WixLocalization Culture="vi-VN" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<WixLocalization Culture="vi-VN" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
   <String Id="ChangelogDlgTitle">amwall - Có gì mới</String>
   <String Id="ChangelogTitle">Có gì mới trong amwall</String>
   <String Id="ChangelogDesc">Điểm nổi bật từ phiên bản hiện tại và các phiên bản trước.</String>

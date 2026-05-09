@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WixLocalization Culture="es-ES" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<WixLocalization Culture="es-ES" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
   <String Id="ChangelogDlgTitle">amwall - Novedades</String>
   <String Id="ChangelogTitle">Novedades en amwall</String>
   <String Id="ChangelogDesc">Aspectos destacados de la versión actual y versiones anteriores.</String>

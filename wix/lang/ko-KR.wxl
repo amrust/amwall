@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WixLocalization Culture="ko-KR" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<WixLocalization Culture="ko-KR" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
   <String Id="ChangelogDlgTitle">amwall - 새로운 기능</String>
   <String Id="ChangelogTitle">amwall의 새로운 기능</String>
   <String Id="ChangelogDesc">현재 릴리스 및 이전 버전의 주요 변경 사항.</String>

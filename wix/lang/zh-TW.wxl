@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WixLocalization Culture="zh-TW" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<WixLocalization Culture="zh-TW" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
   <String Id="ChangelogDlgTitle">amwall - 新功能</String>
   <String Id="ChangelogTitle">amwall 的新功能</String>
   <String Id="ChangelogDesc">目前版本及先前版本的重點更新。</String>

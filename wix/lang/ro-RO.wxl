@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WixLocalization Culture="ro-RO" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<WixLocalization Culture="ro-RO" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
   <String Id="ChangelogDlgTitle">amwall - Noutăți</String>
   <String Id="ChangelogTitle">Noutăți în amwall</String>
   <String Id="ChangelogDesc">Evidențierile versiunii curente și ale versiunilor anterioare.</String>

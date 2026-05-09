@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WixLocalization Culture="th-TH" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<WixLocalization Culture="th-TH" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
   <String Id="ChangelogDlgTitle">amwall - มีอะไรใหม่</String>
   <String Id="ChangelogTitle">มีอะไรใหม่ใน amwall</String>
   <String Id="ChangelogDesc">ไฮไลท์จากเวอร์ชันปัจจุบันและเวอร์ชันก่อนหน้า</String>
