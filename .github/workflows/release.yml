@@ -77,39 +77,86 @@ jobs:
             Write-Host "candle.exe already on PATH"
           }
 
-      - name: Build MSI (multilingual)
-        # Build with candle/light directly instead of cargo-wix
-        # so we can pass -cultures for multi-language support.
-        # WixUIExtension ships with pre-translated UI strings
-        # (Next, Back, Cancel, etc.) for all listed cultures.
-        # Our wix/lang/*.wxl files provide translations for the
-        # custom Changelog dialog strings.
+      - name: Build multilingual MSI with embedded transforms
+        # WiX 3 cannot link 33 .wxl files into one MSI in a single
+        # light.exe call — it dedupes string IDs across all loaded loc
+        # files regardless of their Culture attributes. The canonical
+        # multilingual approach is:
+        #   1. Build a base MSI in en-US.
+        #   2. Build a sibling MSI for each other culture.
+        #   3. Use torch.exe to compute an .mst transform per culture
+        #      (base.msi -> lang.msi).
+        #   4. Embed every .mst into the base MSI's _Storages table
+        #      named by the culture's LCID.
+        #   5. Rewrite the Template summary property to list every
+        #      LCID whose transform was embedded.
+        # Per https://learn.microsoft.com/en-us/windows/win32/msi/multiple-language-distribution
+        # Windows Installer then auto-applies the matching transform
+        # at install time based on the user's system UI language.
+        # Per-culture builds use `-cultures:<culture>;en-us` so cultures
+        # missing from WixUIExtension (e.g. vi-VN) fall back to English
+        # for stock dialog strings while still using our culture-specific
+        # Changelog wording from the matching wix/lang/*.wxl file.
         shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | ForEach-Object { $_.Matches[0].Groups[1].Value })
           $targetBin = "target\x86_64-pc-windows-msvc\release"
-          New-Item -ItemType Directory -Path "target\wix" -Force | Out-Null
+          $wixDir = "target\wix"
+          $langDir = "$wixDir\lang"
+          New-Item -ItemType Directory -Path $wixDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $langDir -Force | Out-Null
 
-          # Compile
+          # Compile main.wxs once — the same .wixobj is linked per culture.
           candle.exe -nologo `
             "-dVersion=$version" `
             "-dCargoTargetBinDir=$targetBin" `
             -ext WixUIExtension `
-            -out target\wix\main.wixobj `
+            -out "$wixDir\main.wixobj" `
             wix\main.wxs
 
-          # Collect all .wxl locale files
-          $locFiles = Get-ChildItem wix\lang\*.wxl | ForEach-Object { "-loc"; $_.FullName }
-          $cultures = (Get-ChildItem wix\lang\*.wxl | ForEach-Object { $_.BaseName }) -join ";"
-
-          # Link with all cultures — MSI auto-selects based on
-          # system locale at install time
+          # Build base MSI in en-US.
+          $baseMsi = "$wixDir\amwall-$version-x86_64.msi"
           light.exe -nologo `
             -ext WixUIExtension `
-            -out "target\wix\amwall-$version-x86_64.msi" `
-            -cultures:$cultures `
-            @locFiles `
-            target\wix\main.wixobj
+            -cultures:en-us `
+            -loc wix\lang\en-us.wxl `
+            -out $baseMsi `
+            "$wixDir\main.wixobj"
+
+          # Track every embedded LCID, starting with the base.
+          $lcids = @([System.Globalization.CultureInfo]::new("en-US").LCID)
+
+          # Build, transform, and embed each non-base culture.
+          Get-ChildItem wix\lang\*.wxl | Where-Object { $_.BaseName -ne "en-us" } | ForEach-Object {
+            $culture = $_.BaseName
+            $lcid = [System.Globalization.CultureInfo]::new($culture).LCID
+            $langMsi = "$langDir\$culture.msi"
+            $mst = "$langDir\$culture.mst"
+
+            light.exe -nologo `
+              -ext WixUIExtension `
+              "-cultures:$culture;en-us" `
+              -loc $_.FullName `
+              -out $langMsi `
+              "$wixDir\main.wixobj"
+            if ($LASTEXITCODE -ne 0) { throw "light.exe failed for $culture" }
+
+            torch.exe -p -t language $baseMsi $langMsi -out $mst
+            if ($LASTEXITCODE -ne 0) { throw "torch.exe failed for $culture" }
+
+            cscript //nologo wix\scripts\embed-transform.vbs $baseMsi $mst $lcid
+            if ($LASTEXITCODE -ne 0) { throw "embed-transform.vbs failed for $culture (LCID $lcid)" }
+
+            $lcids += $lcid
+          }
+
+          # Rewrite the Template summary so Windows Installer treats
+          # the MSI as multilingual and auto-picks the right transform.
+          $lcidCsv = ($lcids | Sort-Object -Unique) -join ","
+          cscript //nologo wix\scripts\set-languages.vbs $baseMsi $lcidCsv
+          if ($LASTEXITCODE -ne 0) { throw "set-languages.vbs failed" }
+
+          Write-Host "Built $baseMsi with $($lcids.Count) embedded languages: $lcidCsv"
 
       - name: Locate MSI + create stable-named copy
         # cargo-wix names its output `amwall-<version>-x86_64.msi`,
