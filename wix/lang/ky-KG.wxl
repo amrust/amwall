@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="ky-KG" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="ChangelogDlgTitle">amwall - Жаңылыктар</String>
+  <String Id="ChangelogTitle">amwall'дагы жаңылыктар</String>
+  <String Id="ChangelogDesc">Учурдагы жана мурунку версиялардын негизги өзгөртүүлөрү.</String>
+</WixLocalization>

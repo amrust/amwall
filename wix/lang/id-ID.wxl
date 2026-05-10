@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="id-ID" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="ChangelogDlgTitle">amwall - Apa yang baru</String>
+  <String Id="ChangelogTitle">Apa yang baru di amwall</String>
+  <String Id="ChangelogDesc">Sorotan dari rilis saat ini dan versi terbaru.</String>
+</WixLocalization>

@@ -152,14 +152,14 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
     // sees the language they installed in. Without this, a user who
     // upgrades from a pre-multilingual MSI keeps their old `language=en`
     // even though they just installed under e.g. Russian Windows.
-    if let Some(install_lcid) = install_lcid_from_registry()
-        && install_lcid != settings.install_lcid_seen
-    {
-        if let Some(locale) = lcid_to_available_locale(install_lcid) {
-            settings.language = locale;
+    if let Some(install_lcid) = install_lcid_from_registry() {
+        if install_lcid != settings.install_lcid_seen {
+            if let Some(locale) = lcid_to_available_locale(install_lcid) {
+                settings.language = locale;
+            }
+            settings.install_lcid_seen = install_lcid;
+            let _ = settings.save(&settings_path);
         }
-        settings.install_lcid_seen = install_lcid;
-        let _ = settings.save(&settings_path);
     }
 
     if !settings.language.is_empty() {

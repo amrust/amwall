@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="sr-Cyrl-RS" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="ChangelogDlgTitle">amwall - Шта је ново</String>
+  <String Id="ChangelogTitle">Шта је ново у amwall-у</String>
+  <String Id="ChangelogDesc">Истакнуте измене у текућој и претходним верзијама.</String>
+</WixLocalization>

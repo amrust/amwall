@@ -1,0 +1,396 @@
+# amwall — תרגום לעברית.
+# מועתק מ-en.toml ומתורגם לעברית.
+
+# --- כותרות שורת התפריטים ---
+[menu]
+file = "&קובץ"
+edit = "&עריכה"
+view = "&תצוגה"
+settings = "&הגדרות"
+rules = "&כללים"
+blocklist = "רשימת &חסימה"
+help = "ע&זרה"
+
+# --- פריטי תפריט קובץ ---
+[file]
+settings = "&הגדרות\tCtrl+P"
+add_app = "הוסף &יישום…\tCtrl+O"
+import = "&ייבוא…"
+export = "יי&צוא…"
+exit = "י&ציאה"
+
+# --- פריטי תפריט עריכה ---
+[edit]
+purge_unused = "הסר יישומים שאינם בשי&מוש"
+purge_timers = "נקה &טיימרים"
+clear_log = "&נקה יומן"
+refresh = "ר&ענן\tF5"
+
+# --- פריטי תפריט תצוגה ---
+[view]
+always_on_top = "תמיד &עליון"
+dark_theme = "השתמש בעיצוב &כהה"
+autosize_columns = "התאם &גודל עמודות אוטומטית"
+filenames_only = "הצג רק &שמות קבצים"
+show_search = "הצג שורת &חיפוש"
+layout_details = "פריסה: &פרטים"
+layout_icons = "פריסה: &אייקונים"
+layout_tiles = "פריסה: &אריחים"
+icon_small = "גודל אייקון: &קטן"
+icon_large = "גודל אייקון: &גדול"
+icon_extralarge = "גודל אייקון: גדול &במיוחד"
+font = "&גופן…"
+
+# --- פריטי תפריט הגדרות ---
+[settings]
+load_on_startup = "&טען בעת אתחול המערכת"
+start_minimized = "התחל &ממוזער"
+skip_uac = "דלג על אזהרת UAC"
+check_updates = "בדוק &עדכונים מעת לעת"
+auto_allow_microsoft = "אפשר אוטומטית תוכניות חתומות על-ידי &Microsoft"
+check_signatures = "בדוק חתימות דיגיטליות של &יישומים"
+check_hashes = "בדוק &האש SHA-256 של יישומים"
+
+# --- תת-תפריט כללים ---
+[rules]
+block_outbound = "חסום תעבורה &יוצאת לכל"
+block_inbound = "חסום תעבורה &נכנסת לכל"
+allow_loopback = "אפשר loop&back"
+allow_6to4 = "אפשר IPv6 (&6to4)"
+allow_windows_update = "אפשר &Windows Update"
+
+# --- תת-תפריט רשימת חסימה ---
+[blocklist]
+disable = "&השבת"
+allow = "&אפשר"
+block = "&חסום"
+spy_telemetry = "&מעקב וטלמטריה של Microsoft"
+ms_update = "&Microsoft Update"
+ms_apps = "&יישומי Microsoft"
+
+# --- פריטי תפריט עזרה ---
+[help]
+website = "אתר &אינטרנט"
+check_updates = "&בדוק עדכונים"
+about = "&אודות"
+emergency_reset = "&איפוס חירום של WFP..."
+
+# --- תוויות לשוניות ---
+[tab]
+apps = "יישומים"
+services = "שירותים"
+uwp = "יישומי UWP"
+blocklist = "רשימת חסימה"
+system_rules = "כללי מערכת"
+user_rules = "כללי משתמש"
+connections = "חיבורים"
+packets_log = "יומן מנות"
+
+# --- כותרות עמודות ---
+[column]
+name = "שם"
+added = "נוסף"
+path = "נתיב"
+date = "תאריך"
+protocol = "פרוטוקול"
+direction = "כיוון"
+address_src = "כתובת (מקור)"
+host_src = "מארח (מקור)"
+port_src = "פורט (מקור)"
+address_dst = "כתובת (יעד)"
+host_dst = "מארח (יעד)"
+port_dst = "פורט (יעד)"
+state = "מצב"
+filter = "מסנן"
+index = "#"
+
+# --- כותרות קבוצות ---
+[group]
+blocked = "חסום"
+blocked_silent = "חסום (שקט)"
+timer = "טיימר"
+special = "יישומים מיוחדים"
+allowed = "מאופשר"
+enabled = "מופעל"
+disabled = "מושבת"
+
+# --- תיאורי סרגל הכלים ---
+[tooltip]
+enable_filters = "הפעל מסננים (Ctrl+T)"
+new_rule = "צור כלל משתמש חדש"
+enable_notifications = "הפעל התראות לתעבורה חסומה"
+enable_log = "תעד תעבורה חסומה לקובץ"
+enable_ui_log = "הצג יומן מנות בממשק"
+reload = "טען מחדש את הפרופיל מהדיסק (F5)"
+open_settings = "פתח הגדרות"
+open_log_file = "פתח את קובץ יומן המנות"
+clear_log = "נקה את יומן המנות"
+open_releases = "פתח את עמוד ההפצות ב-GitHub"
+
+# --- תוויות כפתורי סרגל הכלים ---
+[toolbar]
+enable_filters = "הפעל מסננים"
+disable_filters = "השבת מסננים"
+
+# --- הודעות שורת המצב ---
+[status]
+filters_enabled = "מסננים מופעלים."
+filters_disabled = "מסננים מושבתים."
+imported_simplewall = "פרופיל simplewall יובא."
+checking_updates = "בודק עדכונים..."
+up_to_date = "מעודכן."
+update_check_failed = "בדיקת עדכונים נכשלה."
+nothing_to_remove = "אין מה להסיר מהפרופיל."
+engine_failed = "פתיחת מנוע WFP נכשלה."
+uninstall_failed = "הסרת מסנן נכשלה."
+install_failed = "התקנת מסנן נכשלה."
+app_exists = "היישום כבר קיים בפרופיל."
+app_added = "היישום נוסף."
+rule_added = "הכלל נוסף."
+rule_updated = "הכלל עודכן."
+rule_deleted = "הכלל נמחק."
+autosave_failed = "שמירה אוטומטית נכשלה."
+import_read_error = "ייבוא נכשל: שגיאת קריאה."
+import_parse_error = "ייבוא נכשל: שגיאת ניתוח."
+imported = "יובא."
+export_write_error = "ייצוא נכשל: שגיאת כתיבה."
+exported = "יוצא."
+refresh_read_error = "רענון נכשל: שגיאת קריאה."
+refresh_parse_error = "רענון נכשל: שגיאת ניתוח."
+profile_reloaded = "הפרופיל נטען מחדש."
+no_unused = "אין יישומים שאינם בשימוש לסילוק."
+no_timers = "אין טיימרים פעילים."
+log_cleared = "היומן נוקה."
+font_failed = "טעינת גופן נכשלה; הוחזר."
+font_updated = "הגופן עודכן."
+emergency_done = "איפוס חירום הושלם."
+auto_allowed_one = "יישום אחד חתום על-ידי Microsoft אופשר אוטומטית"
+auto_allowed_many = "%{count} יישומים חתומים על-ידי Microsoft אופשרו אוטומטית"
+silenced = "הושתק: %{name}"
+allowed_count = "אופשר: %{name}"
+connecting = "מתחבר אל %{remote}"
+removed_entries = "%{count} ערכים הוסרו מהפרופיל."
+purged_apps = "%{count} יישומים שאינם בשימוש הוסרו."
+cleared_timers = "%{count} טיימרי יישום נוקו."
+skip_uac_enabled = "דלג על UAC: מופעל. הפעלות עתידיות לא יציגו UAC עבור משתמשי מנהל."
+skip_uac_disabled = "דלג על UAC: מושבת. הפעלות עתידיות יציגו UAC עבור פעולות מנהל."
+hash_drift_one = "ההאש השתנה: %{name}"
+hash_drift_many = "ההאש השתנה ב-%{count} יישומים (ראה יומן)"
+filters_removed = "%{filters} מסננים הוסרו, %{sublayers} שכבות-משנה נוקו."
+filters_installed = "%{added} מסננים הותקנו, %{skipped} דולגו."
+tray_blocked = "amwall - נחסם: %{name}"
+
+# --- כותרות חלונות דו-שיח ---
+[dialog]
+update_available = "amwall - עדכון זמין"
+check_updates = "amwall - בדוק עדכונים"
+confirm_bulk_delete = "אישור מחיקה מרובה"
+admin_required = "נדרשות הרשאות מנהל"
+delete_rule = "מחק כלל"
+exit = "לצאת מ-amwall?"
+clear_log = "נקה יומן"
+allow_blocked = "לאפשר תעבורה שנחסמה בעבר?"
+emergency_reset = "איפוס חירום של WFP"
+about_title = "אודות amwall"
+about_app = "amwall"
+settings_title = "הגדרות"
+properties_signed = "amwall - מאפיינים (חתום על-ידי %{signer})"
+
+# --- הודעות גוף החלון ---
+[message]
+update_available_body = "amwall %{latest} זמין (אתה מריץ %{current}).\n\nלפתוח את עמוד ההפצות בדפדפן?"
+update_uptodate_body = "גרסה נוכחית: %{current}\nגרסה אחרונה: %{latest}\n\nהמערכת מעודכנת."
+update_error_body = "לא ניתן היה להגיע ל-GitHub כדי לבדוק עדכונים.\n\nסיבות אפשריות: אין אינטרנט, חומת האש חוסמת את amwall מ-HTTPS יוצא, או הגבלת קצב של GitHub API (60 בקשות אנונימיות לשעה). נסה שוב מאוחר יותר."
+admin_required_body = "ניהול מסננים דורש הרשאות מנהל.\n\nסגור את amwall והפעל מחדש מ-shell מורם\n(לחץ ימין → \"הפעל כמנהל\")."
+delete_rule_confirm = "למחוק את הכלל \"%{name}\"?"
+bulk_delete_confirm = "להסיר %{count} ערכים מהפרופיל?\n\nלא ניתן לבטל פעולה זו."
+exit_body = "המסננים מופעלים כרגע. יציאה מ-amwall תשאיר אותם פעילים (הם שורדים יציאת תהליך). להמשיך?"
+clear_log_body = "לנקות את יומן המנות? פעולה זו תרוקן את לשונית היומן בזיכרון ותקצר את קובץ היומן בדיסק. לא ניתן לבטל."
+emergency_reset_body = "איפוס חירום יבצע:\n\n• הסרת כל מסנן WFP ש-amwall התקין\n• ריקון רשימות פרופיל היישומים וכללי המשתמש\n• כיבוי הפעלת מסננים\n\nהשתמש בזה אם amwall חוסם משהו שאינך מצליח לזהות ועליך לשחזר את התנהגות הרשת ברירת המחדל של מערכת ההפעלה. השינוי מיידי. להמשיך?"
+allow_one_body = "%{name} חסום כרגע. אישורו יאפשר לו להגיע לרשת בפעם הבאה שינסה.\n\nלהמשיך?"
+allow_many_body = "%{count} יישומים שנחסמו בעבר יוגדרו לאשר. הם יגיעו לרשת בפעם הבאה שינסו.\n\nלהמשיך?"
+blocked_notification = "נחסם: %{app}"
+
+# --- תפריט הקשר ---
+[context]
+allow = "אפשר"
+block = "חסום"
+copy_details = "&העתק פרטים"
+properties = "מאפיינים\tEnter"
+remove_from_profile = "הסר מהפרופיל\tDel"
+explore = "סייר (פתח תיקייה)\tCtrl+E"
+copy = "העתק שם\tCtrl+C"
+
+# --- תפריט מגש המערכת ---
+[tray]
+show = "הצג amwall"
+enable_filters = "הפעל מסננים"
+disable_filters = "השבת מסננים"
+settings = "הגדרות..."
+exit = "צא מ-amwall"
+
+# --- אשף ההפעלה הראשונה ---
+[wizard]
+title = "ברוך הבא ל-amwall"
+subtitle = "לייבא הגדרת simplewall?"
+import_btn = "ייבא"
+start_fresh_btn = "התחל מחדש"
+body = """amwall מצא הגדרת simplewall קיימת:
+
+• נתיב: %{path}
+• %{apps} יישומים עם כללים
+• %{rules} כללים מותאמים אישית
+
+ייבוא מעתיק את profile.xml של simplewall ל-amwall ומשתמש בו כנקודת מוצא. simplewall נשאר מותקן והמסננים שלו פעילים בקרנל — השבת את simplewall לפני לחיצה על "הפעל מסננים" ב-amwall כדי למנוע שתי חומות אש שמיישמות כללים חופפים.
+
+ניתן להריץ קובץ → ייבוא מאוחר יותר אם תדלג כעת."""
+
+# --- לשוניות חלון הגדרות ---
+[settings_tab]
+general = "כללי"
+interface = "ממשק"
+highlighting = "הדגשה"
+rules = "כללים"
+blocklist = "רשימת חסימה"
+notifications = "התראות"
+logging = "תיעוד"
+exclude = "החרגה"
+
+# --- לשוניות עורך הכללים ---
+[rule_editor]
+general = "כללי"
+rule = "כלל"
+apps = "יישומים"
+
+# --- תוויות פרוטוקול ---
+[protocol]
+any = "כל אחד"
+tcp = "TCP"
+udp = "UDP"
+icmp = "ICMP"
+icmpv4 = "ICMPv4"
+icmpv6 = "ICMPv6"
+
+# --- תוויות משפחת כתובות ---
+[version]
+any = "כל אחד"
+ipv4 = "IPv4"
+ipv6 = "IPv6"
+
+# --- תוויות כיוון ---
+[direction]
+outbound = "יוצא"
+inbound = "נכנס"
+both = "שניהם"
+other = "אחר"
+
+# --- תוויות פעולה ---
+[action]
+allow = "אפשר"
+block = "חסום"
+permit = "אשר"
+
+# --- עמוד הגדרות: כללי ---
+[rc_general]
+group_config = "תצורה כללית"
+always_on_top = "תמיד עליון"
+load_on_startup = "טען בעת אתחול המערכת"
+start_minimized = "התחל ממוזער"
+skip_uac = "דלג על אזהרת \"בקרת חשבון משתמש\""
+check_updates = "בדוק עדכונים מעת לעת (מומלץ)"
+group_language = "שפה"
+select_language = "בחר שפה:"
+
+# --- עמוד הגדרות: ממשק ---
+[rc_interface]
+group_confirm = "אישורים"
+confirm_exit = "הצג חלון אישור ביציאה"
+confirm_exit_timer = "הצג חלון אישור ביציאה כאשר טיימרים פעילים"
+confirm_log_clear = "אשר בעת ניקוי קובץ היומן"
+confirm_allow = "אשר את אישור התעבורה שנחסמה בעבר"
+group_tray = "אייקון מגש המערכת"
+tray_single_click = "לחיצה בודדת על אייקון המגש לפתיחה"
+
+# --- עמוד הגדרות: הדגשה ---
+[rc_highlight]
+group = "הדגשה"
+hint = "לחיצה כפולה על פריט כדי לשנות אותו."
+
+# --- עמוד הגדרות: כללים ---
+[rc_rules]
+group_connections = "חיבורים"
+block_outbound = "חסום חיבורים יוצאים לכל"
+block_inbound = "חסום חיבורים נכנסים לכל"
+allow_loopback = "אפשר חיבורי loopback לכל"
+allow_6to4 = "אפשר הפניות IPv6 (6to4) לכל"
+group_security = "אבטחה"
+stealth_mode = "מנע סריקת פורטים (מצב חמקני)"
+boottime_filters = "הפעל מסנני זמן-אתחול"
+group_advanced = "מתקדם"
+check_signatures = "בדוק חתימות דיגיטליות של יישומים"
+use_hashes = "השתמש בהאשי קבצים לזיהוי יישומים"
+resolve_addresses = "פתור כתובות רשת"
+
+# --- עמוד הגדרות: רשימת חסימה ---
+[rc_blocklist]
+group_spy = "מעקב וטלמטריה של Microsoft"
+group_update = "Microsoft Update"
+group_apps = "יישומי Microsoft"
+
+# --- עמוד הגדרות: התראות ---
+[rc_notifications]
+group = "התראות"
+enable = "הפעל התראות מנות"
+sound = "הפעל צליל התראות"
+fullscreen = "הפעל מצב שקט כאשר יישום מסך מלא בקדמה"
+on_tray = "הצג חלון התראות במגש המערכת"
+timeout = "פסק זמן בין התראות דומות (שניות):"
+
+# --- עמוד הגדרות: תיעוד ---
+[rc_logging]
+group_log = "יומן מנות"
+enable = "הפעל תיעוד מנות לקובץ"
+max_size = "גודל יומן מרבי (kB):"
+group_viewer = "מציג יומן"
+group_ui = "ממשק"
+enable_ui = "הפעל תיעוד מנות בממשק"
+
+# --- עמוד הגדרות: החרגה ---
+[rc_exclude]
+group_notif = "התראות: אל תודיע על ..."
+blocklist = "רשימת חסימה"
+user_rules = "כללי משתמש"
+group_log = "תיעוד: אל תתעד ..."
+stealth = "חיבורי סורק פורטים"
+allowed = "חיבורים מאושרים"
+
+# --- חלון מאפייני יישום ---
+[rc_properties]
+title = "מאפייני יישום"
+path = "נתיב:"
+comment = "הערה:"
+group_settings = "הגדרות:"
+enabled = "מאופשר (אפשר את תעבורת היישום הזה)"
+silent = "שקט (ללא התראות)"
+save = "שמור"
+close = "סגור"
+
+# --- חלון בקשת חיבור ---
+[rc_prompt]
+title = "amwall - בקשת חיבור של יישום"
+header = "יישום מנסה להתחבר:"
+question = "האם לאפשר את תעבורת היישום, או להשאיר אותו חסום?"
+allow = "אפשר"
+block = "חסום"
+
+# --- חלון עורך הכללים ---
+[rc_editor]
+add_rule_title = "ערך כלל"
+save = "שמור"
+close = "סגור"
+
+# --- מסנני חלון בחירת קובץ ---
+[filter]
+xml_profile = "פרופיל XML (*.xml)"
+all_files = "כל הקבצים (*.*)"
+executable = "קובץ הפעלה (*.exe)"

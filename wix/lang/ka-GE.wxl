@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="ka-GE" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="ChangelogDlgTitle">amwall - სიახლეები</String>
+  <String Id="ChangelogTitle">amwall-ის სიახლეები</String>
+  <String Id="ChangelogDesc">მიმდინარე და წინა ვერსიების მთავარი ცვლილებები.</String>
+</WixLocalization>

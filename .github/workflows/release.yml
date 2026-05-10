@@ -35,10 +35,15 @@ jobs:
         # Pin to 1.85 to match Cargo.toml's rust-version. dtolnay's
         # action is the maintained shim; rustup is preinstalled on
         # the windows-latest runner so this resolves quickly.
+        # `components: clippy` is required because dtolnay's action
+        # only auto-includes clippy on the `stable` channel — when a
+        # specific version is pinned, clippy must be requested
+        # explicitly or `cargo clippy` errors with "not installed".
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.85'
           targets: x86_64-pc-windows-msvc
+          components: clippy
 
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -54,10 +59,18 @@ jobs:
         # so a tag pointing at a broken commit fails fast before
         # we burn time on the WiX build. The local repo runs the
         # same three checks before each commit.
+        # PowerShell does not chain on success by default, so each
+        # command is followed by an explicit $LASTEXITCODE check —
+        # otherwise a clippy or build failure would be silently
+        # swallowed if the trailing `cargo test` happened to succeed.
+        shell: pwsh
         run: |
           cargo build --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Ensure WiX Toolset 3.x is on PATH
         # windows-latest typically ships with WiX 3.11 preinstalled

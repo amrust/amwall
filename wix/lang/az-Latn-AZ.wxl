@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="az-Latn-AZ" Codepage="65001" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="ChangelogDlgTitle">amwall - Yeniliklər</String>
+  <String Id="ChangelogTitle">amwall-də yeniliklər</String>
+  <String Id="ChangelogDesc">Cari və əvvəlki versiyaların əsas dəyişiklikləri.</String>
+</WixLocalization>
