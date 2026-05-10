@@ -284,21 +284,29 @@ fn match_available_locale(name: &str) -> Option<String> {
     None
 }
 
-/// Read `<exe_dir>\installerlocale.txt` — installed alongside
-/// amwall.exe by the MSI's InstallerLocaleFile component. Contains
-/// the LCID of the language transform Windows Installer auto-applied
-/// at install time as plain decimal text. Returns None when the file
-/// is missing (portable mode, pre-multilingual install, or user
-/// deleted it) or unparseable.
+/// Read `<exe_dir>\installerlocale.txt` — written by the MSI's
+/// InstallerLocaleFile component via `<IniFile>` at install time. The
+/// file is INI-formatted by the standard WriteIniValues action:
 ///
-/// Lives next to the exe rather than in %APPDATA% because per-machine
-/// MSIs can drop a file into INSTALLDIR with a single File component
-/// and the WiX language-transform mechanism naturally swaps the
-/// content per culture — no Custom Action required. amwall reads it
-/// on every startup and overrides `settings.language` whenever the
-/// value differs from `install_lcid_seen`, so a v1.1.2 → v1.1.4
-/// upgrade picks up the install-time language even if settings.txt
-/// has a stale `language=en`.
+/// ```text
+/// [install]
+/// lcid=1049
+/// ```
+///
+/// `[UserLanguageID]` (the user's UI-language LCID at install time, set
+/// by Windows itself, the same property Windows Installer uses to pick
+/// which embedded transform to auto-apply) is written into the `lcid`
+/// value. We tried two simpler shapes first and both failed: a plain
+/// REG_SZ HKLM value with `Value="[ProductLanguage]"` was unreliable,
+/// and a File component whose source content was rewritten per culture
+/// by build-msi.ps1 was silently stripped from each transform by
+/// `torch -t language`.
+///
+/// Returns None when the file is missing (portable mode, pre-
+/// multilingual install, or user deleted it) or has no parseable
+/// `lcid=` line. amwall calls this on every startup and overrides
+/// `settings.language` whenever the value differs from
+/// `install_lcid_seen`.
 fn install_lcid_from_file() -> Option<u32> {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -331,30 +339,45 @@ fn install_lcid_from_file() -> Option<u32> {
             return None;
         }
     };
-    let trimmed = content.trim();
-    match trimmed.parse::<u32>() {
-        Ok(n) if n > 0 => {
-            eprintln!(
-                "amwall: install-lcid: read {n} from {}",
-                path.display()
-            );
-            Some(n)
-        }
-        Ok(_) => {
-            eprintln!(
-                "amwall: install-lcid: {} contains 0, skipping override",
-                path.display()
-            );
-            None
-        }
-        Err(e) => {
-            eprintln!(
-                "amwall: install-lcid: {} content `{trimmed}` not parseable as u32: {e}",
-                path.display()
-            );
-            None
+
+    // Find the first `lcid=<digits>` line. Tolerant of section
+    // headers, comments, surrounding whitespace, and Windows CRLF —
+    // INI parsers vary, so do the minimum that actually works for
+    // our file's known shape.
+    for raw in content.lines() {
+        let line = raw.trim();
+        if let Some(value) = line.strip_prefix("lcid=") {
+            let trimmed = value.trim();
+            return match trimmed.parse::<u32>() {
+                Ok(n) if n > 0 => {
+                    eprintln!(
+                        "amwall: install-lcid: read {n} from {}",
+                        path.display()
+                    );
+                    Some(n)
+                }
+                Ok(_) => {
+                    eprintln!(
+                        "amwall: install-lcid: {} `lcid=` is 0, skipping override",
+                        path.display()
+                    );
+                    None
+                }
+                Err(e) => {
+                    eprintln!(
+                        "amwall: install-lcid: {} `lcid={trimmed}` not parseable as u32: {e}",
+                        path.display()
+                    );
+                    None
+                }
+            };
         }
     }
+    eprintln!(
+        "amwall: install-lcid: {} has no `lcid=` line, skipping override",
+        path.display()
+    );
+    None
 }
 
 /// Map a Windows LCID (e.g. 1049) to the closest BCP-47 culture name

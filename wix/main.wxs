@@ -69,22 +69,47 @@
                   Source="LICENSE"
                   KeyPath="yes" />
           </Component>
-          <!-- Marks which language transform Windows Installer applied
-               at install time. scripts/build-msi.ps1 writes the LCID
-               (e.g. "1033" / "1049") into target\wix\installerlocale.txt
-               before each per-culture light.exe run, so the file content
-               differs per culture and torch picks up the diff as part
-               of the language transform. amwall reads this file on
-               every startup and overrides settings.language whenever
-               its value differs from settings.install_lcid_seen, so a
-               user upgrading from a pre-multilingual MSI still lands in
-               the install language even if their old settings.txt has
-               a stale `language=en`. -->
+          <!-- Marks which language Windows Installer ran in at install
+               time. Written to APPLICATIONFOLDER\installerlocale.txt as
+               INI:
+                 [install]
+                 lcid=1049
+               by the standard WriteIniValues action. [UserLanguageID]
+               is a Windows Installer built-in that holds the LCID of
+               the user's UI language — i.e. the same LCID that selects
+               which embedded transform auto-applies. The
+               File-component-with-source approach was tried first and
+               failed: torch -t language strips file-content diffs from
+               per-culture transforms, so every install got the en-US
+               base value regardless of which transform applied.
+               IniFile sidesteps the transform entirely — the value is
+               formatted at install time from a property the user's
+               Windows already set.
+
+               amwall reads this file on every startup and overrides
+               settings.language whenever the LCID differs from
+               settings.install_lcid_seen, so a user upgrading from a
+               pre-multilingual MSI still lands in the install language
+               even if their old settings.txt has a stale `language=en`.
+
+               Registry KeyPath: IniFile components must have a
+               non-IniFile keypath; HKCU registry value is the canonical
+               choice (CreateFolder isn't necessary because the parent
+               directory already has File components). -->
           <Component Id="InstallerLocaleFile" Guid="9B5D2E8C-4A1F-4E3D-B6F7-1C8E2A9D5B4C" Win64="yes">
-            <File Id="installerlocale_txt"
-                  Name="installerlocale.txt"
-                  Source="target\wix\installerlocale.txt"
-                  KeyPath="yes" />
+            <RegistryValue Root="HKCU"
+                           Key="Software\amwall"
+                           Name="installerlocale_keypath"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+            <IniFile Id="InstallerLocaleIni"
+                     Action="addLine"
+                     Directory="APPLICATIONFOLDER"
+                     Name="installerlocale.txt"
+                     Section="install"
+                     Key="lcid"
+                     Value="[UserLanguageID]" />
           </Component>
         </Directory>
       </Directory>

@@ -47,17 +47,6 @@ if (-not (Test-Path "$targetBin\amwall.exe")) {
 New-Item -ItemType Directory -Path $wixDir -Force | Out-Null
 New-Item -ItemType Directory -Path $langDir -Force | Out-Null
 
-# Per-culture installerlocale.txt: holds the LCID of the language
-# this MSI was built for. Written into APPLICATIONFOLDER by main.wxs's
-# InstallerLocaleFile component. amwall reads it on every startup and
-# overrides settings.language whenever the value differs from the LCID
-# already recorded in settings.txt (install_lcid_seen). The base MSI
-# gets en-US's LCID; each per-culture light.exe call below overwrites
-# the file with that culture's LCID before linking, so torch picks up
-# the diff as part of the language transform.
-$installerLocaleFile = "$wixDir\installerlocale.txt"
-Set-Content -Path $installerLocaleFile -Value "1033" -Encoding ASCII -NoNewline
-
 # Compile main.wxs once — the same .wixobj is linked per culture.
 # -arch x64 sets the platform so the Template summary lists x64
 # (required by ICE80 because main.wxs has Win64="yes" components).
@@ -91,11 +80,6 @@ Get-ChildItem wix\lang\*.wxl |
         $lcid = [System.Globalization.CultureInfo]::new($culture).LCID
         $langMsi = "$langDir\$culture.msi"
         $mst = "$langDir\$culture.mst"
-
-        # Overwrite the per-culture installerlocale.txt before light
-        # reads it; whatever's on disk at link time gets packed into
-        # this culture's MSI and hence into its transform.
-        Set-Content -Path $installerLocaleFile -Value "$lcid" -Encoding ASCII -NoNewline
 
         # `-cultures:<culture>;en-us` so cultures missing from
         # WixUIExtension (e.g. vi-VN, az-Latn-AZ) fall back to English
