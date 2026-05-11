@@ -1898,7 +1898,10 @@ Dashboard::Dashboard(DbusClient *dbus, PromptCoordinator *prompts,
         tr("Per-application firewall — version %1")
             .arg(QString::fromLatin1(AMWALL_VERSION)),
         this);
-    subtitle->setStyleSheet("color: palette(mid);");
+    // Plain palette text (WCAG-compliant contrast); italic instead of
+    // a faded gray for visual hierarchy. palette(mid) fails the AA
+    // contrast ratio against window backgrounds on most themes.
+    subtitle->setStyleSheet("font-style: italic;");
     titleBox->addWidget(subtitle);
     header->addLayout(titleBox, 1);
 
@@ -1961,8 +1964,7 @@ Dashboard::Dashboard(DbusClient *dbus, PromptCoordinator *prompts,
 
 void Dashboard::onPendingChanged(int n) {
     if (n == 0) {
-        m_pendingLabel->setText(
-            tr("<span style='color: palette(mid);'>0 (idle)</span>"));
+        m_pendingLabel->setText(tr("<i>0 (idle)</i>"));
     } else {
         m_pendingLabel->setText(
             tr("<span style='color:#ef6c00; font-weight:bold;'>"
@@ -1979,10 +1981,12 @@ void Dashboard::onDbusStateChanged() {
         QString msg = tr("<span style='color:#c62828; font-weight:bold;'>○ Not reachable</span>");
         QString err = m_dbus->lastError();
         if (!err.isEmpty()) {
-            msg += QStringLiteral("<br><span style='color: palette(mid); font-size: small;'>%1</span>")
+            // Italic + small font for hierarchy without the bad
+            // contrast of palette(mid). Full text color = WCAG AA.
+            msg += QStringLiteral("<br><i style='font-size: small;'>%1</i>")
                        .arg(err.toHtmlEscaped());
         }
-        msg += QStringLiteral("<br><span style='color: palette(mid); font-size: small;'>%1</span>")
+        msg += QStringLiteral("<br><i style='font-size: small;'>%1</i>")
                    .arg(tr("start with: <code>sudo systemctl start amwall-daemon</code>"));
         m_stateLabel->setText(msg);
         m_countLabel->setText(QStringLiteral("—"));
@@ -2078,8 +2082,12 @@ ConnectPromptDialog::ConnectPromptDialog(uint pid,
     iconLabel->setPixmap(ico.pixmap(40, 40));
     header->addWidget(iconLabel, 0, Qt::AlignTop);
 
+    // "Process" prefix disambiguates from same-name protocols/services
+    // (e.g. comm="http" reads as the HTTP protocol without the noun).
+    // The kernel's TASK_COMM_NAME is the basename of the executable
+    // truncated to 15 chars — see /proc/<pid>/comm.
     auto *headline = new QLabel(
-        tr("<b>%1</b> wants to connect.").arg(comm.toHtmlEscaped()),
+        tr("Process <b>%1</b> wants to connect.").arg(comm.toHtmlEscaped()),
         this);
     headline->setTextFormat(Qt::RichText);
     headline->setWordWrap(true);
@@ -2109,11 +2117,13 @@ ConnectPromptDialog::ConnectPromptDialog(uint pid,
 
     outer->addLayout(details);
 
+    // Italic + small for visual hierarchy; full text color for WCAG
+    // contrast (palette(mid) was hard to read on the Mint theme).
     auto *hint = new QLabel(
-        tr("<span style='color: palette(mid); font-size: small;'>"
+        tr("<i style='font-size: small;'>"
            "Allow saves a rule for this exact destination. Block saves "
            "a deny rule (silent next time). Dismiss does nothing — the "
-           "app will re-prompt on retry.</span>"),
+           "app will re-prompt on retry.</i>"),
         this);
     hint->setTextFormat(Qt::RichText);
     hint->setWordWrap(true);
