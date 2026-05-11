@@ -1180,7 +1180,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets DBus Network)
 
 # AMWALL_VERSION is baked into the binary so --version and the About
 # box show the same string the .deb is built with. Bumped per phase.
-add_compile_definitions(AMWALL_VERSION="0.1.0+phase6.7")
+add_compile_definitions(AMWALL_VERSION="0.1.0+phase6.7a")
 
 add_executable(amwall-gui
     src/main.cpp
@@ -1421,7 +1421,7 @@ void MainWindow::setupCentralWidget() {
     m_tabs = new QTabWidget(this);
     m_dashboard   = new Dashboard(m_dbus, m_prompts, this);
     m_userRules   = new UserRulesTab(m_dbus, this);
-    m_connections = new ConnectionsTab(this);
+    m_connections = new ConnectionsTab(m_dbus, this);
     m_packetsLog  = new PacketsLogTab(m_dbus, this);
     m_apps        = new AppsTab(m_dbus, this);
     m_tabs->addTab(m_dashboard,   tr("&Overview"));
@@ -1718,6 +1718,21 @@ public slots:
     // Delete an existing rule. Same async pattern.
     void del(const QString &comm, const QString &ip, ushort port);
 
+    // Synchronous D-Bus call to the daemon's ResolveSockets method.
+    // The daemon (root) walks /proc/<pid>/fd/* and returns
+    // inode → (pid, comm, exe) for every inode in the input list it
+    // can resolve. Used by ConnectionsTab so sockets owned by other
+    // users (root daemons like systemd-resolved) get a real Process
+    // cell instead of "(unknown)". Inodes the daemon couldn't match
+    // are simply absent from the returned map. Returns an empty
+    // map on D-Bus failure (timeout, daemon dead).
+    struct SocketProc {
+        uint pid = 0;
+        QString comm;
+        QString exe;
+    };
+    QHash<quint64, SocketProc> resolveSockets(const QList<quint64> &inodes);
+
 signals:
     void stateChanged();
 
@@ -1757,11 +1772,13 @@ write_file linux/amwall-gui-qt/src/dbusclient.cpp <<'EOF'
 #include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusError>
+#include <QDBusInterface>
 #include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+#include <QDBusReply>
 #include <QDebug>
 #include <QTimer>
 
@@ -1863,6 +1880,48 @@ bool DbusClient::hasAnyRuleFor(const QString &comm) const {
         if (r.comm == comm) return true;
     }
     return false;
+}
+
+QHash<quint64, DbusClient::SocketProc>
+DbusClient::resolveSockets(const QList<quint64> &inodes) {
+    QHash<quint64, SocketProc> out;
+    if (inodes.isEmpty()) return out;
+
+    QDBusInterface iface(QStringLiteral("org.amwall.Daemon1"),
+                         QStringLiteral("/org/amwall/Daemon1"),
+                         QStringLiteral("org.amwall.Daemon1"),
+                         QDBusConnection::systemBus());
+    if (!iface.isValid()) return out;
+
+    QList<quint64> in = inodes;
+    QDBusReply<QDBusArgument> reply = iface.call(
+        QStringLiteral("ResolveSockets"), QVariant::fromValue(in));
+    if (!reply.isValid()) {
+        qWarning() << "ResolveSockets failed:" << reply.error().message();
+        return out;
+    }
+
+    // Returned wire type: a(uuss). The marshaller hands us a
+    // QDBusArgument whose container is an array of structs; we walk
+    // it manually because the per-element type isn't a metatyped
+    // struct (no QObject), just a plain (u64, u32, str, str) tuple.
+    QDBusArgument arg = reply.value();
+    arg.beginArray();
+    while (!arg.atEnd()) {
+        arg.beginStructure();
+        quint64 inode = 0;
+        uint pid = 0;
+        QString comm, exe;
+        arg >> inode >> pid >> comm >> exe;
+        arg.endStructure();
+        SocketProc sp;
+        sp.pid = pid;
+        sp.comm = comm;
+        sp.exe = exe;
+        out.insert(inode, sp);
+    }
+    arg.endArray();
+    return out;
 }
 
 void DbusClient::allow(const QString &comm, const QString &ip, ushort port) {
@@ -3098,6 +3157,7 @@ write_file linux/amwall-gui-qt/src/connectionstab.h <<'EOF'
 
 #include <QWidget>
 
+class DbusClient;
 class QLabel;
 class QTableWidget;
 class QTimer;
@@ -3106,12 +3166,15 @@ class ConnectionsTab : public QWidget {
     Q_OBJECT
 
 public:
-    explicit ConnectionsTab(QWidget *parent = nullptr);
+    // dbus may be null — we still render the socket table but the
+    // Process column reads "(unknown)" for every row.
+    explicit ConnectionsTab(DbusClient *dbus, QWidget *parent = nullptr);
 
 public slots:
     void refresh();
 
 private:
+    DbusClient   *m_dbus = nullptr;
     QTimer       *m_timer = nullptr;
     QTableWidget *m_table = nullptr;
     QLabel       *m_countLabel = nullptr;
@@ -3120,6 +3183,8 @@ EOF
 
 write_file linux/amwall-gui-qt/src/connectionstab.cpp <<'EOF'
 #include "connectionstab.h"
+
+#include "dbusclient.h"
 
 #include <QDir>
 #include <QFile>
@@ -3298,7 +3363,8 @@ QList<Conn> readProcNetTcp(const QString &path, bool ipv6) {
 
 }  // namespace
 
-ConnectionsTab::ConnectionsTab(QWidget *parent) : QWidget(parent) {
+ConnectionsTab::ConnectionsTab(DbusClient *dbus, QWidget *parent)
+    : QWidget(parent), m_dbus(dbus) {
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(8, 8, 8, 8);
     outer->setSpacing(6);
@@ -3342,9 +3408,8 @@ ConnectionsTab::ConnectionsTab(QWidget *parent) : QWidget(parent) {
 
     auto *hint = new QLabel(
         tr("<i style='font-size: small;'>"
-           "Process column resolves /proc/&lt;pid&gt;/fd → socket inode. "
-           "Rows owned by other users (root daemons, etc.) read as "
-           "<code>(unknown)</code> unless the GUI runs as root."
+           "Process column is resolved by the daemon (running as root) "
+           "via D-Bus — see every owning PID/comm/exe across all users."
            "</i>"),
         this);
     hint->setTextFormat(Qt::RichText);
@@ -3361,8 +3426,31 @@ void ConnectionsTab::refresh() {
     QList<Conn> rows = readProcNetTcp(QStringLiteral("/proc/net/tcp"), false);
     rows.append(readProcNetTcp(QStringLiteral("/proc/net/tcp6"), true));
 
-    // One /proc walk per refresh — cheaper than per-row lookup.
-    const QHash<quint64, ProcInfo> inodeMap = scanSocketInodes();
+    // Ask the daemon (root) to resolve every inode in one D-Bus call.
+    // Falls back to a (limited, our-uid-only) GUI-side /proc walk if
+    // D-Bus is unreachable or returns nothing — that way the tab still
+    // shows the user's own processes when the daemon is down.
+    QList<quint64> wantedInodes;
+    wantedInodes.reserve(rows.size());
+    for (const Conn &c : rows) {
+        if (c.inode != 0) wantedInodes.append(c.inode);
+    }
+    QHash<quint64, ProcInfo> inodeMap;
+    if (m_dbus) {
+        const auto daemonMap = m_dbus->resolveSockets(wantedInodes);
+        for (auto it = daemonMap.constBegin(); it != daemonMap.constEnd(); ++it) {
+            inodeMap.insert(it.key(), ProcInfo{
+                static_cast<int>(it.value().pid),
+                it.value().comm,
+                it.value().exe,
+            });
+        }
+    }
+    if (inodeMap.isEmpty()) {
+        // Daemon unreachable or replied empty — best-effort local walk
+        // so we still show *something* (our own processes).
+        inodeMap = scanSocketInodes();
+    }
 
     m_table->setSortingEnabled(false);
     m_table->setRowCount(rows.size());
@@ -4637,6 +4725,89 @@ impl AmwallDaemon {
                 action_to_str(r.action).to_string(),
             ))
             .collect())
+    }
+
+    // ResolveSockets: take a list of socket inodes (column [9] of
+    // /proc/net/tcp{,6}) and return (inode, pid, comm, exe) tuples
+    // for every PID that owns one of them. The daemon runs as root
+    // so it can read /proc/<pid>/fd for every process — the GUI
+    // (running as the desktop user) can't, which is why this lives
+    // here. Inodes the daemon couldn't match (kernel-only sockets,
+    // closed-by-the-time-we-walked race) are simply omitted from
+    // the result rather than returning sentinel rows.
+    //
+    // No polkit gate — this is read-only data already visible to
+    // anyone with shell access (ss -tnp, lsof, etc. as root). The
+    // /proc walk is bounded by the number of running processes.
+    async fn resolve_sockets(
+        &self,
+        inodes: Vec<u64>,
+    ) -> zbus::fdo::Result<Vec<(u64, u32, String, String)>> {
+        if inodes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: std::collections::HashSet<u64> = inodes.into_iter().collect();
+        let mut out = Vec::new();
+
+        let proc_dir = match std::fs::read_dir("/proc") {
+            Ok(d) => d,
+            Err(e) => return Err(zbus::fdo::Error::Failed(
+                format!("read_dir /proc: {}", e))),
+        };
+        for entry in proc_dir.flatten() {
+            let name = entry.file_name();
+            let name_s = name.to_string_lossy();
+            let pid: u32 = match name_s.parse() {
+                Ok(p) => p,
+                Err(_) => continue,  // non-numeric (cmdline, sys, etc.)
+            };
+
+            let fd_path = format!("/proc/{}/fd", pid);
+            let fd_dir = match std::fs::read_dir(&fd_path) {
+                Ok(d) => d,
+                Err(_) => continue,  // proc died / EACCES
+            };
+
+            let mut resolved_meta = false;
+            let mut comm = String::new();
+            let mut exe  = String::new();
+
+            for fd_entry in fd_dir.flatten() {
+                let target = match std::fs::read_link(fd_entry.path()) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let target_s = target.to_string_lossy();
+                if !target_s.starts_with("socket:[") {
+                    continue;
+                }
+                let inner = &target_s[8..];
+                let close = match inner.find(']') {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let inode: u64 = match inner[..close].parse() {
+                    Ok(i) => i,
+                    Err(_) => continue,
+                };
+                if !wanted.contains(&inode) {
+                    continue;
+                }
+                if !resolved_meta {
+                    comm = std::fs::read_to_string(format!("/proc/{}/comm", pid))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    exe = std::fs::read_link(format!("/proc/{}/exe", pid))
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    resolved_meta = true;
+                }
+                out.push((inode, pid, comm.clone(), exe.clone()));
+            }
+        }
+        Ok(out)
     }
 
     #[zbus(signal)]
