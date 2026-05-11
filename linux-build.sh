@@ -816,11 +816,18 @@ write_file linux/amwall-cli/src/main.rs <<'EOF'
 //!   amwall-cli allow <comm> <ip>:<port>
 //!   amwall-cli deny  <comm> <ip>:<port>
 //!   amwall-cli del   <comm> <ip>:<port>
+//!   amwall-cli reset [--yes] [--keep-rules] [--keep-config]
 //!
 //! Add `--dbus` to route the call through the daemon's
 //! org.amwall.Daemon1 interface on the SYSTEM bus instead of editing
 //! rules.toml. Requires amwall-daemon running and the policy file at
 //! /etc/dbus-1/system.d/org.amwall.Daemon1.conf to be installed.
+//!
+//! `reset` truncates rules.toml AND clears ~/.config/amwall/ (the
+//! GUI's QSettings dir). Equivalent to the Win32 amwall "Network
+//! reset" item. Run as sudo for /etc/amwall/rules.toml; the user-
+//! config part honors $SUDO_USER so it still targets the invoking
+//! user's home directory rather than /root/.config/.
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -855,6 +862,20 @@ enum Cmd {
     Deny { comm: String, dest: String },
     /// Remove a rule.
     Del { comm: String, dest: String },
+    /// Reset to clean state: truncate rules.toml + clear ~/.config/amwall/.
+    /// Equivalent to Win32 amwall "Network reset". TOML mode only;
+    /// run as sudo so it can write /etc/amwall/rules.toml.
+    Reset {
+        /// Skip the y/N confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Don't truncate rules.toml.
+        #[arg(long)]
+        keep_rules: bool,
+        /// Don't clear ~/.config/amwall/.
+        #[arg(long)]
+        keep_config: bool,
+    },
 }
 
 #[zbus::proxy(
@@ -881,6 +902,15 @@ fn main() -> Result<()> {
 }
 
 fn run_dbus(cmd: Cmd) -> Result<()> {
+    if matches!(cmd, Cmd::Reset { .. }) {
+        // Daemon doesn't expose a Reset method yet — would need to
+        // truncate the file + clear the BPF map atomically under
+        // the rules mutex. Until that lands, route through TOML
+        // mode (which only needs sudo for /etc/amwall/rules.toml).
+        anyhow::bail!(
+            "--dbus reset is not implemented yet; use:\n  sudo amwall-cli reset");
+    }
+
     let conn = zbus::blocking::Connection::system()
         .context("connecting to D-Bus system bus")?;
     let proxy = AmwallDaemonProxy::new(&conn)
@@ -912,11 +942,15 @@ fn run_dbus(cmd: Cmd) -> Result<()> {
             proxy.del(&comm, &ip, port).context("D-Bus Del() failed")?;
             eprintln!("[via D-Bus] removed: {} {}:{}", comm, ip, port);
         }
+        Cmd::Reset { .. } => unreachable!("handled by the matches!() guard above"),
     }
     Ok(())
 }
 
 fn run_toml(rules_arg: Option<PathBuf>, cmd: Cmd) -> Result<()> {
+    if let Cmd::Reset { yes, keep_rules, keep_config } = cmd {
+        return do_reset(rules_arg, yes, keep_rules, keep_config);
+    }
     let path = rules_arg.unwrap_or_else(default_rules_path);
     let mut file = RulesFile::load(&path)?;
 
@@ -943,11 +977,87 @@ fn run_toml(rules_arg: Option<PathBuf>, cmd: Cmd) -> Result<()> {
             let (ip, port) = parse_dest(&dest)?;
             file.rules.retain(|r| !(r.comm == comm && r.ip == ip && r.port == port));
         }
+        Cmd::Reset { .. } => unreachable!("handled by the early-return at top of run_toml"),
     }
 
     file.save(&path)?;
     eprintln!("wrote {} ({} rules)", path.display(), file.rules.len());
     Ok(())
+}
+
+fn do_reset(rules_arg: Option<PathBuf>, yes: bool, keep_rules: bool, keep_config: bool) -> Result<()> {
+    // Reset targets the SYSTEM rules.toml by default, not
+    // ~/.config/amwall/rules.toml. Under sudo, default_rules_path()
+    // would return /root/.config/... because HOME is reset to /root,
+    // which is never what reset wants. --rules overrides if needed.
+    let rules_path = rules_arg.unwrap_or_else(|| PathBuf::from("/etc/amwall/rules.toml"));
+    let user_cfg = user_config_dir();
+
+    eprintln!("amwall-cli reset:");
+    if !keep_rules {
+        eprintln!("  • truncate {}", rules_path.display());
+    }
+    if !keep_config {
+        match &user_cfg {
+            Some(p) => eprintln!("  • remove   {}", p.display()),
+            None    => eprintln!("  • (no user-config dir found — SUDO_USER and HOME both unset)"),
+        }
+    }
+    if keep_rules && keep_config {
+        eprintln!("  (nothing to do — both --keep-rules and --keep-config set)");
+        return Ok(());
+    }
+
+    if !yes {
+        use std::io::Write;
+        eprint!("Proceed? [y/N] ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)
+            .context("reading confirmation from stdin")?;
+        let line = line.trim();
+        if !(line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes")) {
+            eprintln!("aborted.");
+            return Ok(());
+        }
+    }
+
+    if !keep_rules {
+        // Atomic truncate via empty-file write. Daemon mtime poll
+        // catches it within ~100 ms and rebuilds its BPF map empty.
+        std::fs::write(&rules_path, b"")
+            .with_context(|| format!(
+                "truncating {} (need sudo for /etc/amwall/?)",
+                rules_path.display()))?;
+        eprintln!("  ✓ truncated {}", rules_path.display());
+    }
+    if !keep_config {
+        if let Some(p) = user_cfg {
+            if p.exists() {
+                std::fs::remove_dir_all(&p)
+                    .with_context(|| format!("removing {}", p.display()))?;
+                eprintln!("  ✓ removed {}", p.display());
+            } else {
+                eprintln!("  - {} did not exist", p.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn user_config_dir() -> Option<PathBuf> {
+    // Honor SUDO_USER so `sudo amwall-cli reset` clears the invoking
+    // user's config dir, not /root/.config/amwall/. Falls back to
+    // $HOME for non-sudo invocations.
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if !sudo_user.is_empty() && sudo_user != "root" {
+            return Some(PathBuf::from(format!("/home/{}/.config/amwall", sudo_user)));
+        }
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        return Some(PathBuf::from(h).join(".config/amwall"));
+    }
+    None
 }
 
 fn upsert(file: &mut RulesFile, comm: String, dest: String, action: Action) -> Result<()> {
@@ -3527,6 +3637,25 @@ else
     pkill -x amwall-gui 2>/dev/null || true
     sudo systemctl stop amwall-daemon 2>/dev/null || true
 
+    # Network-reset before reinstall so accumulated rules.toml entries
+    # (allow/deny clicks from the connect-prompt during prior runs) and
+    # GUI QSettings (~/.config/amwall/) don't leak across iterations.
+    # We use the freshly-built CLI from linux/target/release/ — that's
+    # the one with the new `reset` subcommand even if the installed
+    # /usr/bin/amwall-cli is older. SUDO_USER is honored for the
+    # ~/.config clear so it targets /home/$user/.config/amwall, not
+    # /root/.config/amwall.
+    INFO "$CLI_BIN reset --yes  (clears rules.toml + ~/.config/amwall)"
+    # Plain `sudo` (no -E): env_reset clears AMWALL_RULES_PATH so the
+    # CLI uses the hardcoded /etc/amwall/rules.toml default. SUDO_USER
+    # is still set by sudo, so user_config_dir() targets the invoking
+    # user's home directory not /root/.config/.
+    if sudo "$CLI_BIN" reset --yes 2>&1 | sed 's/^/    /'; then
+        OK "Pre-install reset done."
+    else
+        WARN "Pre-install reset failed (continuing anyway — install will overwrite)"
+    fi
+
     # --force-confnew: silently take the .deb's version of conf-files
     # when there's a conflict. Section 4b/4c installed the same
     # content directly into /etc/dbus-1/system.d/ and
@@ -3612,6 +3741,12 @@ cat <<EOF
     amwall-cli --dbus allow firefox any:443
     amwall-cli --dbus deny  curl    1.1.1.1:53
     amwall-cli --dbus del   firefox any:443
+
+  Network reset (between dev iterations, no snapshot needed):
+    sudo amwall-cli reset --yes              # rules.toml + ~/.config/amwall
+    sudo amwall-cli reset --yes --keep-rules # only clear GUI config
+    sudo amwall-cli reset --yes --keep-config # only truncate rules
+    # The script's auto-install step calls 'reset --yes' before dpkg -i.
 
   GUI (Qt6, tray-resident):
     amwall-gui                      # opens main window + tray icon
