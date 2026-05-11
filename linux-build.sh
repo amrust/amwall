@@ -3245,7 +3245,8 @@ use aya_ebpf::helpers::bpf_get_current_task;
 
 #[cfg(feature = "task_walk")]
 #[allow(non_camel_case_types, non_snake_case, dead_code, unused_imports,
-        non_upper_case_globals, deref_nullptr, clippy::all)]
+        non_upper_case_globals, deref_nullptr, unnecessary_transmutes,
+        clippy::all)]
 mod vmlinux;
 
 const AF_INET: u16 = 2;
