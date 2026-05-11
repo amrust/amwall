@@ -3051,17 +3051,16 @@ void UserRulesTab::onTableActivated() {
 EOF
 
 write_file linux/amwall-gui-qt/src/connectionstab.h <<'EOF'
-// ConnectionsTab — Phase 6.5. Live view of the system's TCP socket
-// table (/proc/net/tcp + /proc/net/tcp6). Auto-refreshes every 5 s.
+// ConnectionsTab — Phase 6.5 + 6.5.1. Live view of the system's TCP
+// socket table (/proc/net/tcp + /proc/net/tcp6) joined with per-PID
+// process info from /proc/<pid>/fd/*. Auto-refreshes every 5 s.
 //
-// Scope for 6.5 MVP:
-//   • TCP only (UDP is its own tab decision later)
-//   • No per-process resolution yet — resolving socket inode →
-//     owning PID needs walking /proc/<pid>/fd which is O(processes ×
-//     fds) and benefits from caching. Deferred to a follow-up so the
-//     basic plumbing lands first.
+// Permission model: as an unprivileged user, we can only enumerate
+// /proc/<pid>/fd for our own processes. Sockets owned by other users
+// (especially root daemons like systemd-resolved) show "(unknown)"
+// in the Process column. Running the GUI as root would resolve all.
 //
-// Columns: Proto | Local | Remote | State
+// Columns: Process | Proto | Local | Remote | State
 
 #pragma once
 
@@ -3090,7 +3089,9 @@ EOF
 write_file linux/amwall-gui-qt/src/connectionstab.cpp <<'EOF'
 #include "connectionstab.h"
 
+#include <QDir>
 #include <QFile>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QHostAddress>
@@ -3105,6 +3106,66 @@ write_file linux/amwall-gui-qt/src/connectionstab.cpp <<'EOF'
 #include <QVBoxLayout>
 
 namespace {
+
+struct ProcInfo {
+    int     pid = 0;
+    QString comm;
+    QString exe;
+};
+
+// Walk /proc once, build a {socket-inode → owning process} map by
+// reading every /proc/<pid>/fd/* symlink and matching those that
+// point at "socket:[NNNN]". O(processes × fds). On a typical
+// desktop this is ~500 dir reads + ~5000 readlinks, ~30-80 ms.
+// The 5-second tab refresh tolerates that without UI lag, so no
+// background thread for now.
+//
+// Skips PIDs we can't open (other users' processes when running
+// unprivileged) — they leave gaps in the inode map and the matching
+// Connections rows render Process="(unknown)".
+QHash<quint64, ProcInfo> scanSocketInodes() {
+    QHash<quint64, ProcInfo> out;
+    QDir procDir(QStringLiteral("/proc"));
+    const QStringList entries = procDir.entryList(
+        QDir::Dirs | QDir::NoDotAndDotDot, QDir::Unsorted);
+    for (const QString &pidStr : entries) {
+        bool ok = false;
+        int pid = pidStr.toInt(&ok);
+        if (!ok) continue;
+
+        QDir fdDir(QStringLiteral("/proc/%1/fd").arg(pid));
+        if (!fdDir.exists()) continue;
+        const QStringList fds = fdDir.entryList(QDir::NoDotAndDotDot,
+                                                QDir::Unsorted);
+        if (fds.isEmpty()) continue;  // unreadable for us → skip
+
+        ProcInfo info;
+        info.pid = pid;
+        bool resolvedMeta = false;
+        for (const QString &fd : fds) {
+            const QString linkPath = fdDir.absoluteFilePath(fd);
+            const QString target   = QFile::symLinkTarget(linkPath);
+            if (!target.startsWith(QStringLiteral("socket:["))) continue;
+            const int rb = target.indexOf(']');
+            if (rb < 0) continue;
+            bool inodeOk = false;
+            const quint64 inode = target.mid(8, rb - 8).toULongLong(&inodeOk);
+            if (!inodeOk) continue;
+
+            if (!resolvedMeta) {
+                QFile commF(QStringLiteral("/proc/%1/comm").arg(pid));
+                if (commF.open(QIODevice::ReadOnly)) {
+                    info.comm = QString::fromUtf8(commF.readAll()).trimmed();
+                }
+                info.exe = QFile::symLinkTarget(
+                    QStringLiteral("/proc/%1/exe").arg(pid));
+                resolvedMeta = true;
+            }
+            out.insert(inode, info);
+        }
+    }
+    return out;
+}
 
 QString tcpStateName(int hex) {
     switch (hex) {
@@ -3169,8 +3230,13 @@ struct Conn {
     QString local;
     QString remote;
     QString state;
+    quint64 inode = 0;   // /proc/net/tcp column [9] — joins with scanSocketInodes()
 };
 
+// /proc/net/tcp column layout (header row of `cat /proc/net/tcp`):
+//   sl  local_address  rem_address  st  tx_queue:rx_queue  tr:tm->when
+//   retrnsmt  uid  timeout  inode  ...
+// Indexes used here: [1]=local [2]=remote [3]=state [9]=inode.
 QList<Conn> readProcNetTcp(const QString &path, bool ipv6) {
     QList<Conn> out;
     QFile f(path);
@@ -3182,14 +3248,17 @@ QList<Conn> readProcNetTcp(const QString &path, bool ipv6) {
         const QString line = in.readLine().trimmed();
         if (line.isEmpty()) continue;
         const QStringList fields = line.split(splitter, Qt::SkipEmptyParts);
-        if (fields.size() < 4) continue;
+        if (fields.size() < 10) continue;
         bool ok = false;
         const int stHex = fields[3].toInt(&ok, 16);
+        bool inodeOk = false;
+        const quint64 inode = fields[9].toULongLong(&inodeOk);
         out.append(Conn{
             ipv6 ? QStringLiteral("tcp6") : QStringLiteral("tcp4"),
             ipv6 ? formatV6Addr(fields[1]) : formatV4Addr(fields[1]),
             ipv6 ? formatV6Addr(fields[2]) : formatV4Addr(fields[2]),
             ok   ? tcpStateName(stHex) : fields[3],
+            inodeOk ? inode : 0,
         });
     }
     return out;
@@ -3216,9 +3285,9 @@ ConnectionsTab::ConnectionsTab(QWidget *parent) : QWidget(parent) {
     header->addWidget(refreshBtn);
     outer->addLayout(header);
 
-    m_table = new QTableWidget(0, 4, this);
+    m_table = new QTableWidget(0, 5, this);
     m_table->setHorizontalHeaderLabels({
-        tr("Proto"), tr("Local"), tr("Remote"), tr("State")
+        tr("Process"), tr("Proto"), tr("Local"), tr("Remote"), tr("State")
     });
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -3226,16 +3295,19 @@ ConnectionsTab::ConnectionsTab(QWidget *parent) : QWidget(parent) {
     m_table->setSortingEnabled(true);
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setStretchLastSection(false);
-    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_table->setColumnWidth(0, 220);
     outer->addWidget(m_table, 1);
 
     auto *hint = new QLabel(
         tr("<i style='font-size: small;'>"
-           "Per-process resolution comes in a follow-up — needs walking "
-           "<code>/proc/&lt;pid&gt;/fd/*</code> to map socket inodes to PIDs."
+           "Process column resolves /proc/&lt;pid&gt;/fd → socket inode. "
+           "Rows owned by other users (root daemons, etc.) read as "
+           "<code>(unknown)</code> unless the GUI runs as root."
            "</i>"),
         this);
     hint->setTextFormat(Qt::RichText);
@@ -3252,17 +3324,37 @@ void ConnectionsTab::refresh() {
     QList<Conn> rows = readProcNetTcp(QStringLiteral("/proc/net/tcp"), false);
     rows.append(readProcNetTcp(QStringLiteral("/proc/net/tcp6"), true));
 
+    // One /proc walk per refresh — cheaper than per-row lookup.
+    const QHash<quint64, ProcInfo> inodeMap = scanSocketInodes();
+
     m_table->setSortingEnabled(false);
     m_table->setRowCount(rows.size());
+    int resolved = 0;
     for (int i = 0; i < rows.size(); ++i) {
         const Conn &c = rows[i];
-        m_table->setItem(i, 0, new QTableWidgetItem(c.proto));
-        m_table->setItem(i, 1, new QTableWidgetItem(c.local));
-        m_table->setItem(i, 2, new QTableWidgetItem(c.remote));
-        m_table->setItem(i, 3, new QTableWidgetItem(c.state));
+        const auto it = inodeMap.constFind(c.inode);
+        QString procCell;
+        QString tooltip;
+        if (it != inodeMap.constEnd()) {
+            const QString comm = it->comm.isEmpty()
+                ? tr("(no comm)") : it->comm;
+            procCell = QStringLiteral("%1 (pid %2)").arg(comm).arg(it->pid);
+            if (!it->exe.isEmpty()) tooltip = it->exe;
+            ++resolved;
+        } else {
+            procCell = tr("(unknown)");
+        }
+        auto *procItem = new QTableWidgetItem(procCell);
+        if (!tooltip.isEmpty()) procItem->setToolTip(tooltip);
+        m_table->setItem(i, 0, procItem);
+        m_table->setItem(i, 1, new QTableWidgetItem(c.proto));
+        m_table->setItem(i, 2, new QTableWidgetItem(c.local));
+        m_table->setItem(i, 3, new QTableWidgetItem(c.remote));
+        m_table->setItem(i, 4, new QTableWidgetItem(c.state));
     }
     m_table->setSortingEnabled(true);
-    m_countLabel->setText(QStringLiteral("(%1)").arg(rows.size()));
+    m_countLabel->setText(
+        tr("(%1 sockets, %2 resolved)").arg(rows.size()).arg(resolved));
 }
 EOF
 
