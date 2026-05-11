@@ -313,25 +313,30 @@ else
 fi
 
 # aya-tool: generates Rust bindings for kernel types from /sys/kernel/btf/vmlinux.
-# amwall-ebpf's build.rs uses it to emit a vmlinux.rs containing task_struct so
-# the BPF program can read task->group_leader->comm (Phase 6.3.1 — collapses
-# Firefox's per-thread "DNS Resolver #N" comms back to the binary name).
+# We use it to emit a vmlinux.rs containing task_struct so the BPF program can
+# read task->group_leader->comm (Phase 6.3.1 — collapses Firefox's per-thread
+# "DNS Resolver #N" comms back to the binary name "firefox").
 #
-# Failure here is non-fatal: amwall-ebpf's build.rs detects the absence and
-# falls back to the per-thread bpf_get_current_comm() — same behavior as
-# pre-6.3.1, just one prompt per thread name as a degraded-mode UX.
+# aya-tool is NOT on crates.io — it lives in the aya GitHub repo and must be
+# installed from --git. Failure here is non-fatal: the BPF build falls back
+# to bpf_get_current_comm() (per-thread name) — same as pre-6.3.1, just with
+# multi-thread apps spamming separate prompts as a degraded-mode UX.
 INFO "Ensuring aya-tool (BTF→Rust bindings for task_struct walk)..."
 if command -v aya-tool >/dev/null 2>&1; then
-    OK "aya-tool already installed"
+    OK "aya-tool already installed: $(aya-tool --version 2>&1 | head -1 || echo '(--version unsupported)')"
 else
-    INFO "Building aya-tool via cargo install (2-3 min)..."
-    if cargo install --locked aya-tool 2>&1 | sed 's/^/    /'; then
-        OK "aya-tool installed"
+    INFO "Building aya-tool from aya-rs/aya git (3-5 min, pulls clang-sys)..."
+    if cargo install --locked --git https://github.com/aya-rs/aya aya-tool 2>&1 | sed 's/^/    /'; then
+        OK "aya-tool installed from git"
     else
         WARN "aya-tool install failed — BPF will use per-thread comm fallback"
         WARN "(multi-thread apps like Firefox will spam prompts; not blocking)"
     fi
 fi
+
+# Flag set later when we successfully generate amwall-ebpf/src/vmlinux.rs;
+# passed to `cargo build` so the BPF program uses the group_leader walk.
+EBPF_CARGO_FEATURES=""
 
 # ─── 3. GRUB — enable bpf in the LSM list ───────────────────────────
 
@@ -3151,6 +3156,14 @@ publish = false
 [dependencies]
 aya-ebpf = "0.1"
 
+[features]
+# Phase 6.3.1: BPF walks task->group_leader->comm using vmlinux.rs
+# bindings emitted by aya-tool from /sys/kernel/btf/vmlinux. Enabled by
+# linux-build.sh whenever aya-tool ran successfully; disabled (per-thread
+# comm fallback) otherwise. The cfg gates both the `mod vmlinux;` line
+# and the actual walk, so vmlinux.rs need not exist when the feature is off.
+task_walk = []
+
 [[bin]]
 name = "amwall-ebpf"
 path = "src/main.rs"
@@ -3189,8 +3202,15 @@ build-std = ["core"]
 EOF
 
 write_file linux/amwall-ebpf/src/main.rs <<'EOF'
-//! amwall-ebpf — Phase 2 BPF LSM enforcement (unchanged in Phase 3 —
-//! the daemon-side D-Bus work doesn't touch the kernel program).
+//! amwall-ebpf — BPF LSM enforcement.
+//!
+//! Phase 6.3.1: when the `task_walk` feature is enabled (toggled by
+//! linux-build.sh after aya-tool successfully emits src/vmlinux.rs from
+//! /sys/kernel/btf/vmlinux), the program reads the comm of the thread-group
+//! leader instead of the current thread. That collapses Firefox's per-thread
+//! "DNS Resolver #N" worker names back to "firefox", so the userspace prompt
+//! dedup actually works on multi-thread apps. Without the feature, we fall
+//! back to bpf_get_current_comm() (per-thread name) — same as pre-6.3.1.
 
 #![no_std]
 #![no_main]
@@ -3202,6 +3222,14 @@ use aya_ebpf::{
     maps::{HashMap, RingBuf},
     programs::LsmContext,
 };
+
+#[cfg(feature = "task_walk")]
+use aya_ebpf::helpers::bpf_get_current_task;
+
+#[cfg(feature = "task_walk")]
+#[allow(non_camel_case_types, non_snake_case, dead_code, unused_imports,
+        non_upper_case_globals, deref_nullptr, clippy::all)]
+mod vmlinux;
 
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
@@ -3287,6 +3315,41 @@ pub fn amwall_socket_connect(ctx: LsmContext) -> i32 {
     }
 }
 
+// Returns the comm of the thread-group leader when task_walk is enabled,
+// else the per-thread comm. Any error walking the task_struct falls back
+// to the per-thread name — that's a UX regression (extra prompts), not a
+// security one, since the comm only feeds the rule lookup.
+fn current_comm() -> [u8; 16] {
+    #[cfg(feature = "task_walk")]
+    unsafe {
+        use vmlinux::task_struct;
+        let task_addr = bpf_get_current_task();
+        if task_addr == 0 {
+            return bpf_get_current_comm().unwrap_or([0; 16]);
+        }
+        let task = task_addr as *const task_struct;
+        // &(*task).group_leader is constant-offset pointer arithmetic
+        // (the verifier accepts this on a task_struct kernel ptr).
+        // bpf_probe_read_kernel does the actual safe deref.
+        let leader_field = &(*task).group_leader as *const _ as *const u64;
+        let leader_addr: u64 = match bpf_probe_read_kernel::<u64>(leader_field) {
+            Ok(p) => p,
+            Err(_) => return bpf_get_current_comm().unwrap_or([0; 16]),
+        };
+        if leader_addr == 0 {
+            return bpf_get_current_comm().unwrap_or([0; 16]);
+        }
+        let leader = leader_addr as *const task_struct;
+        let comm_field = &(*leader).comm as *const _ as *const [i8; 16];
+        match bpf_probe_read_kernel::<[i8; 16]>(comm_field) {
+            Ok(c) => core::mem::transmute::<[i8; 16], [u8; 16]>(c),
+            Err(_) => bpf_get_current_comm().unwrap_or([0; 16]),
+        }
+    }
+    #[cfg(not(feature = "task_walk"))]
+    bpf_get_current_comm().unwrap_or([0; 16])
+}
+
 fn decide(ctx: &LsmContext) -> u8 {
     let addr_ptr: *const c_void = unsafe { ctx.arg(1) };
 
@@ -3297,7 +3360,7 @@ fn decide(ctx: &LsmContext) -> u8 {
         Err(_) => return ACT_ALLOW,
     };
 
-    let comm = bpf_get_current_comm().unwrap_or([0; 16]);
+    let comm = current_comm();
     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
 
     let mut entry = match EVENTS.reserve::<ConnectEvent>(0) {
@@ -4242,9 +4305,47 @@ chmod +x linux/amwall-daemon/debian/postrm
 
 # ─── Build ──────────────────────────────────────────────────────────
 
+# Phase 6.3.1: try to generate src/vmlinux.rs so the BPF program can
+# walk task->group_leader->comm. Requires aya-tool (installed earlier,
+# may have failed gracefully) and /sys/kernel/btf/vmlinux (present on
+# any kernel built with CONFIG_DEBUG_INFO_BTF=y — Ubuntu/Mint 22 have
+# it). Any failure here just leaves EBPF_CARGO_FEATURES empty and the
+# BPF falls back to per-thread comm.
+H "Generating amwall-ebpf vmlinux.rs (task_struct from BTF)"
+
+VMLINUX_OUT="$REPO_DIR/linux/amwall-ebpf/src/vmlinux.rs"
+rm -f "$VMLINUX_OUT"  # always start fresh — stale file from prior run + fresh install failure would build with bad bindings
+PHASE_631_STATUS="✗ (disabled — falling back to per-thread comm)"
+
+if ! command -v aya-tool >/dev/null 2>&1; then
+    WARN "aya-tool not installed — 6.3.1 disabled (per-thread comm)."
+elif [ ! -r /sys/kernel/btf/vmlinux ]; then
+    WARN "/sys/kernel/btf/vmlinux not readable — 6.3.1 disabled."
+else
+    INFO "Running: aya-tool generate task_struct"
+    if aya-tool generate task_struct >"$VMLINUX_OUT" 2>/tmp/aya-tool.err; then
+        BYTES=$(wc -c <"$VMLINUX_OUT")
+        if [ "$BYTES" -gt 1000 ]; then
+            OK "vmlinux.rs generated (${BYTES} bytes) — 6.3.1 enabled"
+            EBPF_CARGO_FEATURES="--features task_walk"
+            PHASE_631_STATUS="✓ enabled (vmlinux.rs ${BYTES} bytes)"
+        else
+            WARN "vmlinux.rs only ${BYTES} bytes — looks empty, disabling 6.3.1"
+            cat /tmp/aya-tool.err 2>/dev/null | sed 's/^/    /' || true
+            rm -f "$VMLINUX_OUT"
+        fi
+    else
+        WARN "aya-tool generate failed — 6.3.1 disabled"
+        sed 's/^/    /' /tmp/aya-tool.err 2>/dev/null || true
+        rm -f "$VMLINUX_OUT"
+    fi
+fi
+export PHASE_631_STATUS
+
 H "Building amwall-ebpf (slow — pulls aya-ebpf, rebuilds core)"
 INFO "Expect 2-5 minutes the first time."
-if (cd linux/amwall-ebpf && cargo build --release 2>&1 | sed 's/^/    /'); then
+INFO "Cargo features: ${EBPF_CARGO_FEATURES:-<none>}"
+if (cd linux/amwall-ebpf && cargo build --release $EBPF_CARGO_FEATURES 2>&1 | sed 's/^/    /'); then
     EBPF_BIN="$REPO_DIR/linux/amwall-ebpf/target/bpfel-unknown-none/release/amwall-ebpf"
     if [ ! -f "$EBPF_BIN" ]; then
         WARN "BPF ELF not produced at expected path: $EBPF_BIN"
@@ -4718,6 +4819,11 @@ cat <<EOF
     - 6.1   ✓ foundation: QMainWindow + tray + close-to-tray
     - 6.2   ✓ status dashboard + DbusClient + real File/View/Help menus
     - 6.3   ✓ connect-prompt dialog (per-comm Allow/Block, whole-app wildcards)
+    - 6.3.1 ${PHASE_631_STATUS:-?} BPF walks task->group_leader->comm so
+            Firefox's per-thread DNS Resolver #N collapses to one "firefox"
+            prompt. Requires aya-tool + /sys/kernel/btf/vmlinux to generate
+            src/vmlinux.rs at build time. Falls back to per-thread comm if
+            either is missing — see "Cargo features:" line in the build phase.
     - 6.4   ✓ User Rules tab + Rule editor (Edit menu restored)
     - 6.4.1 ✓ IPv6 default-deny via parallel RULES_V6 BPF map
     - 6.5   ✓ Connections tab (live /proc/net/tcp + tcp6; refresh every 5s)
@@ -4725,13 +4831,6 @@ cat <<EOF
     - 6.7   — Apps tab + App Properties dialog
     - 6.8   — Settings dialog (8-page QNotebook); restores Settings menu
     - 6.9   — i18n (rust_i18n locales/*.toml); Blocklist menu lands here
-
-  6.3.1 (queued) — BPF reads task->group_leader->comm so multi-thread
-                   apps (Firefox DNS Resolver #N) collapse to one prompt
-                   instead of one per thread name. Needs aya-tool to
-                   generate vmlinux.rs from /sys/kernel/btf/vmlinux —
-                   aya-tool is now installed at setup time but the BPF
-                   walk itself is its own iteration.
 
   6.5.1 (queued) — Per-process resolution on the Connections tab.
                    Walk /proc/<pid>/fd/* and map socket inodes back
