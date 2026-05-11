@@ -1536,7 +1536,9 @@ write_file linux/amwall-gui-qt/src/dbusclient.h <<'EOF'
 #pragma once
 
 #include <QDateTime>
+#include <QDBusArgument>
 #include <QList>
+#include <QMetaType>
 #include <QObject>
 #include <QString>
 
@@ -1548,6 +1550,17 @@ struct RuleEntry {
     QString action;  // "allow" or "deny"
     ushort  port;
 };
+Q_DECLARE_METATYPE(RuleEntry)
+
+// Free-function streaming operators — registered with the D-Bus
+// metatype system in DbusClient's ctor. Once registered, Qt can
+// (un)marshal QList<RuleEntry> directly via operator>> on a
+// QDBusArgument with no manual beginArray/beginStructure dance.
+// The manual dance triggers "QDBusArgument: write from a read-only
+// object" warnings (because the value-copy hits non-const overloads)
+// and eventually corrupts libdbus state into a struct/basic mismatch.
+QDBusArgument& operator<<(QDBusArgument &arg, const RuleEntry &e);
+const QDBusArgument& operator>>(const QDBusArgument &arg, RuleEntry &e);
 
 class DbusClient : public QObject {
     Q_OBJECT
@@ -1619,13 +1632,36 @@ write_file linux/amwall-gui-qt/src/dbusclient.cpp <<'EOF'
 #include <QDBusConnection>
 #include <QDBusError>
 #include <QDBusMessage>
+#include <QDBusMetaType>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDebug>
 #include <QTimer>
 
+QDBusArgument& operator<<(QDBusArgument &arg, const RuleEntry &e) {
+    // Wire order MUST match the daemon's interface:
+    //   List() returns a(ssqs) — (comm, ip, port, action)
+    arg.beginStructure();
+    arg << e.comm << e.ip << e.port << e.action;
+    arg.endStructure();
+    return arg;
+}
+
+const QDBusArgument& operator>>(const QDBusArgument &arg, RuleEntry &e) {
+    arg.beginStructure();
+    arg >> e.comm >> e.ip >> e.port >> e.action;
+    arg.endStructure();
+    return arg;
+}
+
 DbusClient::DbusClient(QObject *parent) : QObject(parent) {
+    // Register custom marshallers ONCE per process. qDBusRegisterMetaType
+    // is idempotent but cheap-redundant; we still only get one DbusClient
+    // per process so this is fine.
+    qDBusRegisterMetaType<RuleEntry>();
+    qDBusRegisterMetaType<QList<RuleEntry>>();
+
     m_timer = new QTimer(this);
     connect(m_timer, &QTimer::timeout, this, &DbusClient::refresh);
     subscribeSignals();
@@ -1764,10 +1800,14 @@ bool DbusClient::pingDaemon(QString *errOut) {
 
 bool DbusClient::listRules(QList<RuleEntry> *out, QString *errOut) {
     // org.amwall.Daemon1.List() returns a(ssqs) — array of
-    // (comm, ip, port, action) tuples. We unpack via QDBusArgument
-    // without registering custom marshallers so nothing leaks into
-    // global state. Each tuple becomes a RuleEntry the GUI can
-    // search (PromptCoordinator) and render (Dashboard / 6.4).
+    // (comm, ip, port, action) tuples. Demarshalled via the
+    // RuleEntry operator>> registered with qDBusRegisterMetaType
+    // in the ctor. The previous manual beginArray/beginStructure
+    // pattern on a value-copy of QDBusArgument warned
+    // "QDBusArgument: write from a read-only object" on every
+    // refresh tick and corrupted libdbus state badly enough to
+    // crash with "type struct 114 not a basic type" after enough
+    // accumulated bad reads.
     auto bus = QDBusConnection::systemBus();
     auto msg = QDBusMessage::createMethodCall(
         QStringLiteral("org.amwall.Daemon1"),
@@ -1782,25 +1822,26 @@ bool DbusClient::listRules(QList<RuleEntry> *out, QString *errOut) {
     if (reply.arguments().isEmpty()) {
         return true;  // empty list, leave *out as-is
     }
-    QVariant first = reply.arguments().first();
+    const QVariant first = reply.arguments().first();
+
+    // Path 1: the bus marshaller already converted the wire to our
+    // registered QList<RuleEntry> type — no QDBusArgument needed.
+    if (first.canConvert<QList<RuleEntry>>()) {
+        *out = first.value<QList<RuleEntry>>();
+        return true;
+    }
+
+    // Path 2: the value is still a raw QDBusArgument (typical for
+    // complex types). Stream into a QList — operator>> on QList
+    // uses our registered RuleEntry operator>>.
     if (!first.canConvert<QDBusArgument>()) {
         if (errOut) *errOut = QStringLiteral("List() returned unexpected type");
         return false;
     }
-    QDBusArgument arg = first.value<QDBusArgument>();
-    if (arg.currentType() != QDBusArgument::ArrayType) {
-        if (errOut) *errOut = QStringLiteral("List() did not return an array");
-        return false;
-    }
-    arg.beginArray();
-    while (!arg.atEnd()) {
-        arg.beginStructure();
-        RuleEntry e;
-        arg >> e.comm >> e.ip >> e.port >> e.action;
-        arg.endStructure();
-        out->append(e);
-    }
-    arg.endArray();
+    const QDBusArgument arg = first.value<QDBusArgument>();
+    QList<RuleEntry> list;
+    arg >> list;
+    *out = list;
     return true;
 }
 EOF
