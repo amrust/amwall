@@ -1180,7 +1180,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets DBus Network)
 
 # AMWALL_VERSION is baked into the binary so --version and the About
 # box show the same string the .deb is built with. Bumped per phase.
-add_compile_definitions(AMWALL_VERSION="0.1.0+phase6.7a")
+add_compile_definitions(AMWALL_VERSION="0.1.0+phase6.8")
 
 add_executable(amwall-gui
     src/main.cpp
@@ -1204,6 +1204,8 @@ add_executable(amwall-gui
     src/packetslogtab.h
     src/appstab.cpp
     src/appstab.h
+    src/settingsdialog.cpp
+    src/settingsdialog.h
 )
 
 target_link_libraries(amwall-gui PRIVATE
@@ -1229,6 +1231,7 @@ write_file linux/amwall-gui-qt/src/main.cpp <<'EOF'
 //   --help,    -h    print usage and exit
 
 #include <QApplication>
+#include <QSettings>
 
 #include <cstdio>
 #include <cstring>
@@ -1274,7 +1277,12 @@ int main(int argc, char *argv[]) {
     app.setQuitOnLastWindowClosed(false);
 
     MainWindow w;
-    w.show();
+    // Settings → general/startMinimized: skip the initial show() so the
+    // tray icon is the only visible artifact. The user can still get
+    // the window via tray click or "View → Show window".
+    if (!QSettings().value("general/startMinimized", false).toBool()) {
+        w.show();
+    }
 
     return app.exec();
 }
@@ -1326,6 +1334,7 @@ private slots:
     void onShowHide();
     void onQuit();
     void onAbout();
+    void onSettings();          // File > Settings — opens preferences dialog
     void onAlwaysOnTopToggled(bool on);
     void onDbusStateChanged();
     void onAddRuleFromMenu();   // Edit > Add Rule — switches to User Rules tab
@@ -1367,6 +1376,7 @@ write_file linux/amwall-gui-qt/src/mainwindow.cpp <<'EOF'
 #include "dbusclient.h"
 #include "packetslogtab.h"
 #include "promptcoordinator.h"
+#include "settingsdialog.h"
 #include "userrulestab.h"
 
 #include <QAction>
@@ -1459,6 +1469,11 @@ void MainWindow::setupMenuBar() {
     refresh->setShortcut(QKeySequence(QKeySequence::Refresh));  // F5
     refresh->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     connect(refresh, &QAction::triggered, m_dbus, &DbusClient::refresh);
+    file->addSeparator();
+    auto *settings = file->addAction(tr("&Settings..."));
+    settings->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Comma));
+    settings->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    connect(settings, &QAction::triggered, this, &MainWindow::onSettings);
     file->addSeparator();
     auto *quit = file->addAction(tr("&Quit"));
     quit->setShortcut(QKeySequence::Quit);  // Ctrl+Q
@@ -1563,6 +1578,19 @@ void MainWindow::onShowHide() {
 }
 
 void MainWindow::onQuit() {
+    // Settings → general/confirmQuit guards accidental Ctrl+Q.
+    // Default off so existing muscle memory still works.
+    if (QSettings().value("general/confirmQuit", false).toBool()) {
+        const auto ans = QMessageBox::question(
+            this, tr("Quit amwall?"),
+            tr("Quitting will stop the GUI. The amwall-daemon keeps "
+               "enforcing rules in the background regardless — restart "
+               "the GUI later with <code>amwall-gui</code> or the desktop "
+               "entry."),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (ans != QMessageBox::Yes) return;
+    }
     QApplication::quit();
 }
 
@@ -1595,6 +1623,19 @@ void MainWindow::onAlwaysOnTopToggled(bool on) {
     setWindowFlags(f);
     QSettings().setValue("view/alwaysOnTop", on);
     show();  // re-realize the window with the new flags
+}
+
+void MainWindow::onSettings() {
+    // Modal so we can re-sync the View → Always on top checkmark on
+    // close (the dialog writes the QSettings key; we mirror back into
+    // the menu state if the user toggled it from inside the dialog).
+    SettingsDialog dlg(this);
+    if (dlg.exec() == QDialog::Accepted) {
+        const bool aot = QSettings().value("view/alwaysOnTop", false).toBool();
+        if (m_alwaysOnTopAction && m_alwaysOnTopAction->isChecked() != aot) {
+            m_alwaysOnTopAction->setChecked(aot);  // fires onAlwaysOnTopToggled
+        }
+    }
 }
 
 void MainWindow::onDbusStateChanged() {
@@ -2316,7 +2357,9 @@ write_file linux/amwall-gui-qt/src/connectprompt.cpp <<'EOF'
 #include <QIcon>
 #include <QLabel>
 #include <QPushButton>
+#include <QSettings>
 #include <QStyle>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
@@ -2471,6 +2514,18 @@ ConnectPromptDialog::ConnectPromptDialog(uint pid,
 
     connect(allowBtn, &QPushButton::clicked, this, [this]{ emitOnce(Allow); });
     connect(blockBtn, &QPushButton::clicked, this, [this]{ emitOnce(Block); });
+
+    // Settings → notifications/autoBlockSec: if non-zero, auto-Block
+    // after N seconds of no user click. Matches simplewall's
+    // "Notifications timeout". Safe default action since amwall is
+    // default-deny — picking Block on inactivity is the safe choice.
+    const int autoBlockSec = QSettings().value(
+        QStringLiteral("notifications/autoBlockSec"), 0).toInt();
+    if (autoBlockSec > 0) {
+        QTimer::singleShot(autoBlockSec * 1000, this, [this]{
+            if (!m_emitted) emitOnce(Block);
+        });
+    }
 }
 
 void ConnectPromptDialog::emitOnce(Decision d) {
@@ -3594,6 +3649,7 @@ write_file linux/amwall-gui-qt/src/packetslogtab.cpp <<'EOF'
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QTableWidget>
@@ -3641,7 +3697,11 @@ PacketsLogTab::PacketsLogTab(DbusClient *dbus, QWidget *parent)
     header->addWidget(m_filter, 1);
 
     m_showLocal = new QCheckBox(tr("Show local (AF_UNIX)"), this);
-    m_showLocal->setChecked(false);
+    // Default driven by Settings → Notifications → "Show local
+    // (AF_UNIX) events in Packets log on startup". Off by default
+    // because AF_UNIX is high-volume desktop IPC noise.
+    m_showLocal->setChecked(
+        QSettings().value("packetslog/showLocal", false).toBool());
     header->addWidget(m_showLocal);
 
     m_pause = new QPushButton(
@@ -3814,6 +3874,284 @@ void PacketsLogTab::applyVisibility() {
             if (!hit) hide = true;
         }
         m_table->setRowHidden(r, hide);
+    }
+}
+EOF
+
+
+# ─── Phase 6.8 — Settings dialog ────────────────────────────────────
+
+write_file linux/amwall-gui-qt/src/settingsdialog.h <<'EOF'
+// SettingsDialog — Phase 6.8. Two-pane preferences window. Left:
+// QListWidget of page names. Right: QStackedWidget of page bodies.
+// Matches simplewall's IDD_SETTINGS modal layout.
+//
+// Persists via QSettings (already used for window geometry and
+// Always-on-top). All keys are documented next to the spinbox /
+// checkbox creating them so the QSettings file is greppable.
+//
+// Apply semantics: changes take effect on OK / Apply. Cancel restores
+// nothing — there's no undo stack, but the only side-effect of an
+// accidental change is the next prompt timing differently, which is
+// recoverable by re-opening Settings.
+
+#pragma once
+
+#include <QDialog>
+
+class QCheckBox;
+class QDialogButtonBox;
+class QListWidget;
+class QSpinBox;
+class QStackedWidget;
+
+class SettingsDialog : public QDialog {
+    Q_OBJECT
+
+public:
+    explicit SettingsDialog(QWidget *parent = nullptr);
+
+private slots:
+    void onAccepted();   // OK / Apply → write QSettings
+    void onPageChanged(int row);
+
+private:
+    void buildGeneralPage();
+    void buildNotificationsPage();
+    void buildAboutPage();
+    void loadFromSettings();
+
+    QListWidget    *m_pageList = nullptr;
+    QStackedWidget *m_pages    = nullptr;
+    QDialogButtonBox *m_buttons = nullptr;
+
+    // General page widgets
+    QCheckBox *m_alwaysOnTop   = nullptr;
+    QCheckBox *m_startMinimized = nullptr;
+    QCheckBox *m_confirmQuit   = nullptr;
+
+    // Notifications page widgets
+    QSpinBox  *m_autoBlockSec  = nullptr;   // 0 = never auto-block
+    QCheckBox *m_showLocalByDefault = nullptr;
+};
+EOF
+
+write_file linux/amwall-gui-qt/src/settingsdialog.cpp <<'EOF'
+#include "settingsdialog.h"
+
+#include <QApplication>
+#include <QCheckBox>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QListWidget>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSettings>
+#include <QSpinBox>
+#include <QStackedWidget>
+#include <QStyle>
+#include <QVBoxLayout>
+
+#ifndef AMWALL_VERSION
+#define AMWALL_VERSION "0.0.0-dev"
+#endif
+
+namespace {
+constexpr const char *KEY_ALWAYS_ON_TOP    = "view/alwaysOnTop";
+constexpr const char *KEY_START_MINIMIZED  = "general/startMinimized";
+constexpr const char *KEY_CONFIRM_QUIT     = "general/confirmQuit";
+constexpr const char *KEY_AUTOBLOCK_SEC    = "notifications/autoBlockSec";
+constexpr const char *KEY_PACKETS_SHOWLOCAL = "packetslog/showLocal";
+}  // namespace
+
+SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
+    setWindowTitle(tr("amwall — Settings"));
+    resize(640, 420);
+    setModal(true);
+
+    auto *outer = new QVBoxLayout(this);
+    auto *body  = new QHBoxLayout;
+
+    // ─── Left pane: page list ─────────────────────────────────────
+    m_pageList = new QListWidget(this);
+    m_pageList->setFixedWidth(160);
+    m_pageList->addItem(tr("General"));
+    m_pageList->addItem(tr("Notifications"));
+    m_pageList->addItem(tr("About"));
+    body->addWidget(m_pageList);
+
+    // ─── Right pane: stacked pages ────────────────────────────────
+    m_pages = new QStackedWidget(this);
+    buildGeneralPage();
+    buildNotificationsPage();
+    buildAboutPage();
+    body->addWidget(m_pages, 1);
+
+    outer->addLayout(body, 1);
+
+    // ─── Buttons ──────────────────────────────────────────────────
+    m_buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel
+        | QDialogButtonBox::Apply,
+        this);
+    outer->addWidget(m_buttons);
+
+    connect(m_pageList, &QListWidget::currentRowChanged,
+            this, &SettingsDialog::onPageChanged);
+    connect(m_buttons, &QDialogButtonBox::accepted,
+            this, &SettingsDialog::onAccepted);
+    connect(m_buttons, &QDialogButtonBox::rejected,
+            this, &SettingsDialog::reject);
+    connect(m_buttons->button(QDialogButtonBox::Apply),
+            &QPushButton::clicked,
+            this, &SettingsDialog::onAccepted);
+
+    loadFromSettings();
+    m_pageList->setCurrentRow(0);
+}
+
+void SettingsDialog::buildGeneralPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QFormLayout(page);
+    layout->setHorizontalSpacing(16);
+    layout->setVerticalSpacing(10);
+
+    m_alwaysOnTop = new QCheckBox(tr("Keep main window on top"), page);
+    m_alwaysOnTop->setToolTip(
+        tr("Mirrors the View → Always on top menu item. Setting key:\n"
+           "%1").arg(QString::fromLatin1(KEY_ALWAYS_ON_TOP)));
+    layout->addRow(m_alwaysOnTop);
+
+    m_startMinimized = new QCheckBox(tr("Start minimized to tray"), page);
+    m_startMinimized->setToolTip(
+        tr("When amwall-gui starts, hide the main window and only show\n"
+           "the tray icon. The window is still reachable via tray-icon\n"
+           "click or 'View → Show window'."));
+    layout->addRow(m_startMinimized);
+
+    m_confirmQuit = new QCheckBox(tr("Confirm before quitting"), page);
+    m_confirmQuit->setToolTip(
+        tr("Show a 'Are you sure?' prompt when Quit is invoked.\n"
+           "Closing the window via X always goes to tray — Quit is the\n"
+           "only path that actually terminates the GUI process."));
+    layout->addRow(m_confirmQuit);
+
+    layout->addRow(new QLabel(
+        tr("<i><small>Daemon-side settings (default-deny, rule\n"
+           "path, BPF features) live in /etc/amwall/ and are\n"
+           "edited by hand or via amwall-cli, not this dialog.</small></i>"),
+        page));
+
+    m_pages->addWidget(page);
+}
+
+void SettingsDialog::buildNotificationsPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QFormLayout(page);
+    layout->setHorizontalSpacing(16);
+    layout->setVerticalSpacing(10);
+
+    m_autoBlockSec = new QSpinBox(page);
+    m_autoBlockSec->setRange(0, 600);
+    m_autoBlockSec->setSpecialValueText(tr("Never (wait for click)"));
+    m_autoBlockSec->setSuffix(tr(" seconds"));
+    m_autoBlockSec->setToolTip(
+        tr("If a connect-prompt dialog goes un-clicked for this long,\n"
+           "auto-Block as the safe default. 0 = wait forever (current\n"
+           "behavior). Matches simplewall's 'Notifications timeout'."));
+    layout->addRow(tr("Auto-block unattended prompts after:"),
+                   m_autoBlockSec);
+
+    m_showLocalByDefault = new QCheckBox(
+        tr("Show local (AF_UNIX) events in Packets log on startup"), page);
+    m_showLocalByDefault->setToolTip(
+        tr("AF_UNIX sockets are the IPC mechanism every desktop\n"
+           "process uses; the log will be very noisy. Default off."));
+    layout->addRow(m_showLocalByDefault);
+
+    layout->addRow(new QLabel(
+        tr("<i><small>Connect-prompt window position and modality\n"
+           "are not user-tunable — they're hard-coded to centred\n"
+           "and Qt::WindowStaysOnTopHint so the prompt can't get\n"
+           "buried under MainWindow.</small></i>"),
+        page));
+
+    m_pages->addWidget(page);
+}
+
+void SettingsDialog::buildAboutPage() {
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+
+    auto *icon = new QLabel(page);
+    icon->setPixmap(style()->standardIcon(QStyle::SP_ComputerIcon)
+                        .pixmap(64, 64));
+    icon->setAlignment(Qt::AlignCenter);
+    layout->addWidget(icon);
+
+    auto *heading = new QLabel(
+        tr("<h2 style='margin: 4px 0;'>amwall</h2>"), page);
+    heading->setAlignment(Qt::AlignCenter);
+    heading->setTextFormat(Qt::RichText);
+    layout->addWidget(heading);
+
+    auto *version = new QLabel(
+        tr("<p style='margin: 0;'>Version <code>%1</code><br>"
+           "Qt <code>%2</code></p>")
+            .arg(QString::fromUtf8(AMWALL_VERSION))
+            .arg(QString::fromLatin1(qVersion())),
+        page);
+    version->setAlignment(Qt::AlignCenter);
+    version->setTextFormat(Qt::RichText);
+    layout->addWidget(version);
+
+    auto *desc = new QPlainTextEdit(page);
+    desc->setReadOnly(true);
+    desc->setPlainText(tr(
+        "amwall is a Linux re-implementation of the Win32 firewall of "
+        "the same name, built on BPF LSM enforcement (kernel-side) and "
+        "a Rust daemon + Qt6 GUI talking over D-Bus (user-space).\n\n"
+        "License: MIT.\n"
+        "Source: https://github.com/amrust/amwall\n"
+        "Upstream reference: henrypp/simplewall v3.8.7.\n\n"
+        "Daemon status, rule path, BPF feature flags, and recent\n"
+        "ConnectAttempt events: see the Overview tab and the daemon\n"
+        "journal (journalctl -u amwall-daemon)."));
+    layout->addWidget(desc, 1);
+
+    m_pages->addWidget(page);
+}
+
+void SettingsDialog::loadFromSettings() {
+    QSettings s;
+    m_alwaysOnTop->setChecked(
+        s.value(KEY_ALWAYS_ON_TOP, false).toBool());
+    m_startMinimized->setChecked(
+        s.value(KEY_START_MINIMIZED, false).toBool());
+    m_confirmQuit->setChecked(
+        s.value(KEY_CONFIRM_QUIT, false).toBool());
+    m_autoBlockSec->setValue(
+        s.value(KEY_AUTOBLOCK_SEC, 0).toInt());
+    m_showLocalByDefault->setChecked(
+        s.value(KEY_PACKETS_SHOWLOCAL, false).toBool());
+}
+
+void SettingsDialog::onAccepted() {
+    QSettings s;
+    s.setValue(KEY_ALWAYS_ON_TOP,    m_alwaysOnTop->isChecked());
+    s.setValue(KEY_START_MINIMIZED,  m_startMinimized->isChecked());
+    s.setValue(KEY_CONFIRM_QUIT,     m_confirmQuit->isChecked());
+    s.setValue(KEY_AUTOBLOCK_SEC,    m_autoBlockSec->value());
+    s.setValue(KEY_PACKETS_SHOWLOCAL, m_showLocalByDefault->isChecked());
+    s.sync();
+    accept();
+}
+
+void SettingsDialog::onPageChanged(int row) {
+    if (row >= 0 && row < m_pages->count()) {
+        m_pages->setCurrentIndex(row);
     }
 }
 EOF
@@ -6013,7 +6351,11 @@ cat <<EOF
     - 6.7   ✓ Apps tab — scans /usr/share/applications (+ flatpak +
             snap + ~/.local). Right-click → allow/deny wildcard rule
             for the comm; or "Show in User Rules" to jump tabs.
-    - 6.8   — Settings dialog (8-page QNotebook); restores Settings menu
+    - 6.8   ✓ Settings dialog (General / Notifications / About pages)
+            wired from File → Settings (Ctrl+,). Persisted prefs:
+            startMinimized, confirmQuit, autoBlockSec (prompt timeout),
+            packetslog/showLocal default. Always-on-top mirrored back
+            to the View menu after each dialog accept.
     - 6.9   — i18n (rust_i18n locales/*.toml); Blocklist menu lands here
 
   Plan Phase 5b — Windows-side wiring of amwall-core — still needs a
