@@ -1673,14 +1673,22 @@ struct RuleEntry {
 };
 Q_DECLARE_METATYPE(RuleEntry)
 
-// Returned by DbusClient::resolveSockets — keyed by socket inode in
-// the resulting QHash. Defined outside the class so moc doesn't try
-// to parse it as a signal/slot declaration inside a slots: section.
+// Returned by DbusClient::resolveSockets — one row per resolved
+// inode. Defined outside the class so moc doesn't try to parse it
+// as a signal/slot declaration inside a slots: section. The inode
+// field carries the key (we deserialize into QList<SocketProc> then
+// build the hash on the GUI side); pid/comm/exe are the resolved
+// process info. Wire type: (tuss) = (uint64, uint32, str, str).
 struct SocketProc {
+    quint64 inode = 0;
     uint    pid = 0;
     QString comm;
     QString exe;
 };
+Q_DECLARE_METATYPE(SocketProc)
+
+QDBusArgument& operator<<(QDBusArgument &arg, const SocketProc &e);
+const QDBusArgument& operator>>(const QDBusArgument &arg, SocketProc &e);
 
 // Free-function streaming operators — registered with the D-Bus
 // metatype system in DbusClient's ctor. Once registered, Qt can
@@ -1804,12 +1812,30 @@ const QDBusArgument& operator>>(const QDBusArgument &arg, RuleEntry &e) {
     return arg;
 }
 
+QDBusArgument& operator<<(QDBusArgument &arg, const SocketProc &e) {
+    // Wire order MUST match the daemon's ResolveSockets return type:
+    //   a(tuss) — (inode_u64, pid_u32, comm, exe)
+    arg.beginStructure();
+    arg << e.inode << e.pid << e.comm << e.exe;
+    arg.endStructure();
+    return arg;
+}
+
+const QDBusArgument& operator>>(const QDBusArgument &arg, SocketProc &e) {
+    arg.beginStructure();
+    arg >> e.inode >> e.pid >> e.comm >> e.exe;
+    arg.endStructure();
+    return arg;
+}
+
 DbusClient::DbusClient(QObject *parent) : QObject(parent) {
     // Register custom marshallers ONCE per process. qDBusRegisterMetaType
     // is idempotent but cheap-redundant; we still only get one DbusClient
     // per process so this is fine.
     qDBusRegisterMetaType<RuleEntry>();
     qDBusRegisterMetaType<QList<RuleEntry>>();
+    qDBusRegisterMetaType<SocketProc>();
+    qDBusRegisterMetaType<QList<SocketProc>>();
 
     m_timer = new QTimer(this);
     connect(m_timer, &QTimer::timeout, this, &DbusClient::refresh);
@@ -1893,40 +1919,36 @@ DbusClient::resolveSockets(const QList<quint64> &inodes) {
     QHash<quint64, SocketProc> out;
     if (inodes.isEmpty()) return out;
 
-    QDBusInterface iface(QStringLiteral("org.amwall.Daemon1"),
-                         QStringLiteral("/org/amwall/Daemon1"),
-                         QStringLiteral("org.amwall.Daemon1"),
-                         QDBusConnection::systemBus());
-    if (!iface.isValid()) return out;
+    // Use QDBusMessage directly (not QDBusInterface::call) so we can
+    // return a QVariant whose held QDBusArgument is in proper read
+    // mode — going through QDBusReply<QDBusArgument> hands you a copy
+    // that hits the "write from a read-only object" footgun and
+    // corrupts libdbus on the next beginStructure call.
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("/org/amwall/Daemon1"),
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("ResolveSockets"));
+    msg.setArguments({ QVariant::fromValue(inodes) });
 
-    QList<quint64> in = inodes;
-    QDBusReply<QDBusArgument> reply = iface.call(
-        QStringLiteral("ResolveSockets"), QVariant::fromValue(in));
-    if (!reply.isValid()) {
-        qWarning() << "ResolveSockets failed:" << reply.error().message();
+    QDBusMessage reply = QDBusConnection::systemBus().call(
+        msg, QDBus::Block, 5000);
+    if (reply.type() != QDBusMessage::ReplyMessage) {
+        qWarning() << "ResolveSockets failed:" << reply.errorMessage();
         return out;
     }
+    const QList<QVariant> outArgs = reply.arguments();
+    if (outArgs.isEmpty()) return out;
 
-    // Returned wire type: a(uuss). The marshaller hands us a
-    // QDBusArgument whose container is an array of structs; we walk
-    // it manually because the per-element type isn't a metatyped
-    // struct (no QObject), just a plain (u64, u32, str, str) tuple.
-    QDBusArgument arg = reply.value();
-    arg.beginArray();
-    while (!arg.atEnd()) {
-        arg.beginStructure();
-        quint64 inode = 0;
-        uint pid = 0;
-        QString comm, exe;
-        arg >> inode >> pid >> comm >> exe;
-        arg.endStructure();
-        SocketProc sp;
-        sp.pid = pid;
-        sp.comm = comm;
-        sp.exe = exe;
-        out.insert(inode, sp);
+    // Use the registered SocketProc / QList<SocketProc> streamers
+    // (defined above) — they handle const-correct demarshalling and
+    // don't trip the read-only-copy bug.
+    const QDBusArgument arg = outArgs.first().value<QDBusArgument>();
+    QList<SocketProc> list;
+    arg >> list;
+    for (const SocketProc &sp : list) {
+        out.insert(sp.inode, sp);
     }
-    arg.endArray();
     return out;
 }
 
