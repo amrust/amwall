@@ -4317,27 +4317,61 @@ VMLINUX_OUT="$REPO_DIR/linux/amwall-ebpf/src/vmlinux.rs"
 rm -f "$VMLINUX_OUT"  # always start fresh — stale file from prior run + fresh install failure would build with bad bindings
 PHASE_631_STATUS="✗ (disabled — falling back to per-thread comm)"
 
-if ! command -v aya-tool >/dev/null 2>&1; then
+# aya-tool calls bpftool as a subprocess to dump BTF, then bindgens
+# the resulting C header. On Mint/Ubuntu, linux-tools-common installs
+# bpftool at /usr/sbin/bpftool which isn't on every shell's PATH for
+# non-login sessions, so the spawn fails with ENOENT and aya-tool
+# returns "bindgen failed: No such file or directory". Find it
+# ourselves and ensure it's on PATH for the duration of the call.
+BPFTOOL_PATH=""
+for candidate in \
+    "$(command -v bpftool 2>/dev/null)" \
+    /usr/sbin/bpftool \
+    /usr/bin/bpftool \
+    "/usr/lib/linux-tools/$(uname -r)/bpftool" \
+    /usr/lib/linux-tools-common/bpftool; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        BPFTOOL_PATH="$candidate"
+        break
+    fi
+done
+
+if [ -z "$BPFTOOL_PATH" ]; then
+    WARN "bpftool not found anywhere — apt linux-tools-* may not have installed it."
+    WARN "6.3.1 disabled. Try: sudo apt install linux-tools-\$(uname -r) linux-tools-common"
+elif ! command -v aya-tool >/dev/null 2>&1; then
     WARN "aya-tool not installed — 6.3.1 disabled (per-thread comm)."
 elif [ ! -r /sys/kernel/btf/vmlinux ]; then
     WARN "/sys/kernel/btf/vmlinux not readable — 6.3.1 disabled."
 else
-    INFO "Running: aya-tool generate task_struct"
-    if aya-tool generate task_struct >"$VMLINUX_OUT" 2>/tmp/aya-tool.err; then
-        BYTES=$(wc -c <"$VMLINUX_OUT")
-        if [ "$BYTES" -gt 1000 ]; then
-            OK "vmlinux.rs generated (${BYTES} bytes) — 6.3.1 enabled"
-            EBPF_CARGO_FEATURES="--features task_walk"
-            PHASE_631_STATUS="✓ enabled (vmlinux.rs ${BYTES} bytes)"
+    INFO "Using bpftool: $BPFTOOL_PATH"
+    # Confirm bpftool actually works against the BTF blob before
+    # invoking aya-tool — a wrapper that exits non-zero (e.g. kernel
+    # version mismatch) would otherwise leave aya-tool's error obscure.
+    if ! "$BPFTOOL_PATH" btf dump file /sys/kernel/btf/vmlinux format c >/tmp/btf-smoke.h 2>/tmp/btf-smoke.err; then
+        WARN "bpftool btf dump failed — 6.3.1 disabled:"
+        sed 's/^/    /' /tmp/btf-smoke.err 2>/dev/null || true
+    else
+        rm -f /tmp/btf-smoke.h
+        # Prepend bpftool's dir so aya-tool's subprocess spawn finds it.
+        EXPORT_PATH="$(dirname "$BPFTOOL_PATH"):$PATH"
+        INFO "Running: aya-tool generate task_struct"
+        if PATH="$EXPORT_PATH" aya-tool generate task_struct >"$VMLINUX_OUT" 2>/tmp/aya-tool.err; then
+            BYTES=$(wc -c <"$VMLINUX_OUT")
+            if [ "$BYTES" -gt 1000 ]; then
+                OK "vmlinux.rs generated (${BYTES} bytes) — 6.3.1 enabled"
+                EBPF_CARGO_FEATURES="--features task_walk"
+                PHASE_631_STATUS="✓ enabled (vmlinux.rs ${BYTES} bytes)"
+            else
+                WARN "vmlinux.rs only ${BYTES} bytes — looks empty, disabling 6.3.1"
+                sed 's/^/    /' /tmp/aya-tool.err 2>/dev/null || true
+                rm -f "$VMLINUX_OUT"
+            fi
         else
-            WARN "vmlinux.rs only ${BYTES} bytes — looks empty, disabling 6.3.1"
-            cat /tmp/aya-tool.err 2>/dev/null | sed 's/^/    /' || true
+            WARN "aya-tool generate failed — 6.3.1 disabled:"
+            sed 's/^/    /' /tmp/aya-tool.err 2>/dev/null || true
             rm -f "$VMLINUX_OUT"
         fi
-    else
-        WARN "aya-tool generate failed — 6.3.1 disabled"
-        sed 's/^/    /' /tmp/aya-tool.err 2>/dev/null || true
-        rm -f "$VMLINUX_OUT"
     fi
 fi
 export PHASE_631_STATUS
