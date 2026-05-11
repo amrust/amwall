@@ -1578,10 +1578,12 @@ public:
     QDateTime lastRefresh() const    { return m_lastRefresh; }
     QString lastError() const        { return m_lastError; }
 
-    // True if rules.toml already contains an entry for this 4-tuple
-    // (any action). Used by PromptCoordinator to suppress prompts
-    // for things the user already decided about.
-    bool hasRule(const QString &comm, const QString &ip, ushort port) const;
+    // True if rules.toml already contains ANY rule (allow or deny,
+    // any IP, any port) for this comm. Once the user has decided
+    // about an app — even just one specific destination — we don't
+    // re-prompt. Matches simplewall/Win32 amwall semantics: the
+    // prompt is per-process, not per-(process, ip, port).
+    bool hasAnyRuleFor(const QString &comm) const;
 
     void startAutoRefresh(int intervalMs);
     void stopAutoRefresh();
@@ -1736,9 +1738,9 @@ void DbusClient::refresh() {
     emit stateChanged();
 }
 
-bool DbusClient::hasRule(const QString &comm, const QString &ip, ushort port) const {
+bool DbusClient::hasAnyRuleFor(const QString &comm) const {
     for (const RuleEntry &r : m_rules) {
-        if (r.comm == comm && r.ip == ip && r.port == port) return true;
+        if (r.comm == comm) return true;
     }
     return false;
 }
@@ -2045,9 +2047,12 @@ EOF
 
 write_file linux/amwall-gui-qt/src/connectprompt.h <<'EOF'
 // ConnectPromptDialog — modeless top-level dialog shown when an
-// unknown app tries to connect (default-deny in BPF). User picks
-// Allow / Block / Dismiss; Allow + Block persist via DbusClient,
-// Dismiss does nothing (BPF will re-deny + re-prompt on retry).
+// unknown process tries to connect (default-deny in BPF). User
+// picks Allow or Block — both persist a WHOLE-APP wildcard rule
+// (comm, "any", 0) so subsequent connects from the same comm are
+// silently allowed/denied. Closing the window via the title-bar X
+// is treated as Block (matches simplewall/Win32 amwall: anything
+// not explicitly allowed is denied).
 //
 // Top-level (no parent), Qt::Window, WindowStaysOnTopHint so it
 // doesn't get buried under MainWindow or other apps. Centred on
@@ -2066,7 +2071,7 @@ class ConnectPromptDialog : public QDialog {
     Q_OBJECT
 
 public:
-    enum Decision { Allow, Block, Dismiss };
+    enum Decision { Allow, Block };
 
     ConnectPromptDialog(uint pid,
                         const QString &comm,
@@ -2153,7 +2158,7 @@ ConnectPromptDialog::ConnectPromptDialog(uint pid,
         new QLabel(QStringLiteral("<code>%1</code> (pid %2)")
                        .arg(comm.toHtmlEscaped())
                        .arg(pid), this));
-    details->addRow(tr("Destination:"),
+    details->addRow(tr("First destination:"),
         new QLabel(QStringLiteral("<code>%1:%2</code>")
                        .arg(ip.toHtmlEscaped())
                        .arg(port), this));
@@ -2163,12 +2168,16 @@ ConnectPromptDialog::ConnectPromptDialog(uint pid,
     outer->addLayout(details);
 
     // Italic + small for visual hierarchy; full text color for WCAG
-    // contrast (palette(mid) was hard to read on the Mint theme).
+    // contrast. Wording reflects whole-app semantics: Allow / Block
+    // persist a wildcard rule for the comm, not just this one
+    // destination. Closing the window = Block (default-deny stance).
     auto *hint = new QLabel(
         tr("<i style='font-size: small;'>"
-           "Allow saves a rule for this exact destination. Block saves "
-           "a deny rule (silent next time). Dismiss does nothing — the "
-           "app will re-prompt on retry.</i>"),
+           "Allow lets <b>%1</b> connect to anywhere. Block silently "
+           "denies all of its connections. Closing this window also "
+           "blocks. Use the User Rules tab later to fine-tune by "
+           "destination or port.</i>")
+            .arg(comm.toHtmlEscaped()),
         this);
     hint->setTextFormat(Qt::RichText);
     hint->setWordWrap(true);
@@ -2178,23 +2187,20 @@ ConnectPromptDialog::ConnectPromptDialog(uint pid,
     auto *buttons = new QHBoxLayout;
     buttons->addStretch(1);
 
-    auto *dismissBtn = new QPushButton(tr("&Dismiss"), this);
-    auto *blockBtn   = new QPushButton(
+    auto *blockBtn = new QPushButton(
         style()->standardIcon(QStyle::SP_DialogNoButton),
         tr("&Block"), this);
-    auto *allowBtn   = new QPushButton(
+    auto *allowBtn = new QPushButton(
         style()->standardIcon(QStyle::SP_DialogApplyButton),
         tr("&Allow"), this);
     allowBtn->setDefault(true);
 
-    buttons->addWidget(dismissBtn);
     buttons->addWidget(blockBtn);
     buttons->addWidget(allowBtn);
     outer->addLayout(buttons);
 
-    connect(allowBtn,   &QPushButton::clicked, this, [this]{ emitOnce(Allow); });
-    connect(blockBtn,   &QPushButton::clicked, this, [this]{ emitOnce(Block); });
-    connect(dismissBtn, &QPushButton::clicked, this, [this]{ emitOnce(Dismiss); });
+    connect(allowBtn, &QPushButton::clicked, this, [this]{ emitOnce(Allow); });
+    connect(blockBtn, &QPushButton::clicked, this, [this]{ emitOnce(Block); });
 }
 
 void ConnectPromptDialog::emitOnce(Decision d) {
@@ -2205,11 +2211,14 @@ void ConnectPromptDialog::emitOnce(Decision d) {
 }
 
 void ConnectPromptDialog::closeEvent(QCloseEvent *event) {
-    // Window close (X button) counts as Dismiss. Guard with m_emitted
-    // so we don't double-fire when emitOnce already called close().
+    // Window close (X button) counts as Block — anything not
+    // explicitly allowed is denied (matches simplewall/Win32 amwall:
+    // there's no "ignore this and re-prompt" path). Guard with
+    // m_emitted so we don't double-fire when emitOnce already
+    // called close().
     if (!m_emitted) {
         m_emitted = true;
-        emit decided(Dismiss);
+        emit decided(Block);
     }
     event->accept();
 }
@@ -2217,19 +2226,25 @@ EOF
 
 write_file linux/amwall-gui-qt/src/promptcoordinator.h <<'EOF'
 // PromptCoordinator — receives ConnectAttempt signals from
-// DbusClient, filters them down to "this is something the user
+// DbusClient, filters them down to "this is a process the user
 // hasn't decided about yet", queues, and shows one
 // ConnectPromptDialog at a time.
 //
+// Per-comm dedup (matches simplewall/Win32 amwall): one prompt per
+// process, not per (process, ip, port). On Allow/Block we persist
+// a WHOLE-APP wildcard rule (comm, "any", 0). Future connects from
+// the same comm hit the BPF wildcard lookup and never raise a signal
+// here.
+//
 // Filters applied:
-//   • action == "deny" only           (allows are silent)
-//   • ip is real IPv4 (not "(family=N)" — AF_UNIX etc. don't go through
-//     the user's network policy)
-//   • !DbusClient::hasRule()          (already in rules.toml)
-//   • not already pending             (per-tuple dedup)
-//   • not recently decided            (60-second cooldown — by then
-//                                      the daemon has reloaded and
-//                                      hasRule will catch it)
+//   • action == "deny" only             (allows are silent)
+//   • ip is real IPv4 (not "(family=N)" — AF_UNIX etc. don't go
+//     through the user's network policy)
+//   • !DbusClient::hasAnyRuleFor(comm)  (already in rules.toml)
+//   • comm not already pending          (per-comm dedup)
+//   • comm not recently decided         (60-sec cooldown — by then
+//                                        the daemon has reloaded and
+//                                        hasAnyRuleFor will catch it)
 //
 // Emits pendingCountChanged so the Dashboard widget can show the
 // "Pending prompts: N" row. When the queue drains, count goes to 0.
@@ -2248,27 +2263,11 @@ write_file linux/amwall-gui-qt/src/promptcoordinator.h <<'EOF'
 class DbusClient;
 class QWidget;
 
-struct PromptKey {
-    QString comm;
-    QString ip;
-    ushort  port;
-    bool operator==(const PromptKey &o) const {
-        return comm == o.comm && ip == o.ip && port == o.port;
-    }
-};
-// Qt6 qHash returns size_t (Qt5 used uint). Mix the three fields
-// with rotated seeds so similar tuples don't collide.
-inline size_t qHash(const PromptKey &k, size_t seed = 0) noexcept {
-    return qHash(k.comm, seed)
-         ^ qHash(k.ip, seed ^ 0x9e3779b9u)
-         ^ size_t(k.port);
-}
-
 struct PromptRequest {
     uint    pid;
     QString comm;
-    QString ip;
-    ushort  port;
+    QString ip;     // first observed destination (informational)
+    ushort  port;   // first observed port (informational)
 };
 
 class PromptCoordinator : public QObject {
@@ -2299,8 +2298,8 @@ private:
     QWidget    *m_anchor;  // for raising MainWindow when prompt fires
 
     QQueue<PromptRequest>     m_queue;
-    QSet<PromptKey>           m_pending;   // in queue or showing
-    QHash<PromptKey, QDateTime> m_decided; // 60-sec cooldown
+    QSet<QString>             m_pending;   // comms currently in queue or showing
+    QHash<QString, QDateTime> m_decided;   // comm → decision time (60-sec cooldown)
     PromptRequest             m_currentReq{};
     ConnectPromptDialog      *m_current = nullptr;
 };
@@ -2335,25 +2334,22 @@ void PromptCoordinator::onConnectAttempt(uint pid, const QString &comm,
     // prompt the user for things they can't meaningfully allow.
     if (ip.startsWith(QStringLiteral("(family="))) return;
 
-    // Filter 3: already a rule for this 4-tuple → daemon should
-    // have allowed/denied silently per the rule. If we still got a
-    // deny signal, it's because the explicit rule IS deny — user
-    // already decided.
-    if (m_dbus->hasRule(comm, ip, port)) return;
+    // Filter 3: any rule for this comm exists → user already decided
+    // about this app (whole-app semantics; matches Win32 amwall).
+    if (m_dbus->hasAnyRuleFor(comm)) return;
 
-    PromptKey key{comm, ip, port};
-
-    // Filter 4: dedup against currently-pending and recently-decided.
+    // Filter 4: dedup against currently-pending and recently-decided
+    // BY COMM ONLY — one prompt per process, regardless of how many
+    // different (ip, port) pairs the process tries.
     pruneRecent();
-    if (m_pending.contains(key)) return;
-    if (m_decided.contains(key)) return;
+    if (m_pending.contains(comm)) return;
+    if (m_decided.contains(comm)) return;
 
     enqueue({pid, comm, ip, port});
 }
 
 void PromptCoordinator::enqueue(const PromptRequest &req) {
-    PromptKey key{req.comm, req.ip, req.port};
-    m_pending.insert(key);
+    m_pending.insert(req.comm);
     m_queue.enqueue(req);
     notifyCount();
     if (!m_current) processNext();
@@ -2382,22 +2378,26 @@ void PromptCoordinator::processNext() {
 }
 
 void PromptCoordinator::onDecision(ConnectPromptDialog::Decision d) {
-    PromptKey key{m_currentReq.comm, m_currentReq.ip, m_currentReq.port};
-    m_pending.remove(key);
+    const QString comm = m_currentReq.comm;
+    m_pending.remove(comm);
+
+    // Persist a WHOLE-APP wildcard rule, not a per-(comm, ip, port)
+    // rule. ip="any" (BPF dest_ip4=0) + port=0 hits step 4 of the
+    // BPF wildcard lookup, covering every future IPv4 connect from
+    // this comm. Dismiss is no longer a thing — closing the dialog
+    // counts as Block (default-deny stance, matches Win32 amwall).
+    static const QString kAnyIp = QStringLiteral("any");
+    static constexpr ushort kAnyPort = 0;
 
     switch (d) {
     case ConnectPromptDialog::Allow:
-        m_dbus->allow(m_currentReq.comm, m_currentReq.ip, m_currentReq.port);
-        m_decided.insert(key, QDateTime::currentDateTime());
+        m_dbus->allow(comm, kAnyIp, kAnyPort);
         break;
     case ConnectPromptDialog::Block:
-        m_dbus->deny(m_currentReq.comm, m_currentReq.ip, m_currentReq.port);
-        m_decided.insert(key, QDateTime::currentDateTime());
-        break;
-    case ConnectPromptDialog::Dismiss:
-        // No rule persisted; let the next BPF deny re-fire the prompt.
+        m_dbus->deny(comm, kAnyIp, kAnyPort);
         break;
     }
+    m_decided.insert(comm, QDateTime::currentDateTime());
 
     if (m_current) {
         m_current->deleteLater();
