@@ -2818,11 +2818,14 @@ write_file linux/amwall-gui-qt/src/userrulestab.cpp <<'EOF'
 
 #include "ruleeditor.h"
 
+#include <QAbstractItemView>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -2903,11 +2906,36 @@ void UserRulesTab::onDbusStateChanged() {
 }
 
 void UserRulesTab::rebuildTable() {
-    // QTableWidget loses selection on row-count changes; selection
-    // preservation across rebuilds is a 6.5+ polish item if anyone
-    // wants it. For now the user re-clicks if the rebuild interrupts.
+    // Capture the (comm, ip, port) of whichever row is selected so we
+    // can re-select the same logical rule after the rebuild. Without
+    // this the table loses focus on every DbusClient::stateChanged —
+    // which fires on every Allow click — and the user sees the
+    // highlight jump as new rows are inserted, breaking right-click /
+    // Edit / Delete flows in progress.
+    QString prevComm, prevIp;
+    int prevPort = -1;
+    {
+        const auto sel = m_table->selectionModel()
+                              ? m_table->selectionModel()->selectedRows()
+                              : QModelIndexList{};
+        if (!sel.isEmpty()) {
+            int r = sel.first().row();
+            if (auto *it = m_table->item(r, 0)) prevComm = it->text();
+            if (auto *it = m_table->item(r, 2)) prevIp = it->text();
+            if (auto *it = m_table->item(r, 3)) {
+                bool ok = false;
+                int p = it->text().toInt(&ok);
+                prevPort = ok ? p : 0;  // text "any" → 0 sentinel
+            }
+        }
+    }
+
     const auto &rules = m_dbus->rules();
     m_table->setSortingEnabled(false);
+    // Suppress intermediate currentItemChanged / itemSelectionChanged
+    // emissions; the rebuild creates and destroys rows in bulk and any
+    // signal that fires mid-way sees half-populated state.
+    QSignalBlocker block(m_table);
     m_table->setRowCount(rules.size());
     int row = 0;
     for (const RuleEntry &r : rules) {
@@ -2933,7 +2961,31 @@ void UserRulesTab::rebuildTable() {
     m_table->setSortingEnabled(true);
     m_countLabel->setText(QStringLiteral("(%1)").arg(rules.size()));
 
-    // After rebuild, no row is selected; refresh button enabled state.
+    // Re-select the row whose (comm, ip, port) matches what was
+    // selected before. Done AFTER setSortingEnabled re-applies the
+    // sort so we find the rule at its final visual row, not the
+    // pre-sort index. If the rule was deleted out from under us
+    // (e.g. user picked Delete and we're rebuilding for that very
+    // delete) we land with no selection — onSelectionChanged disables
+    // the Edit/Delete buttons.
+    if (!prevComm.isEmpty()) {
+        const int rowCount = m_table->rowCount();
+        for (int r = 0; r < rowCount; ++r) {
+            auto *ci = m_table->item(r, 0);
+            auto *ii = m_table->item(r, 2);
+            auto *pi = m_table->item(r, 3);
+            if (!ci || !ii || !pi) continue;
+            if (ci->text() != prevComm) continue;
+            if (ii->text() != prevIp) continue;
+            bool ok = false;
+            int p = pi->text().toInt(&ok);
+            int rulePort = ok ? p : 0;
+            if (prevPort >= 0 && rulePort != prevPort) continue;
+            m_table->selectRow(r);
+            m_table->scrollToItem(ci, QAbstractItemView::EnsureVisible);
+            break;
+        }
+    }
     onSelectionChanged();
 }
 
@@ -3305,7 +3357,7 @@ use aya_ebpf::helpers::bpf_get_current_task;
 #[cfg(feature = "task_walk")]
 #[allow(non_camel_case_types, non_snake_case, dead_code, unused_imports,
         non_upper_case_globals, deref_nullptr, unnecessary_transmutes,
-        clippy::all)]
+        improper_ctypes_definitions, clippy::all)]
 mod vmlinux;
 
 const AF_INET: u16 = 2;
