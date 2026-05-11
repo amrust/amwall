@@ -1129,10 +1129,11 @@ set(CMAKE_AUTORCC ON)
 
 # Qt6 from qt6-base-dev on Mint 22 / Ubuntu 24.04. Components needed
 # so far: Widgets (QMainWindow, menus, tray, dashboard) + DBus
-# (talking to amwall-daemon over the system bus). Phases 6.5+ may
-# add Concurrent (background worker for /proc walks) and
+# (talking to amwall-daemon over the system bus) + Network
+# (QHostAddress for IPv4 validation in the rule editor). Phases 6.5+
+# may add Concurrent (background worker for /proc walks) and
 # LinguistTools (translations).
-find_package(Qt6 REQUIRED COMPONENTS Widgets DBus)
+find_package(Qt6 REQUIRED COMPONENTS Widgets DBus Network)
 
 # AMWALL_VERSION is baked into the binary so --version and the About
 # box show the same string the .deb is built with. Bumped per phase.
@@ -1159,6 +1160,7 @@ add_executable(amwall-gui
 target_link_libraries(amwall-gui PRIVATE
     Qt6::Widgets
     Qt6::DBus
+    Qt6::Network
 )
 EOF
 
@@ -2630,7 +2632,8 @@ void RuleEditorDialog::validateAndAccept() {
         m_ip->setFocus();
         return;
     }
-    if (!ipv.compare(QStringLiteral("any"), Qt::CaseInsensitive) == 0) {
+    if (ipv.compare(QStringLiteral("any"), Qt::CaseInsensitive) != 0) {
+        // Not "any" — must be a valid IPv4 dotted-quad string.
         QHostAddress addr(ipv);
         if (addr.isNull() || addr.protocol() != QAbstractSocket::IPv4Protocol) {
             QMessageBox::warning(this, tr("Invalid rule"),
