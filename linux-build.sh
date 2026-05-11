@@ -148,6 +148,36 @@ set -u
 set -o pipefail
 # Don't set -e — explicit error handling per step.
 
+# ─── Auto-log the entire run to a paste-friendly file ───────────────
+#
+# Everything from this point on (stdout + stderr) is teed to
+# $AMWALL_LOG_FILE (default: ~/amwall-run.log). The user can
+# `cat $AMWALL_LOG_FILE` once the script finishes and paste the
+# whole thing back to Claude for triage.
+#
+# Knobs:
+#   AMWALL_NO_LOG=1        disable teeing entirely
+#   AMWALL_LOG_FILE=path   override destination (default ~/amwall-run.log)
+#   AMWALL_LOGGING_ACTIVE  internal — set by us so a re-exec doesn't
+#                          stack a second tee on top of the first
+#
+# fd 3 / fd 4 hold the original stdout / stderr so the trailing
+# `exec bash` (interactive shell drop-in) is NOT captured in the log
+# — we restore them right before exec bash. tee gets EOF when its
+# stdin pipe is closed and exits cleanly.
+if [ -z "${AMWALL_LOGGING_ACTIVE:-}" ] && [ "${AMWALL_NO_LOG:-0}" != "1" ]; then
+    AMWALL_LOG_FILE="${AMWALL_LOG_FILE:-$HOME/amwall-run.log}"
+    : > "$AMWALL_LOG_FILE"  # truncate any prior log
+    export AMWALL_LOGGING_ACTIVE=1
+    export AMWALL_LOG_FILE
+    exec 3>&1 4>&2
+    exec > >(tee "$AMWALL_LOG_FILE") 2>&1
+    printf '\n'
+    printf 'amwall: logging this run to %s\n' "$AMWALL_LOG_FILE"
+    printf '         when done:  cat %s   # paste back to Claude\n' "$AMWALL_LOG_FILE"
+    printf '\n'
+fi
+
 # ─── Helpers ────────────────────────────────────────────────────────
 
 BAR='────────────────────────────────────────────────────────────'
@@ -3623,5 +3653,20 @@ cat <<EOF
   Windows checkout (root Cargo.toml + src/rules/*.rs adoption + MSI
   validation). Lands as a separate commit from a Windows session.
 EOF
+
+# ─── Drop the tee before handing the user an interactive shell ──────
+#
+# Restore stdout/stderr to the original terminal fds so anything the
+# user types/runs at the bash prompt is NOT appended to the run log.
+# The tee subprocess receives EOF on its stdin pipe and exits.
+if [ -n "${AMWALL_LOGGING_ACTIVE:-}" ]; then
+    cat <<EOF
+
+  ─── Run log saved to: $AMWALL_LOG_FILE ───
+  Send to Claude:
+      cat $AMWALL_LOG_FILE
+EOF
+    exec 1>&3 2>&4 3>&- 4>&-
+fi
 
 exec bash
