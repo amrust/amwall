@@ -3916,12 +3916,23 @@ if [ -n "${AMWALL_LOGGING_ACTIVE:-}" ]; then
         fi
     fi
 
-    printf '  Select all three blocks (RUN LOG / GUI LOG / COREDUMP, if present)\n'
-    printf '  and paste to Claude. Or run any of:\n'
+    printf '  Paste blocks above to Claude. Other handy commands:\n'
     printf '      cat %s\n' "$AMWALL_LOG_FILE"
     printf '      cat %s\n' "$GUI_RUNTIME_LOG"
     printf '      coredumpctl info amwall-gui\n'
     printf '\n'
 fi
 
-exec bash
+# ─── Live tail of the GUI log so we see crashes/warnings in real time ──
+# Replaces the previous `exec bash` shell drop. The user interacts with
+# the GUI (clicks Allow on prompts, etc.) and sees Qt warnings + DBus
+# errors stream here as they happen. Ctrl-C exits back to the original
+# shell. To re-enter the repo afterwards: cd ~/amwall.
+GUI_RUNTIME_LOG="${GUI_RUNTIME_LOG:-/tmp/amwall-gui.log}"
+# Make sure the file exists so tail -F doesn't complain on cold launches
+# where amwall-gui hasn't written anything yet.
+[ -e "$GUI_RUNTIME_LOG" ] || : > "$GUI_RUNTIME_LOG"
+printf '════════════════════════════════════════════════════════════\n'
+printf '  ▶ live tail of %s   (Ctrl-C to exit)\n' "$GUI_RUNTIME_LOG"
+printf '════════════════════════════════════════════════════════════\n'
+exec tail -F "$GUI_RUNTIME_LOG"
