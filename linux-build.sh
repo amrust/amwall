@@ -312,6 +312,27 @@ else
     cargo install cargo-deb
 fi
 
+# aya-tool: generates Rust bindings for kernel types from /sys/kernel/btf/vmlinux.
+# amwall-ebpf's build.rs uses it to emit a vmlinux.rs containing task_struct so
+# the BPF program can read task->group_leader->comm (Phase 6.3.1 — collapses
+# Firefox's per-thread "DNS Resolver #N" comms back to the binary name).
+#
+# Failure here is non-fatal: amwall-ebpf's build.rs detects the absence and
+# falls back to the per-thread bpf_get_current_comm() — same behavior as
+# pre-6.3.1, just one prompt per thread name as a degraded-mode UX.
+INFO "Ensuring aya-tool (BTF→Rust bindings for task_struct walk)..."
+if command -v aya-tool >/dev/null 2>&1; then
+    OK "aya-tool already installed"
+else
+    INFO "Building aya-tool via cargo install (2-3 min)..."
+    if cargo install --locked aya-tool 2>&1 | sed 's/^/    /'; then
+        OK "aya-tool installed"
+    else
+        WARN "aya-tool install failed — BPF will use per-thread comm fallback"
+        WARN "(multi-thread apps like Firefox will spam prompts; not blocking)"
+    fi
+fi
+
 # ─── 3. GRUB — enable bpf in the LSM list ───────────────────────────
 
 H "GRUB — enable bpf in the LSM list"
@@ -2988,6 +3009,20 @@ pub struct RuleKey {
     pub _pad: u16,
 }
 
+// Phase 6.4.1: parallel map for IPv6 lookups. dest_ip6 is the raw
+// 16-byte address (network byte order, same as in_addr6). Wildcard
+// slot is dest_ip6=[0; 16] + dest_port=0 — populated by the daemon
+// whenever the user sets a rule with ip="any" so that wildcard
+// allows/denies cover both IPv4 and IPv6 destinations.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RuleKeyV6 {
+    pub comm: [u8; 16],
+    pub dest_ip6: [u8; 16],
+    pub dest_port: u16,
+    pub _pad: [u8; 6],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RuleValue {
@@ -3000,6 +3035,9 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
 #[map]
 static RULES: HashMap<RuleKey, RuleValue> = HashMap::with_max_entries(1024, 0);
+
+#[map]
+static RULES_V6: HashMap<RuleKeyV6, RuleValue> = HashMap::with_max_entries(1024, 0);
 
 #[repr(C)]
 struct SockAddrFamily { family: u16 }
@@ -3071,15 +3109,23 @@ fn decide(ctx: &LsmContext) -> u8 {
             }
         }
         AF_INET6 => {
-            if let Ok(a) = unsafe {
+            // Phase 6.4.1: IPv6 is now subject to the same default-deny
+            // policy as IPv4. lookup_v6 does the parallel 4-way wildcard
+            // search against RULES_V6; the daemon mirrors "any" rules
+            // into both maps so a single user click covers v4 + v6.
+            match unsafe {
                 bpf_probe_read_kernel::<SockAddrIn6>(addr_ptr as *const SockAddrIn6)
             } {
-                unsafe {
-                    (*event).dest_port = u16::from_be(a.port);
-                    (*event).dest_ip6 = a.addr;
+                Ok(a) => {
+                    let port_host = u16::from_be(a.port);
+                    unsafe {
+                        (*event).dest_port = port_host;
+                        (*event).dest_ip6 = a.addr;
+                    }
+                    lookup_v6(comm, a.addr, port_host)
                 }
+                Err(_) => ACT_ALLOW,
             }
-            ACT_ALLOW
         }
         _ => ACT_ALLOW,
     };
@@ -3101,6 +3147,23 @@ fn lookup(comm: [u8; 16], ip: u32, port: u16) -> u8 {
 
     let k4 = RuleKey { comm, dest_ip4: 0, dest_port: 0, _pad: 0 };
     if let Some(v) = unsafe { RULES.get(&k4) } { return v.action; }
+
+    ACT_DENY
+}
+
+fn lookup_v6(comm: [u8; 16], ip6: [u8; 16], port: u16) -> u8 {
+    // 4-way wildcard, mirroring `lookup` for IPv4.
+    let k1 = RuleKeyV6 { comm, dest_ip6: ip6, dest_port: port, _pad: [0; 6] };
+    if let Some(v) = unsafe { RULES_V6.get(&k1) } { return v.action; }
+
+    let k2 = RuleKeyV6 { comm, dest_ip6: ip6, dest_port: 0, _pad: [0; 6] };
+    if let Some(v) = unsafe { RULES_V6.get(&k2) } { return v.action; }
+
+    let k3 = RuleKeyV6 { comm, dest_ip6: [0; 16], dest_port: port, _pad: [0; 6] };
+    if let Some(v) = unsafe { RULES_V6.get(&k3) } { return v.action; }
+
+    let k4 = RuleKeyV6 { comm, dest_ip6: [0; 16], dest_port: 0, _pad: [0; 6] };
+    if let Some(v) = unsafe { RULES_V6.get(&k4) } { return v.action; }
 
     ACT_DENY
 }
@@ -3263,6 +3326,18 @@ struct RuleKey {
     _pad: u16,
 }
 
+// Phase 6.4.1: parallel IPv6 BPF map. Mirror layout of amwall-ebpf's
+// RuleKeyV6. The daemon installs a v6 wildcard entry for every "any"
+// rule so a single user click covers v4 + v6 destinations.
+#[repr(C)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct RuleKeyV6 {
+    comm: [u8; 16],
+    dest_ip6: [u8; 16],
+    dest_port: u16,
+    _pad: [u8; 6],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct RuleValue {
@@ -3271,15 +3346,19 @@ struct RuleValue {
 }
 
 unsafe impl Pod for RuleKey {}
+unsafe impl Pod for RuleKeyV6 {}
 unsafe impl Pod for RuleValue {}
 
-type RulesMap = AyaHashMap<MapData, RuleKey, RuleValue>;
-type RulesShared = Arc<Mutex<RulesMap>>;
+type RulesMap   = AyaHashMap<MapData, RuleKey,   RuleValue>;
+type RulesV6Map = AyaHashMap<MapData, RuleKeyV6, RuleValue>;
+type RulesShared   = Arc<Mutex<RulesMap>>;
+type RulesV6Shared = Arc<Mutex<RulesV6Map>>;
 
 // ─── D-Bus interface ────────────────────────────────────────────────
 
 struct AmwallDaemon {
-    rules: RulesShared,
+    rules:    RulesShared,
+    rules_v6: RulesV6Shared,
     rules_path: PathBuf,
 }
 
@@ -3371,17 +3450,37 @@ impl AmwallDaemon {
         // a reload moments later — harmless thanks to the diff-style
         // reload that doesn't transiently empty the map.)
         let rule = Rule { comm, ip, port, action };
+        let val = RuleValue { action: rule.action_byte(), _pad: [0; 7] };
+
+        // IPv4 map (always — "any" is dest_ip4=0 which is the v4 wildcard).
         let key = RuleKey {
             comm: rule.comm_bytes(),
             dest_ip4: rule.ip4()?,
             dest_port: rule.port,
             _pad: 0,
         };
-        let val = RuleValue { action: rule.action_byte(), _pad: [0; 7] };
+        {
+            let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
+            map.insert(key, val, 0)
+                .with_context(|| format!("inserting v4 via D-Bus: {:?}", rule))?;
+        }
 
-        let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
-        map.insert(key, val, 0)
-            .with_context(|| format!("inserting via D-Bus: {:?}", rule))?;
+        // Phase 6.4.1: also mirror "any" rules into the v6 wildcard
+        // slot. Specific IPv6 addresses aren't supported via the
+        // current rules.toml schema (no v6 parsing path) — only "any"
+        // touches the v6 map for now. Future: add a v6 ip parsing
+        // branch alongside ip4().
+        if rule.ip == "any" {
+            let key6 = RuleKeyV6 {
+                comm: rule.comm_bytes(),
+                dest_ip6: [0; 16],
+                dest_port: rule.port,
+                _pad: [0; 6],
+            };
+            let mut map6 = self.rules_v6.lock().map_err(|_| anyhow::anyhow!("rules_v6 mutex poisoned"))?;
+            map6.insert(key6, val, 0)
+                .with_context(|| format!("inserting v6 wildcard via D-Bus: {:?}", rule))?;
+        }
         Ok(())
     }
 
@@ -3398,6 +3497,7 @@ impl AmwallDaemon {
 
         // Best-effort BPF map removal. Need a Rule to compute the key
         // — action doesn't matter for keying.
+        let was_any = ip == "any";
         let dummy = Rule { comm, ip, port, action: Action::Allow };
         let key = RuleKey {
             comm: dummy.comm_bytes(),
@@ -3405,8 +3505,21 @@ impl AmwallDaemon {
             dest_port: dummy.port,
             _pad: 0,
         };
-        let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
-        let _ = map.remove(&key);
+        {
+            let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
+            let _ = map.remove(&key);
+        }
+        // Mirror the "any" → v6-wildcard pairing on delete.
+        if was_any {
+            let key6 = RuleKeyV6 {
+                comm: dummy.comm_bytes(),
+                dest_ip6: [0; 16],
+                dest_port: dummy.port,
+                _pad: [0; 6],
+            };
+            let mut map6 = self.rules_v6.lock().map_err(|_| anyhow::anyhow!("rules_v6 mutex poisoned"))?;
+            let _ = map6.remove(&key6);
+        }
         Ok(())
     }
 }
@@ -3474,12 +3587,13 @@ async fn check_polkit(
 
 async fn run_dbus_server(
     rules: RulesShared,
+    rules_v6: RulesV6Shared,
     rules_path: PathBuf,
     mut event_rx: mpsc::UnboundedReceiver<ConnectEvent>,
 ) -> Result<()> {
     eprintln!("amwall-daemon: D-Bus thread starting (system bus)");
 
-    let iface = AmwallDaemon { rules, rules_path };
+    let iface = AmwallDaemon { rules, rules_v6, rules_path };
     let conn = zbus::connection::Builder::system()
         .context("system bus connection (is dbus running?)")?
         .name("org.amwall.Daemon1")
@@ -3550,30 +3664,38 @@ fn main() -> Result<()> {
         .context("RULES map is not a HashMap")?;
     let rules: RulesShared = Arc::new(Mutex::new(rules_raw));
 
+    // Phase 6.4.1: parallel IPv6 rule map.
+    let rules_v6_raw_map = ebpf.take_map("RULES_V6").context("RULES_V6 map missing")?;
+    let rules_v6_raw: RulesV6Map = AyaHashMap::try_from(rules_v6_raw_map)
+        .context("RULES_V6 map is not a HashMap")?;
+    let rules_v6: RulesV6Shared = Arc::new(Mutex::new(rules_v6_raw));
+
     let events_map = ebpf.take_map("EVENTS").context("EVENTS map missing")?;
     let mut events = RingBuf::try_from(events_map).context("EVENTS map is not a ring buffer")?;
 
-    // Initial rule load.
+    // Initial rule load — populates both v4 and v6 maps from rules.toml.
     {
         let mut map = rules.lock().unwrap();
-        match reload_rules(&mut map, &rules_path) {
+        let mut map_v6 = rules_v6.lock().unwrap();
+        match reload_rules(&mut map, &mut map_v6, &rules_path) {
             Ok(n) => eprintln!("amwall-daemon: loaded {} rules from {}", n, rules_path.display()),
             Err(e) => eprintln!("amwall-daemon: rules load failed: {}", e),
         }
     }
-    eprintln!("amwall-daemon: enforcement ON. Default-deny on IPv4. Ctrl-C to exit.");
+    eprintln!("amwall-daemon: enforcement ON. Default-deny on IPv4 + IPv6. Ctrl-C to exit.");
 
     // Channel from BPF drain → D-Bus signal emit.
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ConnectEvent>();
 
-    let dbus_rules = rules.clone();
-    let dbus_path = rules_path.clone();
+    let dbus_rules    = rules.clone();
+    let dbus_rules_v6 = rules_v6.clone();
+    let dbus_path     = rules_path.clone();
     let dbus_thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokio runtime build");
-        if let Err(e) = rt.block_on(run_dbus_server(dbus_rules, dbus_path, event_rx)) {
+        if let Err(e) = rt.block_on(run_dbus_server(dbus_rules, dbus_rules_v6, dbus_path, event_rx)) {
             eprintln!("amwall-daemon: D-Bus server stopped:");
             for cause in e.chain() {
                 eprintln!("  caused by: {}", cause);
@@ -3603,11 +3725,13 @@ fn main() -> Result<()> {
         let now = mtime_of(&rules_path);
         if now != last_mtime {
             let mut map = rules.lock().unwrap();
-            match reload_rules(&mut map, &rules_path) {
+            let mut map_v6 = rules_v6.lock().unwrap();
+            match reload_rules(&mut map, &mut map_v6, &rules_path) {
                 Ok(n) => eprintln!("amwall-daemon: rules reloaded ({} entries)", n),
                 Err(e) => eprintln!("amwall-daemon: rules reload FAILED: {}", e),
             }
             drop(map);
+            drop(map_v6);
             last_mtime = now;
         }
 
@@ -3637,47 +3761,70 @@ fn mtime_of(path: &Path) -> SystemTime {
 // Diff-style reload: compute desired state, then add/remove rather
 // than clear-then-insert. Avoids the brief "default-deny everything"
 // window during reload (kernel could see an empty RULES map otherwise).
-fn reload_rules(map: &mut RulesMap, path: &Path) -> Result<usize> {
+//
+// Phase 6.4.1: also maintains RULES_V6. For each rule with ip="any"
+// we install a v6 wildcard slot too, so a single user rule covers
+// both address families. Specific IPv6 addresses aren't yet
+// representable in rules.toml — only the "any" wildcard reaches v6.
+fn reload_rules(map: &mut RulesMap, map_v6: &mut RulesV6Map, path: &Path) -> Result<usize> {
     let cfg = RulesFile::load(path)?;
 
-    let mut desired: StdHashMap<RuleKey, RuleValue> = StdHashMap::new();
+    let mut desired_v4: StdHashMap<RuleKey, RuleValue> = StdHashMap::new();
+    let mut desired_v6: StdHashMap<RuleKeyV6, RuleValue> = StdHashMap::new();
     for r in &cfg.rules {
+        let val = RuleValue { action: r.action_byte(), _pad: [0; 7] };
         let key = RuleKey {
             comm: r.comm_bytes(),
             dest_ip4: r.ip4()?,
             dest_port: r.port,
             _pad: 0,
         };
-        let val = RuleValue { action: r.action_byte(), _pad: [0; 7] };
-        desired.insert(key, val);
+        desired_v4.insert(key, val);
+        if r.ip == "any" {
+            let key6 = RuleKeyV6 {
+                comm: r.comm_bytes(),
+                dest_ip6: [0; 16],
+                dest_port: r.port,
+                _pad: [0; 6],
+            };
+            desired_v6.insert(key6, val);
+        }
     }
 
-    let current: HashSet<RuleKey> = map.keys().filter_map(Result::ok).collect();
-
-    for k in &current {
-        if !desired.contains_key(k) {
+    let current_v4: HashSet<RuleKey> = map.keys().filter_map(Result::ok).collect();
+    for k in &current_v4 {
+        if !desired_v4.contains_key(k) {
             let _ = map.remove(k);
         }
     }
-    for (k, v) in &desired {
+    for (k, v) in &desired_v4 {
         map.insert(*k, *v, 0)?;
     }
 
-    Ok(desired.len())
+    let current_v6: HashSet<RuleKeyV6> = map_v6.keys().filter_map(Result::ok).collect();
+    for k in &current_v6 {
+        if !desired_v6.contains_key(k) {
+            let _ = map_v6.remove(k);
+        }
+    }
+    for (k, v) in &desired_v6 {
+        map_v6.insert(*k, *v, 0)?;
+    }
+
+    Ok(cfg.rules.len())
 }
 
 fn print_event(e: &ConnectEvent) {
     // Per-family tag so log readers can distinguish rule-driven
     // decisions from default-allow paths:
-    //   [ALLOW] / [DENY ]  — IPv4, the only family the BPF program
-    //                         actually evaluates rules for
-    //   [V6   ]            — IPv6, currently default-allowed by BPF
-    //                         (gap; queued as 6.4.1 IPv6 enforcement)
+    //   [ALLOW] / [DENY ]  — IPv4 OR IPv6, evaluated against rules.
+    //                        v6 has its own family-prefixed variant
+    //                        below so reads scan as "v4 vs v6 deny".
     //   [LOCAL]            — AF_UNIX / AF_NETLINK / etc. — local IPC,
-    //                         not a network policy concern (matches
-    //                         simplewall behavior on Windows)
+    //                        not a network policy concern (matches
+    //                        simplewall behavior on Windows).
     //   [USER ]            — appears separately from modify()/delete()
-    //                         when a user/CLI action persists a rule
+    //                        when a user/CLI action persists a rule.
     let comm = comm_str(&e.comm);
     let (tag, dest) = match e.family {
         AF_INET => {
@@ -3685,10 +3832,10 @@ fn print_event(e: &ConnectEvent) {
             let t = if e.action == ACT_ALLOW { "ALLOW" } else { "DENY " };
             (t, format!("{}:{}", Ipv4Addr::from(host), e.dest_port))
         }
-        AF_INET6 => (
-            "V6   ",
-            format!("[{}]:{}", Ipv6Addr::from(e.dest_ip6), e.dest_port),
-        ),
+        AF_INET6 => {
+            let t = if e.action == ACT_ALLOW { "V6 OK" } else { "V6 NO" };
+            (t, format!("[{}]:{}", Ipv6Addr::from(e.dest_ip6), e.dest_port))
+        }
         _ => (
             "LOCAL",
             format!("(family={})", e.family),
