@@ -2881,11 +2881,20 @@ UserRulesTab::UserRulesTab(DbusClient *dbus, QWidget *parent)
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSortingEnabled(true);
     m_table->verticalHeader()->setVisible(false);
-    m_table->horizontalHeader()->setStretchLastSection(false);
-    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    // Every column Interactive (user can drag any divider). The
+    // rightmost section auto-fills remaining viewport width via
+    // setStretchLastSection — that re-flows as the user drags the
+    // dividers to its left. Click any header cell to sort by that
+    // column; Qt persists the sort across rebuilds.
+    auto *hh = m_table->horizontalHeader();
+    hh->setSectionsClickable(true);
+    hh->setSortIndicatorShown(true);
+    hh->setSectionResizeMode(QHeaderView::Interactive);
+    hh->setStretchLastSection(true);
+    m_table->setColumnWidth(0, 240);  // Process (comm)
+    m_table->setColumnWidth(1, 90);   // Action
+    m_table->setColumnWidth(2, 220);  // Destination IP
+    // Port stretches to fill; user can drag column 2's right edge to shrink it.
     outer->addWidget(m_table, /*stretch=*/1);
 
     connect(m_table, &QTableWidget::itemSelectionChanged,
@@ -3317,13 +3326,18 @@ ConnectionsTab::ConnectionsTab(QWidget *parent) : QWidget(parent) {
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSortingEnabled(true);
     m_table->verticalHeader()->setVisible(false);
-    m_table->horizontalHeader()->setStretchLastSection(false);
-    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
-    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-    m_table->setColumnWidth(0, 220);
+    // All Interactive; last column (State) stretches to fill. Click
+    // header to sort. Default widths fit ~95% of real content.
+    auto *hh = m_table->horizontalHeader();
+    hh->setSectionsClickable(true);
+    hh->setSortIndicatorShown(true);
+    hh->setSectionResizeMode(QHeaderView::Interactive);
+    hh->setStretchLastSection(true);
+    m_table->setColumnWidth(0, 220);  // Process
+    m_table->setColumnWidth(1, 60);   // Proto
+    m_table->setColumnWidth(2, 200);  // Local
+    m_table->setColumnWidth(3, 200);  // Remote
+    // State stretches.
     outer->addWidget(m_table, 1);
 
     auto *hint = new QLabel(
@@ -3528,13 +3542,18 @@ PacketsLogTab::PacketsLogTab(DbusClient *dbus, QWidget *parent)
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSortingEnabled(false);  // chronological order matters here
     m_table->verticalHeader()->setVisible(false);
+    // Header not sortable on click since rows are time-ordered; all
+    // columns user-resizable; Destination stretches to fill.
     auto *hh = m_table->horizontalHeader();
-    hh->setSectionResizeMode(COL_TIME,    QHeaderView::ResizeToContents);
-    hh->setSectionResizeMode(COL_ACTION,  QHeaderView::ResizeToContents);
-    hh->setSectionResizeMode(COL_PROCESS, QHeaderView::Interactive);
-    hh->setSectionResizeMode(COL_FAMILY,  QHeaderView::ResizeToContents);
-    hh->setSectionResizeMode(COL_DEST,    QHeaderView::Stretch);
+    hh->setSectionsClickable(false);
+    hh->setSortIndicatorShown(false);
+    hh->setSectionResizeMode(QHeaderView::Interactive);
+    hh->setStretchLastSection(true);
+    m_table->setColumnWidth(COL_TIME,    90);
+    m_table->setColumnWidth(COL_ACTION,  80);
     m_table->setColumnWidth(COL_PROCESS, 220);
+    m_table->setColumnWidth(COL_FAMILY,  70);
+    // Destination stretches.
     outer->addWidget(m_table, 1);
 
     auto *hint = new QLabel(
@@ -3756,10 +3775,10 @@ write_file linux/amwall-gui-qt/src/appstab.cpp <<'EOF'
 #include <algorithm>
 
 namespace {
-constexpr int COL_NAME = 0;
-constexpr int COL_COMM = 1;
-constexpr int COL_EXEC = 2;
-constexpr int COL_RULES = 3;
+constexpr int COL_NAME  = 0;
+constexpr int COL_COMM  = 1;
+constexpr int COL_RULES = 2;
+constexpr int COL_EXEC  = 3;
 
 struct DesktopApp {
     QString name;
@@ -3880,20 +3899,31 @@ AppsTab::AppsTab(DbusClient *dbus, QWidget *parent)
     // ─── Table ────────────────────────────────────────────────────
     m_table = new QTableWidget(0, 4, this);
     m_table->setHorizontalHeaderLabels({
-        tr("Name"), tr("comm"), tr("Exec"), tr("Rules")
+        tr("Name"), tr("Process (comm)"), tr("Rules"), tr("Exec")
     });
+    // Header tooltip explains the comm column matches the kernel's
+    // 15-char TASK_COMM_NAME — same key the BPF rule map uses, so
+    // the user knows what "Process (comm)" semantically is.
+    m_table->horizontalHeaderItem(COL_COMM)->setToolTip(
+        tr("Kernel TASK_COMM_NAME — the 15-char basename of the\n"
+           "process binary that the BPF rule map matches against."));
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSortingEnabled(true);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
     m_table->verticalHeader()->setVisible(false);
+    // All Interactive (any divider draggable). Exec is last and
+    // stretches to fill — that's the data-heavy column.
     auto *hh = m_table->horizontalHeader();
-    hh->setSectionResizeMode(COL_NAME,  QHeaderView::Interactive);
-    hh->setSectionResizeMode(COL_COMM,  QHeaderView::ResizeToContents);
-    hh->setSectionResizeMode(COL_EXEC,  QHeaderView::Stretch);
-    hh->setSectionResizeMode(COL_RULES, QHeaderView::ResizeToContents);
-    m_table->setColumnWidth(COL_NAME, 220);
+    hh->setSectionsClickable(true);
+    hh->setSortIndicatorShown(true);
+    hh->setSectionResizeMode(QHeaderView::Interactive);
+    hh->setStretchLastSection(true);
+    m_table->setColumnWidth(COL_NAME,  240);
+    m_table->setColumnWidth(COL_COMM,  160);
+    m_table->setColumnWidth(COL_RULES,  60);
+    // Exec stretches.
     outer->addWidget(m_table, 1);
 
     auto *hint = new QLabel(
