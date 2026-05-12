@@ -12,6 +12,15 @@ linux/amwall-gui-qt/build/
 # kernel-version-specific, regenerated on every linux-build.sh run.
 linux/amwall-ebpf/src/vmlinux.rs
 
+# Phase 6.10: linux/vendor/ and linux/amwall-ebpf/vendor/ are
+# INTENTIONALLY TRACKED — they hold offline-cached crate sources so
+# `cargo build --frozen --offline` works on air-gapped boxes and the
+# build can't drift if a dep is yanked from crates.io. linux/Cargo.lock
+# and linux/amwall-ebpf/Cargo.lock are also tracked for the same
+# reason (frozen resolution). Do NOT add `vendor/` or `Cargo.lock`
+# here. Re-vendor with `cargo vendor --versioned-dirs vendor` in each
+# workspace dir whenever a Cargo.toml changes.
+
 # Bootstrap script's tee log + paste-back files used during dev iteration.
 amwall-run.log
 mintlog.txt

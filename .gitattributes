@@ -27,3 +27,12 @@ CMakeLists.txt   text eol=lf
 linux/amwall-daemon/debian/postinst  text eol=lf
 linux/amwall-daemon/debian/prerm     text eol=lf
 linux/amwall-daemon/debian/postrm    text eol=lf
+
+# Phase 6.10 — vendored crate sources. cargo's offline mode verifies
+# every vendored file byte-for-byte against .cargo-checksum.json, so
+# autocrlf-on-checkout would corrupt the checksums on a Windows
+# reclone (and silently break `--frozen --offline`). `-text` forces
+# git to treat the entire vendor tree as binary: no eol conversion,
+# byte-perfect on every platform.
+linux/vendor/**             -text
+linux/amwall-ebpf/vendor/** -text

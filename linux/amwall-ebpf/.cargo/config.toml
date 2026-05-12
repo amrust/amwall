@@ -1,5 +1,24 @@
+# BPF target + vendored-sources mode for the amwall-ebpf crate.
+#
+# [build] / [unstable] — the BPF program builds for bpfel-unknown-none
+# under nightly's build-std=core (no std on the kernel side). These
+# two stanzas pre-date Phase 6.10 vendoring and remain unchanged.
+#
+# [source.*] — Phase 6.10. aya-ebpf and its transitive deps live in
+# linux/amwall-ebpf/vendor/. Path is relative to this config file, so
+# `vendor` → linux/amwall-ebpf/vendor/. Re-vendor with:
+#   cargo vendor --versioned-dirs vendor
+# from linux/amwall-ebpf/. (See linux/.cargo/config.toml for the full
+# rationale on why we vendor.)
+
 [build]
 target = "bpfel-unknown-none"
 
 [unstable]
 build-std = ["core"]
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
