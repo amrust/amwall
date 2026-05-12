@@ -229,7 +229,24 @@ INFO() { printf '  • %s\n' "$*"; }
 WARN() { printf '  ! %s\n' "$*" >&2; }
 OK()   { printf '  ✓ %s\n' "$*"; }
 NEW()  { printf '  + wrote %s\n' "$*"; }
-ASK()  { local p="$1" reply; read -r -p "  ? $p [y/N] " reply; [[ "$reply" =~ ^[Yy]$ ]]; }
+# Read from /dev/tty rather than stdin: when the script is launched
+# via `curl … | bash` (or under `install.sh` which itself was), stdin
+# is the now-exhausted shell-source pipe, so a plain `read` returns
+# immediately with empty reply and `[[ "" =~ ^[Yy]$ ]]` is false,
+# silently picking "no" for every prompt — that's what caused the
+# GRUB step to be auto-skipped on first install.sh runs. /dev/tty is
+# the controlling terminal and survives exec, so it works in both
+# direct and piped-bash invocations. Falls back to "no" only if there
+# is literally no controlling terminal (true CI / headless).
+ASK() {
+    local p="$1" reply=""
+    if [ -e /dev/tty ]; then
+        read -r -p "  ? $p [y/N] " reply < /dev/tty 2>/dev/null || reply=""
+    else
+        printf '  ? %s [y/N] (no /dev/tty — defaulting to no)\n' "$p"
+    fi
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
 
 # Make cargo/rustc visible to this script even if the user's bashrc
 # hasn't sourced ~/.cargo/env yet.
