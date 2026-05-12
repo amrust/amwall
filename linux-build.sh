@@ -229,19 +229,26 @@ INFO() { printf '  • %s\n' "$*"; }
 WARN() { printf '  ! %s\n' "$*" >&2; }
 OK()   { printf '  ✓ %s\n' "$*"; }
 NEW()  { printf '  + wrote %s\n' "$*"; }
-# Read from /dev/tty rather than stdin: when the script is launched
-# via `curl … | bash` (or under `install.sh` which itself was), stdin
-# is the now-exhausted shell-source pipe, so a plain `read` returns
-# immediately with empty reply and `[[ "" =~ ^[Yy]$ ]]` is false,
-# silently picking "no" for every prompt — that's what caused the
-# GRUB step to be auto-skipped on first install.sh runs. /dev/tty is
-# the controlling terminal and survives exec, so it works in both
-# direct and piped-bash invocations. Falls back to "no" only if there
-# is literally no controlling terminal (true CI / headless).
+# Prompt + read both go via /dev/tty directly so neither is captured
+# by the tee log pipeline. Two bugs this avoids:
+#   1. `read -p` writes the prompt to stderr, which the script
+#      redirects through `tee` (see the AMWALL_LOG_FILE block above).
+#      tee line-buffers stdout — the prompt has no trailing newline,
+#      so it never flushes and the user sees a stuck script with
+#      no visible prompt.
+#   2. With curl|bash, bash's stdin is the (exhausted) shell-source
+#      pipe — a plain `read` returns EOF instantly and the [Yy]
+#      regex silently picks "no", which is what auto-skipped GRUB.
+# /dev/tty is the controlling terminal and survives both exec and
+# any FD redirection — using it for both halves means the prompt
+# appears live and the response is read directly from the user.
+# True headless (no /dev/tty at all) still defaults to "no" with a
+# visible note.
 ASK() {
     local p="$1" reply=""
     if [ -e /dev/tty ]; then
-        read -r -p "  ? $p [y/N] " reply < /dev/tty 2>/dev/null || reply=""
+        printf '  ? %s [y/N] ' "$p" > /dev/tty
+        read -r reply < /dev/tty 2>/dev/null || reply=""
     else
         printf '  ? %s [y/N] (no /dev/tty — defaulting to no)\n' "$p"
     fi
