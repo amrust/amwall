@@ -214,7 +214,18 @@ if [ -z "${AMWALL_LOGGING_ACTIVE:-}" ] && [ "${AMWALL_NO_LOG:-0}" != "1" ]; then
     export AMWALL_LOG_FILE
     export AMWALL_RUN_START
     exec 3>&1 4>&2
-    exec > >(tee "$AMWALL_LOG_FILE") 2>&1
+    # stdbuf -oL forces tee's stdout to be line-buffered. Without it
+    # tee block-buffers (its stdout is a pipe-fed terminal here, not
+    # detected as a TTY) and INFO lines visibly lag behind /dev/tty
+    # prompts — which is what made the GRUB prompt appear ABOVE its
+    # own "Current active LSM list" / "Will modify" context lines.
+    # Fallback to plain tee if stdbuf isn't installed (coreutils
+    # ships it everywhere we target, but be defensive).
+    if command -v stdbuf >/dev/null 2>&1; then
+        exec > >(stdbuf -oL tee "$AMWALL_LOG_FILE") 2>&1
+    else
+        exec > >(tee "$AMWALL_LOG_FILE") 2>&1
+    fi
     printf '\n'
     printf 'amwall: logging this run to %s\n' "$AMWALL_LOG_FILE"
     printf '         when done:  cat %s   # paste back to Claude\n' "$AMWALL_LOG_FILE"
@@ -233,22 +244,29 @@ NEW()  { printf '  + wrote %s\n' "$*"; }
 # by the tee log pipeline. Two bugs this avoids:
 #   1. `read -p` writes the prompt to stderr, which the script
 #      redirects through `tee` (see the AMWALL_LOG_FILE block above).
-#      tee line-buffers stdout — the prompt has no trailing newline,
-#      so it never flushes and the user sees a stuck script with
-#      no visible prompt.
+#      Even with stdbuf forcing tee line-buffered, a prompt with no
+#      trailing newline won't flush — the user sees a stuck script
+#      with no visible prompt.
 #   2. With curl|bash, bash's stdin is the (exhausted) shell-source
 #      pipe — a plain `read` returns EOF instantly and the [Yy]
 #      regex silently picks "no", which is what auto-skipped GRUB.
 # /dev/tty is the controlling terminal and survives both exec and
 # any FD redirection — using it for both halves means the prompt
 # appears live and the response is read directly from the user.
+# We also print a separator marker around the prompt so it's
+# visually unambiguous which output the user is being asked to
+# answer, regardless of any residual tee-pipe scheduling lag.
 # True headless (no /dev/tty at all) still defaults to "no" with a
 # visible note.
 ASK() {
     local p="$1" reply=""
     if [ -e /dev/tty ]; then
-        printf '  ? %s [y/N] ' "$p" > /dev/tty
+        {
+            printf '\n  ────────────────  USER INPUT NEEDED  ────────────────\n'
+            printf '  ? %s [y/N] ' "$p"
+        } > /dev/tty
         read -r reply < /dev/tty 2>/dev/null || reply=""
+        printf '  ──────────────────────────────────────────────────────\n\n' > /dev/tty
     else
         printf '  ? %s [y/N] (no /dev/tty — defaulting to no)\n' "$p"
     fi
