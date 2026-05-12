@@ -28,7 +28,7 @@ public:
     explicit SettingsDialog(QWidget *parent = nullptr);
 
 private slots:
-    void onAccepted();   // OK / Apply → write QSettings
+    void onAccepted();        // OK button → save + close
     void onPageChanged(int row);
 
 private:
@@ -36,6 +36,11 @@ private:
     void buildNotificationsPage();
     void buildAboutPage();
     void loadFromSettings();
+
+    // Pure save path — used by both OK (which then closes via accept())
+    // and Apply (which stays open). Returns true on successful sync;
+    // logs file path + status if not.
+    bool saveToSettings();
 
     QListWidget    *m_pageList = nullptr;
     QStackedWidget *m_pages    = nullptr;

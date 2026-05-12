@@ -2,7 +2,9 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QDebug>
 #include <QDialogButtonBox>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -61,13 +63,17 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
 
     connect(m_pageList, &QListWidget::currentRowChanged,
             this, &SettingsDialog::onPageChanged);
+    // OK button: save + close. Apply button: save WITHOUT closing —
+    // wiring both to onAccepted (which calls accept()) made Apply
+    // behave like OK. We now route Apply through a separate slot
+    // that saves and stays open. Cancel discards.
     connect(m_buttons, &QDialogButtonBox::accepted,
             this, &SettingsDialog::onAccepted);
     connect(m_buttons, &QDialogButtonBox::rejected,
             this, &SettingsDialog::reject);
     connect(m_buttons->button(QDialogButtonBox::Apply),
             &QPushButton::clicked,
-            this, &SettingsDialog::onAccepted);
+            this, [this]() { saveToSettings(); });
 
     loadFromSettings();
     m_pageList->setCurrentRow(0);
@@ -190,26 +196,63 @@ void SettingsDialog::buildAboutPage() {
 
 void SettingsDialog::loadFromSettings() {
     QSettings s;
-    m_alwaysOnTop->setChecked(
-        s.value(KEY_ALWAYS_ON_TOP, false).toBool());
-    m_startMinimized->setChecked(
-        s.value(KEY_START_MINIMIZED, false).toBool());
-    m_confirmQuit->setChecked(
-        s.value(KEY_CONFIRM_QUIT, false).toBool());
-    m_autoBlockSec->setValue(
-        s.value(KEY_AUTOBLOCK_SEC, 0).toInt());
-    m_showLocalByDefault->setChecked(
-        s.value(KEY_PACKETS_SHOWLOCAL, false).toBool());
+    const bool aot = s.value(KEY_ALWAYS_ON_TOP,    false).toBool();
+    const bool sm  = s.value(KEY_START_MINIMIZED,  false).toBool();
+    const bool cq  = s.value(KEY_CONFIRM_QUIT,     false).toBool();
+    const int  ab  = s.value(KEY_AUTOBLOCK_SEC,    0).toInt();
+    const bool sl  = s.value(KEY_PACKETS_SHOWLOCAL, false).toBool();
+    qInfo().noquote()
+        << "Settings load from" << s.fileName()
+        << "→ aot=" << aot << "startMin=" << sm << "confirmQuit=" << cq
+        << "autoBlock=" << ab << "showLocal=" << sl;
+    m_alwaysOnTop->setChecked(aot);
+    m_startMinimized->setChecked(sm);
+    m_confirmQuit->setChecked(cq);
+    m_autoBlockSec->setValue(ab);
+    m_showLocalByDefault->setChecked(sl);
+}
+
+// Returns true on successful sync. Doesn't close the dialog —
+// onAccepted does that for the OK path; Apply just saves and stays.
+bool SettingsDialog::saveToSettings() {
+    QSettings s;
+    const bool aot = m_alwaysOnTop->isChecked();
+    const bool sm  = m_startMinimized->isChecked();
+    const bool cq  = m_confirmQuit->isChecked();
+    const int  ab  = m_autoBlockSec->value();
+    const bool sl  = m_showLocalByDefault->isChecked();
+    s.setValue(KEY_ALWAYS_ON_TOP,    aot);
+    s.setValue(KEY_START_MINIMIZED,  sm);
+    s.setValue(KEY_CONFIRM_QUIT,     cq);
+    s.setValue(KEY_AUTOBLOCK_SEC,    ab);
+    s.setValue(KEY_PACKETS_SHOWLOCAL, sl);
+    s.sync();
+
+    qInfo().noquote()
+        << "Settings save to" << s.fileName()
+        << "→ aot=" << aot << "startMin=" << sm << "confirmQuit=" << cq
+        << "autoBlock=" << ab << "showLocal=" << sl
+        << "(status=" << int(s.status()) << ")";
+
+    // If sync() reported AccessError, the most common cause on Linux
+    // is the parent dir not existing or being root-owned (a prior
+    // `sudo amwall-gui` run can leave ~/.config/amwall owned by root,
+    // and subsequent unprivileged writes get EACCES). Surface it so
+    // the user sees the actual failure mode instead of silent loss.
+    if (s.status() != QSettings::NoError) {
+        qWarning().noquote()
+            << "Settings sync FAILED — status=" << int(s.status())
+            << ", file=" << s.fileName()
+            << ". Check that" << QFileInfo(s.fileName()).path()
+            << "is writable by the current user (sudo chown -R "
+               "$USER ~/.config/amwall if a prior root run took it).";
+        return false;
+    }
+    return true;
 }
 
 void SettingsDialog::onAccepted() {
-    QSettings s;
-    s.setValue(KEY_ALWAYS_ON_TOP,    m_alwaysOnTop->isChecked());
-    s.setValue(KEY_START_MINIMIZED,  m_startMinimized->isChecked());
-    s.setValue(KEY_CONFIRM_QUIT,     m_confirmQuit->isChecked());
-    s.setValue(KEY_AUTOBLOCK_SEC,    m_autoBlockSec->value());
-    s.setValue(KEY_PACKETS_SHOWLOCAL, m_showLocalByDefault->isChecked());
-    s.sync();
+    saveToSettings();
     accept();
 }
 
