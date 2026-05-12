@@ -1180,7 +1180,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets DBus Network)
 
 # AMWALL_VERSION is baked into the binary so --version and the About
 # box show the same string the .deb is built with. Bumped per phase.
-add_compile_definitions(AMWALL_VERSION="0.1.0+phase6.8")
+add_compile_definitions(AMWALL_VERSION="0.1.0+phase6.9")
 
 add_executable(amwall-gui
     src/main.cpp
@@ -1204,6 +1204,8 @@ add_executable(amwall-gui
     src/packetslogtab.h
     src/appstab.cpp
     src/appstab.h
+    src/blocklisttab.cpp
+    src/blocklisttab.h
     src/settingsdialog.cpp
     src/settingsdialog.h
 )
@@ -1319,6 +1321,7 @@ class UserRulesTab;
 class ConnectionsTab;
 class PacketsLogTab;
 class AppsTab;
+class BlocklistTab;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -1354,6 +1357,7 @@ private:
     ConnectionsTab    *m_connections = nullptr;
     PacketsLogTab     *m_packetsLog = nullptr;
     AppsTab           *m_apps = nullptr;
+    BlocklistTab      *m_blocklist = nullptr;
 
     QLabel *m_statusDaemon = nullptr;   // permanent left widget
     QLabel *m_statusRefresh = nullptr;  // permanent right widget
@@ -1371,6 +1375,7 @@ write_file linux/amwall-gui-qt/src/mainwindow.cpp <<'EOF'
 #include "mainwindow.h"
 
 #include "appstab.h"
+#include "blocklisttab.h"
 #include "connectionstab.h"
 #include "dashboard.h"
 #include "dbusclient.h"
@@ -1434,9 +1439,11 @@ void MainWindow::setupCentralWidget() {
     m_connections = new ConnectionsTab(m_dbus, this);
     m_packetsLog  = new PacketsLogTab(m_dbus, this);
     m_apps        = new AppsTab(m_dbus, this);
+    m_blocklist   = new BlocklistTab(m_dbus, this);
     m_tabs->addTab(m_dashboard,   tr("&Overview"));
     m_tabs->addTab(m_userRules,   tr("&User Rules"));
     m_tabs->addTab(m_apps,        tr("&Apps"));
+    m_tabs->addTab(m_blocklist,   tr("&Blocklists"));
     m_tabs->addTab(m_connections, tr("&Connections"));
     m_tabs->addTab(m_packetsLog,  tr("&Packets log"));
     // "Show in User Rules" in the Apps context menu jumps tabs.
@@ -1731,6 +1738,20 @@ Q_DECLARE_METATYPE(SocketProc)
 QDBusArgument& operator<<(QDBusArgument &arg, const SocketProc &e);
 const QDBusArgument& operator>>(const QDBusArgument &arg, SocketProc &e);
 
+// Phase 6.9 — one row per .txt under /usr/share/amwall/blocklists.
+// Wire type: (ssuub) — (name, description, v4_count, v6_count, enabled).
+struct BlocklistEntry {
+    QString name;
+    QString description;
+    uint    v4Count = 0;
+    uint    v6Count = 0;
+    bool    enabled = false;
+};
+Q_DECLARE_METATYPE(BlocklistEntry)
+
+QDBusArgument& operator<<(QDBusArgument &arg, const BlocklistEntry &e);
+const QDBusArgument& operator>>(const QDBusArgument &arg, BlocklistEntry &e);
+
 // Free-function streaming operators — registered with the D-Bus
 // metatype system in DbusClient's ctor. Once registered, Qt can
 // (un)marshal QList<RuleEntry> directly via operator>> on a
@@ -1787,6 +1808,14 @@ public slots:
     // is defined at file scope above so moc doesn't try to parse it
     // as a slot declaration.
     QHash<quint64, SocketProc> resolveSockets(const QList<quint64> &inodes);
+
+    // Phase 6.9 — blocklist API. blocklistList() returns one
+    // BlocklistEntry per .txt file under /usr/share/amwall/blocklists.
+    // setBlocklistEnabled() is polkit-gated and triggers an immediate
+    // BPF map resync on the daemon side. Both return empty / silently
+    // fail when D-Bus is unreachable.
+    QList<BlocklistEntry> blocklistList();
+    void setBlocklistEnabled(const QString &name, bool enabled);
 
 signals:
     void stateChanged();
@@ -1869,6 +1898,22 @@ const QDBusArgument& operator>>(const QDBusArgument &arg, SocketProc &e) {
     return arg;
 }
 
+QDBusArgument& operator<<(QDBusArgument &arg, const BlocklistEntry &e) {
+    // Wire order MUST match daemon BlocklistList return:
+    //   a(ssuub) — (name, description, v4_count, v6_count, enabled)
+    arg.beginStructure();
+    arg << e.name << e.description << e.v4Count << e.v6Count << e.enabled;
+    arg.endStructure();
+    return arg;
+}
+
+const QDBusArgument& operator>>(const QDBusArgument &arg, BlocklistEntry &e) {
+    arg.beginStructure();
+    arg >> e.name >> e.description >> e.v4Count >> e.v6Count >> e.enabled;
+    arg.endStructure();
+    return arg;
+}
+
 DbusClient::DbusClient(QObject *parent) : QObject(parent) {
     // Register custom marshallers ONCE per process. qDBusRegisterMetaType
     // is idempotent but cheap-redundant; we still only get one DbusClient
@@ -1877,6 +1922,8 @@ DbusClient::DbusClient(QObject *parent) : QObject(parent) {
     qDBusRegisterMetaType<QList<RuleEntry>>();
     qDBusRegisterMetaType<SocketProc>();
     qDBusRegisterMetaType<QList<SocketProc>>();
+    qDBusRegisterMetaType<BlocklistEntry>();
+    qDBusRegisterMetaType<QList<BlocklistEntry>>();
 
     m_timer = new QTimer(this);
     connect(m_timer, &QTimer::timeout, this, &DbusClient::refresh);
@@ -1991,6 +2038,51 @@ DbusClient::resolveSockets(const QList<quint64> &inodes) {
         out.insert(sp.inode, sp);
     }
     return out;
+}
+
+QList<BlocklistEntry> DbusClient::blocklistList() {
+    QList<BlocklistEntry> out;
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("/org/amwall/Daemon1"),
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("BlocklistList"));
+    QDBusMessage reply = QDBusConnection::systemBus().call(
+        msg, QDBus::Block, 5000);
+    if (reply.type() != QDBusMessage::ReplyMessage) {
+        qWarning() << "BlocklistList failed:" << reply.errorMessage();
+        return out;
+    }
+    const QList<QVariant> outArgs = reply.arguments();
+    if (outArgs.isEmpty()) return out;
+    const QDBusArgument arg = outArgs.first().value<QDBusArgument>();
+    arg >> out;
+    return out;
+}
+
+void DbusClient::setBlocklistEnabled(const QString &name, bool enabled) {
+    // Async via QDBusPendingCall so polkit prompts don't block the
+    // event loop. Same pattern as callModify(): we don't wait for the
+    // reply — the next refresh tick reflects the new state.
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("/org/amwall/Daemon1"),
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("BlocklistSetEnabled"));
+    msg.setArguments({ name, enabled });
+    auto pending = QDBusConnection::systemBus().asyncCall(msg);
+    auto *watcher = new QDBusPendingCallWatcher(pending, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished,
+            this, [this](QDBusPendingCallWatcher *w) {
+        QDBusPendingReply<> r = *w;
+        if (r.isError()) {
+            qWarning() << "BlocklistSetEnabled error:"
+                       << r.error().message();
+        }
+        // Trigger a refresh so any listeners (BlocklistTab) re-read.
+        emit stateChanged();
+        w->deleteLater();
+    });
 }
 
 void DbusClient::allow(const QString &comm, const QString &ip, ushort port) {
@@ -4538,6 +4630,198 @@ void AppsTab::onFilterChanged(const QString &text) {
 EOF
 
 
+# ─── Phase 6.9 — Blocklist tab ──────────────────────────────────────
+
+write_file linux/amwall-gui-qt/src/blocklisttab.h <<'EOF'
+// BlocklistTab — Phase 6.9. Front-end for the daemon's blocklist API
+// (BlocklistList / BlocklistSetEnabled). One row per .txt under
+// /usr/share/amwall/blocklists/. Checkbox in the Enabled column
+// triggers a polkit-gated D-Bus call that re-syncs the BPF maps;
+// the next stateChanged refresh re-reads the list to confirm.
+//
+// Blocklist hits are HARD denies — they fire before per-comm rules,
+// so a user "Allow firefox to anywhere" cannot bypass a blocklist
+// entry that covers the destination IP. Matches simplewall's
+// IDC_RULES_BLOCKLIST semantic.
+
+#pragma once
+
+#include <QWidget>
+
+class DbusClient;
+class QLabel;
+class QTableWidget;
+
+class BlocklistTab : public QWidget {
+    Q_OBJECT
+
+public:
+    explicit BlocklistTab(DbusClient *dbus, QWidget *parent = nullptr);
+
+public slots:
+    void refresh();
+
+private slots:
+    void onItemChanged(int row, int col);
+
+private:
+    DbusClient   *m_dbus  = nullptr;
+    QTableWidget *m_table = nullptr;
+    QLabel       *m_count = nullptr;
+    bool          m_inRefresh = false;  // suppress itemChanged during refresh
+};
+EOF
+
+write_file linux/amwall-gui-qt/src/blocklisttab.cpp <<'EOF'
+#include "blocklisttab.h"
+
+#include "dbusclient.h"
+
+#include <QAbstractItemView>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QLabel>
+#include <QPushButton>
+#include <QSignalBlocker>
+#include <QStyle>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QVBoxLayout>
+
+namespace {
+constexpr int COL_ENABLED = 0;
+constexpr int COL_NAME    = 1;
+constexpr int COL_V4      = 2;
+constexpr int COL_V6      = 3;
+constexpr int COL_DESC    = 4;
+}  // namespace
+
+BlocklistTab::BlocklistTab(DbusClient *dbus, QWidget *parent)
+    : QWidget(parent), m_dbus(dbus) {
+
+    auto *outer = new QVBoxLayout(this);
+    outer->setContentsMargins(8, 8, 8, 8);
+    outer->setSpacing(6);
+
+    // ─── Header ───────────────────────────────────────────────────
+    auto *header = new QHBoxLayout;
+    auto *title = new QLabel(tr("<b>Blocklists</b>"), this);
+    title->setTextFormat(Qt::RichText);
+    header->addWidget(title);
+    m_count = new QLabel(QStringLiteral("(0)"), this);
+    header->addWidget(m_count);
+    header->addStretch(1);
+    auto *refreshBtn = new QPushButton(
+        style()->standardIcon(QStyle::SP_BrowserReload),
+        tr("Refresh"), this);
+    connect(refreshBtn, &QPushButton::clicked, this, &BlocklistTab::refresh);
+    header->addWidget(refreshBtn);
+    outer->addLayout(header);
+
+    // ─── Table ────────────────────────────────────────────────────
+    m_table = new QTableWidget(0, 5, this);
+    m_table->setHorizontalHeaderLabels({
+        tr("Enabled"), tr("Name"), tr("IPv4"), tr("IPv6"), tr("Description")
+    });
+    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_table->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_table->setSortingEnabled(true);
+    m_table->verticalHeader()->setVisible(false);
+    auto *hh = m_table->horizontalHeader();
+    hh->setSectionsClickable(true);
+    hh->setSortIndicatorShown(true);
+    hh->setSectionResizeMode(QHeaderView::Interactive);
+    hh->setStretchLastSection(true);
+    m_table->setColumnWidth(COL_ENABLED, 80);
+    m_table->setColumnWidth(COL_NAME,    140);
+    m_table->setColumnWidth(COL_V4,       80);
+    m_table->setColumnWidth(COL_V6,       80);
+    // Description stretches.
+    outer->addWidget(m_table, 1);
+
+    auto *hint = new QLabel(
+        tr("<i style='font-size: small;'>"
+           "Toggling Enabled writes <code>/etc/amwall/blocklists.toml</code> "
+           "and re-syncs the BPF blocklist maps immediately (polkit-gated). "
+           "Blocklist hits override per-app allow rules — a process you've "
+           "allowed to connect anywhere will still be denied if it tries "
+           "to reach a blocklisted address."
+           "</i>"),
+        this);
+    hint->setTextFormat(Qt::RichText);
+    hint->setWordWrap(true);
+    outer->addWidget(hint);
+
+    connect(m_table, &QTableWidget::cellChanged,
+            this, &BlocklistTab::onItemChanged);
+    if (m_dbus) {
+        connect(m_dbus, &DbusClient::stateChanged,
+                this, &BlocklistTab::refresh);
+    }
+    refresh();
+}
+
+void BlocklistTab::refresh() {
+    if (!m_dbus) return;
+    const QList<BlocklistEntry> lists = m_dbus->blocklistList();
+
+    m_inRefresh = true;
+    QSignalBlocker block(m_table);
+    m_table->setSortingEnabled(false);
+    m_table->setRowCount(lists.size());
+    int enabledCount = 0;
+    for (int i = 0; i < lists.size(); ++i) {
+        const BlocklistEntry &e = lists[i];
+        if (e.enabled) ++enabledCount;
+
+        auto *enItem = new QTableWidgetItem;
+        enItem->setFlags(enItem->flags() | Qt::ItemIsUserCheckable);
+        enItem->setCheckState(e.enabled ? Qt::Checked : Qt::Unchecked);
+        enItem->setData(Qt::UserRole, e.name);
+        enItem->setText(e.enabled ? tr("On") : tr("Off"));
+        enItem->setTextAlignment(Qt::AlignCenter);
+
+        auto *nItem  = new QTableWidgetItem(e.name);
+        // Stash the list name on the name cell too so we can recover
+        // it from a row index even if the table got sorted.
+        nItem->setData(Qt::UserRole, e.name);
+
+        auto *v4Item = new QTableWidgetItem(QString::number(e.v4Count));
+        v4Item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        auto *v6Item = new QTableWidgetItem(QString::number(e.v6Count));
+        v6Item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        auto *dItem  = new QTableWidgetItem(e.description);
+        dItem->setToolTip(e.description);
+
+        m_table->setItem(i, COL_ENABLED, enItem);
+        m_table->setItem(i, COL_NAME,    nItem);
+        m_table->setItem(i, COL_V4,      v4Item);
+        m_table->setItem(i, COL_V6,      v6Item);
+        m_table->setItem(i, COL_DESC,    dItem);
+    }
+    m_table->setSortingEnabled(true);
+    m_count->setText(tr("(%1 of %2 enabled)")
+                         .arg(enabledCount).arg(lists.size()));
+    m_inRefresh = false;
+}
+
+void BlocklistTab::onItemChanged(int row, int col) {
+    if (m_inRefresh) return;
+    if (col != COL_ENABLED) return;
+    auto *enItem = m_table->item(row, COL_ENABLED);
+    if (!enItem || !m_dbus) return;
+    const QString name = enItem->data(Qt::UserRole).toString();
+    if (name.isEmpty()) return;
+    const bool enabled = (enItem->checkState() == Qt::Checked);
+    enItem->setText(enabled ? tr("On") : tr("Off"));
+    m_dbus->setBlocklistEnabled(name, enabled);
+    // refresh() will fire when DbusClient emits stateChanged from
+    // the async-reply handler, so we don't need to manually re-sync
+    // here — that would race the daemon's TOML write.
+}
+EOF
+
+
 # ─── amwall-ebpf — Phase 2 enforcement (unchanged in Phase 3) ───────
 
 H "amwall-ebpf (RULES HashMap + default-deny LSM)"
@@ -4692,6 +4976,24 @@ static RULES: HashMap<RuleKey, RuleValue> = HashMap::with_max_entries(1024, 0);
 #[map]
 static RULES_V6: HashMap<RuleKeyV6, RuleValue> = HashMap::with_max_entries(1024, 0);
 
+// Phase 6.9 blocklist maps. Checked BEFORE per-comm rules, so a hit
+// here is a hard deny regardless of which process is connecting and
+// regardless of whether the user has an explicit allow rule for that
+// process — that's the simplewall blocklist semantic ("system block
+// list", IDC_RULES_BLOCKLIST). Capacity is 65k entries each which
+// covers a typical telemetry+ads merge with headroom; bump if a
+// future list needs more.
+//
+// Value is just a presence marker (u8), since the only signal is
+// "is this destination in the blocklist or not". The BPF program
+// doesn't care which list it came from — that mapping lives in the
+// daemon's blocklist.toml metadata.
+#[map]
+static BLOCKLIST_V4: HashMap<u32, u8> = HashMap::with_max_entries(65536, 0);
+
+#[map]
+static BLOCKLIST_V6: HashMap<[u8; 16], u8> = HashMap::with_max_entries(65536, 0);
+
 #[repr(C)]
 struct SockAddrFamily { family: u16 }
 
@@ -4791,7 +5093,12 @@ fn decide(ctx: &LsmContext) -> u8 {
                         (*event).dest_port = port_host;
                         (*event).dest_ip4 = a.addr;
                     }
-                    lookup(comm, a.addr, port_host)
+                    // Blocklist hit overrides any per-comm allow rule.
+                    if unsafe { BLOCKLIST_V4.get(&a.addr).is_some() } {
+                        ACT_DENY
+                    } else {
+                        lookup(comm, a.addr, port_host)
+                    }
                 }
                 Err(_) => ACT_ALLOW,
             }
@@ -4810,7 +5117,11 @@ fn decide(ctx: &LsmContext) -> u8 {
                         (*event).dest_port = port_host;
                         (*event).dest_ip6 = a.addr;
                     }
-                    lookup_v6(comm, a.addr, port_host)
+                    if unsafe { BLOCKLIST_V6.get(&a.addr).is_some() } {
+                        ACT_DENY
+                    } else {
+                        lookup_v6(comm, a.addr, port_host)
+                    }
                 }
                 Err(_) => ACT_ALLOW,
             }
@@ -4881,6 +5192,9 @@ amwall-core.workspace = true
 aya = "0.13"
 anyhow = "1"
 ctrlc = "3"
+# Phase 6.9 — blocklist State (de)serialization to /etc/amwall/blocklists.toml.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 # zbus with tokio backend so we can drive its async work inside the
 # daemon's tokio runtime (avoids mixing async-io and tokio reactors).
 zbus = { version = "4", default-features = false, features = ["tokio"] }
@@ -4935,6 +5249,17 @@ assets = [
      "usr/share/applications/amwall.desktop", "644"],
     ["debian/rules.toml.example",
      "etc/amwall/rules.toml", "644"],
+    # Phase 6.9 — built-in blocklists. Each is a plain-text file
+    # of one IPv4 or IPv6 address per line; "#" introduces a
+    # comment. Daemon scans /usr/share/amwall/blocklists/*.txt
+    # at startup and on D-Bus toggle. Enabled list names live
+    # in /etc/amwall/blocklists.toml (created on first toggle).
+    ["debian/blocklists/telemetry.txt",
+     "usr/share/amwall/blocklists/telemetry.txt", "644"],
+    ["debian/blocklists/ads.txt",
+     "usr/share/amwall/blocklists/ads.txt", "644"],
+    ["debian/blocklists/malware.txt",
+     "usr/share/amwall/blocklists/malware.txt", "644"],
 ]
 conf-files = [
     "/etc/amwall/rules.toml",
@@ -5042,12 +5367,173 @@ type RulesV6Map = AyaHashMap<MapData, RuleKeyV6, RuleValue>;
 type RulesShared   = Arc<Mutex<RulesMap>>;
 type RulesV6Shared = Arc<Mutex<RulesV6Map>>;
 
+// Phase 6.9 blocklist BPF maps. Key = u32 (v4) or [u8; 16] (v6)
+// destination address in NETWORK byte order — matches the addr
+// field of sockaddr_in/sockaddr_in6 the BPF program sees.
+type BlocklistV4Map = AyaHashMap<MapData, u32, u8>;
+type BlocklistV6Map = AyaHashMap<MapData, [u8; 16], u8>;
+type BlocklistV4Shared = Arc<Mutex<BlocklistV4Map>>;
+type BlocklistV6Shared = Arc<Mutex<BlocklistV6Map>>;
+
+// ─── Blocklist module (Phase 6.9) ───────────────────────────────────
+
+mod blocklist {
+    use super::*;
+    use std::collections::HashSet;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    pub const LISTS_DIR: &str = "/usr/share/amwall/blocklists";
+    pub const STATE_PATH: &str = "/etc/amwall/blocklists.toml";
+
+    #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+    pub struct State {
+        #[serde(default)]
+        pub enabled: Vec<String>,
+    }
+
+    impl State {
+        pub fn load() -> Self {
+            std::fs::read_to_string(STATE_PATH)
+                .ok()
+                .and_then(|s| toml::from_str(&s).ok())
+                .unwrap_or_default()
+        }
+
+        pub fn save(&self) -> Result<()> {
+            if let Some(parent) = Path::new(STATE_PATH).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let s = toml::to_string_pretty(self)
+                .context("serializing blocklists state")?;
+            std::fs::write(STATE_PATH, s)
+                .with_context(|| format!("writing {}", STATE_PATH))?;
+            Ok(())
+        }
+    }
+
+    /// Metadata about one .txt file under LISTS_DIR — name (filename
+    /// stem), short human description (first comment block of the
+    /// file), and counts of v4 / v6 entries.
+    pub struct ListMeta {
+        pub name: String,
+        pub description: String,
+        pub v4_count: u32,
+        pub v6_count: u32,
+    }
+
+    /// Scan LISTS_DIR for *.txt files. Returns name + counts.
+    pub fn scan() -> Vec<ListMeta> {
+        let mut out = Vec::new();
+        let dir = match std::fs::read_dir(LISTS_DIR) {
+            Ok(d) => d,
+            Err(_) => return out,
+        };
+        for entry in dir.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("txt") {
+                continue;
+            }
+            let name = match p.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let (description, v4, v6) = parse_list(&p);
+            out.push(ListMeta {
+                name,
+                description,
+                v4_count: v4.len() as u32,
+                v6_count: v6.len() as u32,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// Parse a list file: returns (one-line description, v4 set, v6 set).
+    /// Description = first non-empty comment line stripped of the
+    /// leading "# " — gives the user something better than the bare
+    /// filename in the GUI.
+    pub fn parse_list(path: &Path) -> (String, HashSet<u32>, HashSet<[u8; 16]>) {
+        let mut desc = String::new();
+        let mut v4 = HashSet::new();
+        let mut v6 = HashSet::new();
+        let contents = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => return (desc, v4, v6),
+        };
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            if let Some(rest) = line.strip_prefix('#') {
+                if desc.is_empty() {
+                    desc = rest.trim().to_string();
+                }
+                continue;
+            }
+            if let Ok(a) = line.parse::<Ipv4Addr>() {
+                // Store in network byte order — matches the addr
+                // field in sockaddr_in the BPF program reads.
+                v4.insert(u32::from(a).to_be());
+            } else if let Ok(a) = line.parse::<Ipv6Addr>() {
+                v6.insert(a.octets());
+            }
+            // Silently skip malformed lines — daemon stays robust
+            // against typos in user-edited lists.
+        }
+        (desc, v4, v6)
+    }
+
+    /// Compute the desired union of v4 + v6 addresses across all
+    /// enabled lists, then diff against current BPF map state and
+    /// add/remove entries to converge. No reload "off" window —
+    /// matches the rules.toml sync pattern.
+    pub fn sync(
+        map_v4: &mut BlocklistV4Map,
+        map_v6: &mut BlocklistV6Map,
+        state:  &State,
+    ) -> Result<(usize, usize)> {
+        let mut want_v4: HashSet<u32> = HashSet::new();
+        let mut want_v6: HashSet<[u8; 16]> = HashSet::new();
+        for name in &state.enabled {
+            let path = PathBuf::from(LISTS_DIR).join(format!("{}.txt", name));
+            let (_d, v4, v6) = parse_list(&path);
+            want_v4.extend(v4);
+            want_v6.extend(v6);
+        }
+
+        let current_v4: HashSet<u32> =
+            map_v4.keys().filter_map(Result::ok).collect();
+        let current_v6: HashSet<[u8; 16]> =
+            map_v6.keys().filter_map(Result::ok).collect();
+
+        // Remove dropped entries
+        for k in current_v4.difference(&want_v4) {
+            map_v4.remove(k).ok();
+        }
+        for k in current_v6.difference(&want_v6) {
+            map_v6.remove(k).ok();
+        }
+        // Add new entries
+        for k in want_v4.difference(&current_v4) {
+            map_v4.insert(k, 1u8, 0).with_context(
+                || format!("BLOCKLIST_V4 insert {:08x}", k))?;
+        }
+        for k in want_v6.difference(&current_v6) {
+            map_v6.insert(k, 1u8, 0).with_context(
+                || format!("BLOCKLIST_V6 insert"))?;
+        }
+        Ok((want_v4.len(), want_v6.len()))
+    }
+}
+
 // ─── D-Bus interface ────────────────────────────────────────────────
 
 struct AmwallDaemon {
-    rules:    RulesShared,
-    rules_v6: RulesV6Shared,
-    rules_path: PathBuf,
+    rules:        RulesShared,
+    rules_v6:     RulesV6Shared,
+    rules_path:   PathBuf,
+    blocklist_v4: BlocklistV4Shared,
+    blocklist_v6: BlocklistV6Shared,
 }
 
 #[zbus::interface(name = "org.amwall.Daemon1")]
@@ -5113,9 +5599,61 @@ impl AmwallDaemon {
     // closed-by-the-time-we-walked race) are simply omitted from
     // the result rather than returning sentinel rows.
     //
-    // No polkit gate — this is read-only data already visible to
-    // anyone with shell access (ss -tnp, lsof, etc. as root). The
-    // /proc walk is bounded by the number of running processes.
+    // ─── Phase 6.9 blocklist API ────────────────────────────────────
+
+    // BlocklistList: returns (name, description, v4_count, v6_count,
+    // enabled) for every .txt file under /usr/share/amwall/blocklists.
+    // Read-only, no polkit gate.
+    async fn blocklist_list(
+        &self,
+    ) -> zbus::fdo::Result<Vec<(String, String, u32, u32, bool)>> {
+        let state = blocklist::State::load();
+        let enabled: std::collections::HashSet<&String> =
+            state.enabled.iter().collect();
+        let mut out = Vec::new();
+        for m in blocklist::scan() {
+            let is_on = enabled.contains(&m.name);
+            out.push((m.name, m.description, m.v4_count, m.v6_count, is_on));
+        }
+        Ok(out)
+    }
+
+    // BlocklistSetEnabled: flip the enabled bit for one list and
+    // re-sync the BPF maps. polkit-gated under the same action as
+    // rule modification — toggling a blocklist is policy-equivalent
+    // to writing a deny rule.
+    async fn blocklist_set_enabled(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        name: String,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        check_polkit(conn, &header, POLKIT_ACTION_MODIFY).await?;
+
+        let mut state = blocklist::State::load();
+        let already = state.enabled.iter().any(|n| n == &name);
+        if enabled && !already {
+            state.enabled.push(name.clone());
+        } else if !enabled && already {
+            state.enabled.retain(|n| n != &name);
+        } else {
+            return Ok(());  // no-op, already in desired state
+        }
+        state.save().map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+
+        let mut map_v4 = self.blocklist_v4.lock()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("v4 lock: {}", e)))?;
+        let mut map_v6 = self.blocklist_v6.lock()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("v6 lock: {}", e)))?;
+        let (n4, n6) = blocklist::sync(&mut map_v4, &mut map_v6, &state)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        eprintln!("[USER ] blocklist {} {} (now {} v4 + {} v6 entries)",
+            if enabled { "ENABLE" } else { "DISABLE" },
+            name, n4, n6);
+        Ok(())
+    }
+
     async fn resolve_sockets(
         &self,
         inodes: Vec<u64>,
@@ -5359,12 +5897,17 @@ async fn check_polkit(
 async fn run_dbus_server(
     rules: RulesShared,
     rules_v6: RulesV6Shared,
+    blocklist_v4: BlocklistV4Shared,
+    blocklist_v6: BlocklistV6Shared,
     rules_path: PathBuf,
     mut event_rx: mpsc::UnboundedReceiver<ConnectEvent>,
 ) -> Result<()> {
     eprintln!("amwall-daemon: D-Bus thread starting (system bus)");
 
-    let iface = AmwallDaemon { rules, rules_v6, rules_path };
+    let iface = AmwallDaemon {
+        rules, rules_v6, rules_path,
+        blocklist_v4, blocklist_v6,
+    };
     let conn = zbus::connection::Builder::system()
         .context("system bus connection (is dbus running?)")?
         .name("org.amwall.Daemon1")
@@ -5441,6 +5984,18 @@ fn main() -> Result<()> {
         .context("RULES_V6 map is not a HashMap")?;
     let rules_v6: RulesV6Shared = Arc::new(Mutex::new(rules_v6_raw));
 
+    // Phase 6.9: blocklist maps. Checked BEFORE per-comm rules in
+    // amwall-ebpf::decide, so a hit overrides any user-set allow.
+    let bl4_raw_map = ebpf.take_map("BLOCKLIST_V4").context("BLOCKLIST_V4 map missing")?;
+    let bl4_raw: BlocklistV4Map = AyaHashMap::try_from(bl4_raw_map)
+        .context("BLOCKLIST_V4 is not a HashMap")?;
+    let blocklist_v4: BlocklistV4Shared = Arc::new(Mutex::new(bl4_raw));
+
+    let bl6_raw_map = ebpf.take_map("BLOCKLIST_V6").context("BLOCKLIST_V6 map missing")?;
+    let bl6_raw: BlocklistV6Map = AyaHashMap::try_from(bl6_raw_map)
+        .context("BLOCKLIST_V6 is not a HashMap")?;
+    let blocklist_v6: BlocklistV6Shared = Arc::new(Mutex::new(bl6_raw));
+
     let events_map = ebpf.take_map("EVENTS").context("EVENTS map missing")?;
     let mut events = RingBuf::try_from(events_map).context("EVENTS map is not a ring buffer")?;
 
@@ -5453,6 +6008,20 @@ fn main() -> Result<()> {
             Err(e) => eprintln!("amwall-daemon: rules load failed: {}", e),
         }
     }
+    // Initial blocklist sync (Phase 6.9). No-op when no lists are
+    // enabled — /etc/amwall/blocklists.toml only gets written on the
+    // first BlocklistSetEnabled D-Bus call.
+    {
+        let state = blocklist::State::load();
+        let mut map_v4 = blocklist_v4.lock().unwrap();
+        let mut map_v6 = blocklist_v6.lock().unwrap();
+        match blocklist::sync(&mut map_v4, &mut map_v6, &state) {
+            Ok((n4, n6)) => eprintln!(
+                "amwall-daemon: blocklist active — {} v4 + {} v6 entries from {} list(s)",
+                n4, n6, state.enabled.len()),
+            Err(e) => eprintln!("amwall-daemon: blocklist sync failed: {}", e),
+        }
+    }
     eprintln!("amwall-daemon: enforcement ON. Default-deny on IPv4 + IPv6. Ctrl-C to exit.");
 
     // Channel from BPF drain → D-Bus signal emit.
@@ -5460,13 +6029,17 @@ fn main() -> Result<()> {
 
     let dbus_rules    = rules.clone();
     let dbus_rules_v6 = rules_v6.clone();
+    let dbus_bl4      = blocklist_v4.clone();
+    let dbus_bl6      = blocklist_v6.clone();
     let dbus_path     = rules_path.clone();
     let dbus_thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokio runtime build");
-        if let Err(e) = rt.block_on(run_dbus_server(dbus_rules, dbus_rules_v6, dbus_path, event_rx)) {
+        if let Err(e) = rt.block_on(run_dbus_server(
+            dbus_rules, dbus_rules_v6, dbus_bl4, dbus_bl6, dbus_path, event_rx))
+        {
             eprintln!("amwall-daemon: D-Bus server stopped:");
             for cause in e.chain() {
                 eprintln!("  caused by: {}", cause);
@@ -5737,6 +6310,55 @@ write_file linux/amwall-daemon/debian/rules.toml.example <<'EOF'
 # ip = "any"
 # port = 80
 # action = "allow"
+EOF
+
+# ─── Phase 6.9 — built-in blocklists ─────────────────────────────────
+# Plain-text files, one IPv4 (or IPv6) address per line. "#" introduces
+# a comment. The daemon scans /usr/share/amwall/blocklists/*.txt at
+# startup and injects entries from enabled lists into BLOCKLIST_V4 /
+# BLOCKLIST_V6 BPF maps. A blocklist hit is a hard deny that overrides
+# any per-comm allow rule.
+#
+# These are starter lists — small, conservative, illustrative. Real
+# production use should pull from established sources (StevenBlack/hosts,
+# Spamhaus DROP, etc.) — a future iteration will add URL-based fetching.
+
+write_file linux/amwall-daemon/debian/blocklists/telemetry.txt <<'EOF'
+# telemetry.txt — known telemetry/phone-home endpoints.
+# These addresses rotate over time; treat as a starter list and
+# extend with addresses from your own DNS logs.
+#
+# Microsoft "Connected User Experiences and Telemetry"
+13.107.4.50
+64.4.54.254
+65.55.252.43
+65.55.252.63
+# Apple iOS analytics
+17.248.144.10
+17.248.144.50
+EOF
+
+write_file linux/amwall-daemon/debian/blocklists/ads.txt <<'EOF'
+# ads.txt — common ad-network / tracker IPs.
+# Most ad delivery uses huge CDN ranges that rotate; this is a
+# starter list. For real coverage use a DNS-level blocker
+# (Pi-hole, dnscrypt-proxy with blocklists) on top of amwall.
+#
+# Google DoubleClick (one of many addresses)
+142.250.79.130
+# Facebook tracker / Pixel
+157.240.22.35
+EOF
+
+write_file linux/amwall-daemon/debian/blocklists/malware.txt <<'EOF'
+# malware.txt — known C2 / botnet command IPs.
+# Empty starter list — populate from threat-intel sources you trust
+# (Spamhaus DROP, Emerging Threats, your own SOC feed). Lines below
+# are syntax demos using TEST-NET-1 (RFC 5737) — they don't block
+# anything real.
+#
+# 192.0.2.10
+# 192.0.2.20
 EOF
 
 write_file linux/amwall-daemon/debian/postinst <<'EOF'
@@ -6359,7 +6981,13 @@ cat <<EOF
             startMinimized, confirmQuit, autoBlockSec (prompt timeout),
             packetslog/showLocal default. Always-on-top mirrored back
             to the View menu after each dialog accept.
-    - 6.9   — i18n (rust_i18n locales/*.toml); Blocklist menu lands here
+    - 6.9   ✓ Blocklist tab — parallel BLOCKLIST_V4/V6 BPF maps
+            checked BEFORE per-comm rules so a blocklist hit overrides
+            any per-app allow. Ships 3 starter lists (telemetry, ads,
+            malware) under /usr/share/amwall/blocklists/. State in
+            /etc/amwall/blocklists.toml. Toggle = polkit-gated D-Bus.
+            (i18n plumbing deferred — invisible without translators,
+            adds little vs. visible blocklist enforcement.)
 
   Plan Phase 5b — Windows-side wiring of amwall-core — still needs a
   Windows checkout (root Cargo.toml + src/rules/*.rs adoption + MSI
