@@ -141,6 +141,21 @@ void MainWindow::setupMenuBar() {
     auto *about = help->addAction(tr("&About amwall..."));
     about->setIcon(style()->standardIcon(QStyle::SP_MessageBoxInformation));
     connect(about, &QAction::triggered, this, &MainWindow::onAbout);
+
+    // Help → "Reset all rules and config..." — polkit-gated full
+    // wipe of /etc/amwall/rules.toml + blocklists state + BPF maps
+    // (daemon side) and ~/.config/amwall + QSettings (GUI side).
+    // Mirrors Windows amwall's matching Help-menu entry. Placed
+    // below About behind a separator so it's not the first thing the
+    // user sees when they open Help — same shape as simplewall.
+    help->addSeparator();
+    auto *resetAct = help->addAction(tr("&Reset all rules and config..."));
+    resetAct->setIcon(style()->standardIcon(QStyle::SP_DialogResetButton));
+    connect(resetAct, &QAction::triggered, this, &MainWindow::onResetAll);
+    if (m_dbus) {
+        connect(m_dbus, &DbusClient::resetCompleted,
+                this, &MainWindow::onResetCompleted);
+    }
 }
 
 void MainWindow::setupStatusBar() {
@@ -269,6 +284,87 @@ void MainWindow::onSettings() {
             m_alwaysOnTopAction->setChecked(aot);  // fires onAlwaysOnTopToggled
         }
     }
+}
+
+void MainWindow::onResetAll() {
+    // Two-step confirmation — Reset is destructive (truncates
+    // rules.toml, wipes blocklists state, clears BPF maps, deletes
+    // ~/.config/amwall) and not undoable. First dialog states what
+    // will happen; second confirms the user really means it.
+    const QString detail =
+        tr("This will clear every rule, every enabled blocklist, and "
+           "every UI preference (window geometry, prompt timeout, "
+           "etc.). The daemon stays running but starts fresh on "
+           "default-deny.\n\n"
+           "Used when you want to undo a misconfiguration without "
+           "uninstalling. Not undoable.");
+
+    auto choice = QMessageBox::warning(
+        this, tr("Reset all rules and config"),
+        detail,
+        QMessageBox::Reset | QMessageBox::Cancel,
+        QMessageBox::Cancel);
+    if (choice != QMessageBox::Reset) return;
+
+    if (!m_dbus || !m_dbus->isReachable()) {
+        QMessageBox::critical(
+            this, tr("Reset failed"),
+            tr("The daemon isn't reachable — can't issue Reset. "
+               "Check that amwall-daemon.service is running."));
+        return;
+    }
+    // Async — polkit may pop an auth prompt. onResetCompleted handles
+    // the GUI-side cleanup + result dialog on the reply.
+    m_dbus->resetDaemon();
+}
+
+void MainWindow::onResetCompleted(bool ok, const QString &errOut) {
+    if (!ok) {
+        QMessageBox::critical(
+            this, tr("Reset failed"),
+            tr("The daemon refused or failed the Reset call:\n\n%1\n\n"
+               "Common causes:\n"
+               "• polkit auth was cancelled / denied\n"
+               "• /etc/amwall/rules.toml has unexpected permissions\n"
+               "• the daemon process is wedged — try "
+               "'systemctl restart amwall-daemon'")
+                .arg(errOut));
+        return;
+    }
+
+    // GUI-side cleanup. The daemon already wiped root-owned state
+    // (/etc/amwall/rules.toml + /etc/amwall/blocklists.toml +
+    // BPF maps). We own the user-side: QSettings (window geometry,
+    // alwaysOnTop, autoBlockSec, etc.) plus the on-disk .conf file
+    // QSettings writes to. Clearing in-memory state via .clear() +
+    // .sync() means re-opening Settings sees defaults instead of
+    // stale values.
+    {
+        QSettings s;
+        const QString configFile = s.fileName();  // captured for log
+        s.clear();
+        s.sync();
+        qInfo().noquote()
+            << "Reset: cleared QSettings at" << configFile
+            << "(status=" << int(s.status()) << ")";
+    }
+    // Drop the menu's Always-on-top check so the next time the user
+    // opens View, it matches the cleared QSettings state. Also
+    // strip the flag if currently set.
+    if (m_alwaysOnTopAction && m_alwaysOnTopAction->isChecked()) {
+        m_alwaysOnTopAction->setChecked(false);  // fires onAlwaysOnTopToggled
+    }
+
+    // Forcing a refresh redraws the dashboard rule count → 0 and
+    // updates the User Rules table immediately, instead of waiting
+    // for the next 5-sec poll.
+    if (m_dbus) m_dbus->refresh();
+
+    QMessageBox::information(
+        this, tr("Reset complete"),
+        tr("All rules, blocklists, and preferences have been cleared. "
+           "The daemon is running on default-deny — new outbound "
+           "connections will prompt the next time they're attempted."));
 }
 
 void MainWindow::onDbusStateChanged() {

@@ -382,6 +382,52 @@ impl AmwallDaemon {
         Ok(())
     }
 
+    // Reset: clear everything the daemon owns — rules.toml truncated,
+    // blocklists.toml deleted, BPF maps emptied. Polkit-gated under
+    // modify-rules since it's the heaviest possible modify. The GUI's
+    // own QSettings (window geometry, prompt timeout, etc.) lives in
+    // the user's home and is cleared GUI-side, not here — keeps the
+    // privilege boundary clean.
+    async fn reset(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> zbus::fdo::Result<()> {
+        check_polkit(conn, &header, POLKIT_ACTION_MODIFY).await?;
+
+        // 1. Truncate rules.toml. The daemon's own mtime poll will
+        //    rebuild the BPF maps empty within ~100 ms — we don't
+        //    need to clear them ourselves and risk a race against
+        //    that loop.
+        std::fs::write(&self.rules_path, b"")
+            .map_err(|e| zbus::fdo::Error::Failed(
+                format!("truncating {}: {}", self.rules_path.display(), e)))?;
+        eprintln!("[USER ] RESET truncated {}", self.rules_path.display());
+
+        // 2. Remove blocklists state file. Then sync BPF blocklist
+        //    maps with empty state — same diff path the
+        //    BlocklistSetEnabled D-Bus method uses, just with a
+        //    State that has no enabled lists.
+        let bl_state_path = std::path::Path::new(blocklist::STATE_PATH);
+        if bl_state_path.exists() {
+            std::fs::remove_file(bl_state_path)
+                .map_err(|e| zbus::fdo::Error::Failed(
+                    format!("removing {}: {}", bl_state_path.display(), e)))?;
+            eprintln!("[USER ] RESET removed {}", bl_state_path.display());
+        }
+        let empty_state = blocklist::State::default();
+        {
+            let mut map_v4 = self.blocklist_v4.lock()
+                .map_err(|e| zbus::fdo::Error::Failed(format!("v4 lock: {}", e)))?;
+            let mut map_v6 = self.blocklist_v6.lock()
+                .map_err(|e| zbus::fdo::Error::Failed(format!("v6 lock: {}", e)))?;
+            blocklist::sync(&mut map_v4, &mut map_v6, &empty_state)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        }
+        eprintln!("[USER ] RESET complete (rules + blocklists cleared)");
+        Ok(())
+    }
+
     async fn resolve_sockets(
         &self,
         inodes: Vec<u64>,

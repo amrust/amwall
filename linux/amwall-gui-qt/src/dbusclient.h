@@ -127,6 +127,15 @@ public slots:
     QList<BlocklistEntry> blocklistList();
     void setBlocklistEnabled(const QString &name, bool enabled);
 
+    // Help → "Reset all rules and config" entry. Calls the polkit-
+    // gated daemon Reset method (truncates rules.toml, deletes
+    // blocklists.toml, clears BPF maps). Fires resetCompleted(true,
+    // {}) on success or resetCompleted(false, err) on failure.
+    // GUI-side QSettings cleanup is MainWindow's job — daemon owns
+    // root-owned files, GUI owns user-home files. Privilege split
+    // intentional.
+    void resetDaemon();
+
 signals:
     void stateChanged();
 
@@ -135,6 +144,10 @@ signals:
     void connectAttempt(uint pid, const QString &comm,
                         const QString &ip, ushort port,
                         const QString &action);
+
+    // Fires after the async daemon Reset reply lands. Connected by
+    // MainWindow so the user-config cleanup + UI refresh runs.
+    void resetCompleted(bool ok, const QString &errOut);
 
 private slots:
     // Private — wired to QDBusConnection::connect() with the OLD-

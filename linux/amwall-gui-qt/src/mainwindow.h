@@ -48,6 +48,8 @@ private slots:
     void onAlwaysOnTopToggled(bool on);
     void onDbusStateChanged();
     void onAddRuleFromMenu();   // Edit > Add Rule — switches to User Rules tab
+    void onResetAll();          // Help > Reset all rules and config — polkit-gated wipe
+    void onResetCompleted(bool ok, const QString &errOut);
 
 private:
     void setupCentralWidget();

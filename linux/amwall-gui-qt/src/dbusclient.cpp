@@ -207,6 +207,39 @@ QList<BlocklistEntry> DbusClient::blocklistList() {
     return out;
 }
 
+void DbusClient::resetDaemon() {
+    // Help → "Reset all rules and config" entry-point. Async because
+    // the daemon's Reset method is polkit-gated (same auth as
+    // Allow/Deny/Del/BlocklistSetEnabled); a synchronous call would
+    // freeze the GUI for however long polkit takes to render its
+    // auth prompt. Generous timeout for the same reason.
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("/org/amwall/Daemon1"),
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("Reset"));
+    auto pending = QDBusConnection::systemBus().asyncCall(
+        msg, /*timeoutMs=*/30000);
+    auto *watcher = new QDBusPendingCallWatcher(pending, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished,
+            this, [this](QDBusPendingCallWatcher *w) {
+        QDBusPendingReply<> r = *w;
+        if (r.isError()) {
+            const QString err = r.error().message();
+            qWarning() << "Reset failed:" << err;
+            emit resetCompleted(false, err);
+        } else {
+            qInfo() << "Reset succeeded";
+            // Force an immediate cache refresh so the GUI's rule
+            // count drops to 0 on the next paint instead of waiting
+            // for the 5-second poll.
+            refresh();
+            emit resetCompleted(true, QString());
+        }
+        w->deleteLater();
+    });
+}
+
 void DbusClient::setBlocklistEnabled(const QString &name, bool enabled) {
     // Async via QDBusPendingCall so polkit prompts don't block the
     // event loop. Same pattern as callModify(): we don't wait for the
