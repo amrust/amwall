@@ -1,37 +1,21 @@
 # BPF target settings for amwall-ebpf.
 #
-# [build] / [unstable] — the BPF program builds for bpfel-unknown-none
-# under nightly's build-std=core (no std on the kernel side).
+# bpfel-unknown-none is little-endian BPF on no_std with core only —
+# the rust-src nightly component supplies the core crate sources and
+# build-std=core builds them as part of every compile.
 #
-# [source.*] — override the vendored-sources replacement that the
-# userspace workspace's linux/.cargo/config.toml installs. Cargo
-# merges configs up the directory tree, so without this override
-# ebpf inherits `replace-with = "vendored-sources"` pointing at
-# linux/vendor/ — which doesn't contain aya-ebpf (different
-# workspace, different dep tree) and fails the build with
-# "no matching package named aya-ebpf found".
-#
-# Why ebpf can't use the vendor mirror in the first place:
-# build-std=core pulls nightly sysroot deps (proc_macro →
-# rustc-literal-escaper et al.) that `cargo vendor` can't see when
-# it runs, so the mirror would be incomplete and --frozen --offline
-# would hard-fail looking for those crates. Pointing the override
-# at the real crates.io index lets the small (~23 crate) ebpf dep
-# pull go online; --locked still pins resolution to
-# linux/amwall-ebpf/Cargo.lock so reproducibility is preserved.
-#
-# `replace-with = "crates-io"` self-references and cycles, so we
-# define a new source name (`ebpf-upstream-registry`) and point
-# replace-with at that.
+# Phase 6.10 deliberately keeps the userspace vendored-sources
+# replacement OUT of any .cargo/config.toml that's an ancestor of
+# this directory. Cargo merges configs up the directory tree, so a
+# `[source.crates-io] replace-with = ...` at linux/.cargo/config.toml
+# would silently leak in here and tell cargo to look for aya-ebpf
+# under linux/vendor/ (the userspace mirror, where it doesn't exist).
+# Userspace builds now pass --config flags inline from linux-build.sh
+# instead of carrying a config file, so ebpf inherits nothing and
+# fetches its small (~23 crate) dep tree from upstream as normal.
 
 [build]
 target = "bpfel-unknown-none"
 
 [unstable]
 build-std = ["core"]
-
-[source.crates-io]
-replace-with = "ebpf-upstream-registry"
-
-[source.ebpf-upstream-registry]
-registry = "sparse+https://index.crates.io/"

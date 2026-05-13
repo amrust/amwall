@@ -136,8 +136,20 @@
 #   - Phase 6.10: Offline + frozen builds (userspace) / locked (ebpf)
 #               vendoring     → linux/vendor/ holds every userspace
 #                              crate source pinned by linux/Cargo.lock.
-#                              linux/.cargo/config.toml redirects
-#                              [source.crates-io] at that mirror.
+#                              The source replacement is NOT in a
+#                              .cargo/config.toml file — cargo merges
+#                              configs up the directory tree, and
+#                              linux/.cargo/config.toml would leak
+#                              into the ebpf workspace at
+#                              linux/amwall-ebpf/, telling cargo to
+#                              look for aya-ebpf in the userspace
+#                              mirror where it doesn't exist. The
+#                              replacement is passed via --config CLI
+#                              flags on the userspace `cargo build`
+#                              and as CARGO_SOURCE_* env vars on the
+#                              `cargo deb` step (cargo-deb doesn't
+#                              forward --config to its inner cargo
+#                              metadata invocation).
 #               userspace     → `cargo build --release --frozen --offline`
 #                              and `cargo deb --no-build --offline`.
 #                              Crates.io outage / dep yank / transitive
@@ -859,9 +871,19 @@ fi
 H "Building Rust userspace (amwall-daemon + amwall-cli, release)"
 INFO "Phase 6.1 dropped iced/wgpu/winit/cosmic-text — much faster build now."
 INFO "First-time release compile of tokio + zbus + clap + aya: ~3-5 min."
-# Phase 6.10: --frozen --offline — same rationale as the ebpf build
-# above. Sources resolved exclusively from linux/vendor/.
-if (cd linux && cargo build --release --frozen --offline 2>&1 | sed 's/^/    /'); then
+# Phase 6.10: --frozen --offline pins resolution to linux/Cargo.lock
+# and routes all crates.io reads through linux/vendor/ (207 MB / 173
+# crates). The source-replacement config is passed via --config CLI
+# flags rather than a checked-in linux/.cargo/config.toml because
+# cargo merges configs UP the directory tree — a config file at
+# linux/.cargo/config.toml would leak into the ebpf build sitting
+# at linux/amwall-ebpf/ and tell cargo to look for aya-ebpf in the
+# userspace vendor mirror where it doesn't exist. Inlining the
+# source replacement keeps it scoped to this single cargo invocation.
+if (cd linux && cargo build --release --frozen --offline \
+        --config 'source.crates-io.replace-with="vendored-sources"' \
+        --config 'source.vendored-sources.directory="vendor"' \
+        2>&1 | sed 's/^/    /'); then
     OK "Rust userspace built (release)."
 else
     WARN "userspace build failed — see output above."
@@ -898,10 +920,20 @@ GUI_BIN="$QT_GUI_BIN"
 
 H "Building .deb package (cargo-deb)"
 INFO "Packaging release binaries + debian/ scaffold (--no-build --offline)..."
-# Phase 6.10: --offline for the underlying cargo metadata call
-# cargo-deb runs to resolve asset paths. Combined with --no-build,
-# nothing here touches the network or rebuilds.
-if (cd linux/amwall-daemon && cargo deb --no-build --offline 2>&1 | sed 's/^/    /'); then
+# Phase 6.10: cargo-deb invokes `cargo metadata` internally to
+# resolve asset paths. That metadata call needs the same vendored-
+# sources view the userspace build uses, otherwise it tries to hit
+# the upstream registry while we're in --offline mode and fails.
+# We can't use --config CLI flags because cargo-deb 3.x doesn't
+# forward unknown flags to its inner cargo invocation, so we
+# express the source replacement as CARGO_SOURCE_* env vars (the
+# documented equivalent). VENDOR_ABS is an absolute path so it
+# resolves correctly regardless of where cargo-deb cd's internally.
+VENDOR_ABS="$REPO_DIR/linux/vendor"
+if (cd linux/amwall-daemon && \
+        CARGO_SOURCE_CRATES_IO_REPLACE_WITH=vendored-sources \
+        CARGO_SOURCE_VENDORED_SOURCES_DIRECTORY="$VENDOR_ABS" \
+        cargo deb --no-build --offline 2>&1 | sed 's/^/    /'); then
     DEB_FILE=$(ls "$REPO_DIR/linux/target/debian/"amwall_*.deb 2>/dev/null | head -1)
     if [ -z "$DEB_FILE" ]; then
         WARN ".deb produced but couldn't find it under linux/target/debian/"
