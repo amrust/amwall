@@ -1,5 +1,17 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.8 (current)\par
+What's new in amwall v1.1.9 (current)\par
+\par
+  - Hotfix: v1.1.8 crashed on startup with a Rust runtime\par
+    panic ("already borrowed: BorrowMutError") because the\par
+    new rules-checkbox handler fired during listview\par
+    creation (before any populate ran) and tried to grab a\par
+    profile borrow that was already live up the call stack.\par
+    The handler now uses try_borrow_mut and silently bails\par
+    on any contention -- comctl32-synthesised notifications\par
+    are skipped, real user clicks always succeed because\par
+    they happen at idle\par
+\par
+What's new in amwall v1.1.8\par
 \par
   - Enable / Disable filters is now near-instant. The install\par
     and uninstall paths now wrap their kernel calls in a\par

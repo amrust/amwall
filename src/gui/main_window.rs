@@ -3576,6 +3576,29 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
         return;
     }
 
+    // Defensive: comctl32 fires LVN_ITEMCHANGED at unexpected times —
+    // during the listview's CreateWindowExW init (well before any
+    // populate runs), during LVS_EX_CHECKBOXES style application,
+    // during populator inserts, etc. Our "old state-image != 0"
+    // gate in the WM_NOTIFY dispatcher catches MOST of these but
+    // not all (v1.1.8 shipped with a startup-panic crash exactly
+    // because of a spurious notification that slipped the gate).
+    //
+    // A real user click happens at idle, with no other borrows
+    // live on profile / internal_rules_state / search_text. So if
+    // any of those are currently held immutably (we're inside a
+    // populator, or anywhere else up the call stack), we MUST be
+    // inside a comctl32-synthesised notification — not a real
+    // click — and the safe response is to silently bail. The
+    // `try_borrow_mut()` / `try_borrow()` calls below encode
+    // exactly that semantic.
+    //
+    // Note: the search_text borrow is `borrow().clone()`-and-drop
+    // inside the populators so it's normally not contended at
+    // handler time, but we use `try_borrow()` for consistency
+    // (and so a future populator that holds it longer can't
+    // re-introduce the same class of panic).
+
     let mut profile_dirty = false;
     let mut overrides_dirty = false;
     let mut repopulate_apps_id: Option<i32> = None;
@@ -3597,7 +3620,9 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
             // matches pre-1.1.7 inert checkbox behaviour for
             // those tabs).
             if listview_id == IDC_APPS_PROFILE {
-                let mut profile = state.app.profile.borrow_mut();
+                let Ok(mut profile) = state.app.profile.try_borrow_mut() else {
+                    return;
+                };
                 if let Some(app) = profile.apps.get_mut(row as usize) {
                     if app.is_enabled != new_enabled {
                         app.is_enabled = new_enabled;
@@ -3617,7 +3642,11 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
                 // search filter prunes them; reach the same row
                 // by re-applying the same filter here so the
                 // index matches what the user sees).
-                let filter = state.search_text.borrow().clone();
+                let Ok(filter_borrow) = state.search_text.try_borrow() else {
+                    return;
+                };
+                let filter = filter_borrow.clone();
+                drop(filter_borrow);
                 let target = state
                     .app
                     .internal_profile
@@ -3626,7 +3655,11 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
                     .filter(|r| search_match(&r.name, &filter))
                     .nth(row_usize);
                 if let Some(rule) = target {
-                    let mut overrides = state.app.internal_rules_state.borrow_mut();
+                    let Ok(mut overrides) =
+                        state.app.internal_rules_state.try_borrow_mut()
+                    else {
+                        return;
+                    };
                     overrides.set(
                         RuleKind::Custom,
                         &rule.name,
@@ -3638,9 +3671,15 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
             } else {
                 // User-added row: index into profile.custom_rules
                 // via the same filter walk.
-                let filter = state.search_text.borrow().clone();
+                let Ok(filter_borrow) = state.search_text.try_borrow() else {
+                    return;
+                };
+                let filter = filter_borrow.clone();
+                drop(filter_borrow);
                 let user_row = row_usize - preset_count;
-                let mut profile = state.app.profile.borrow_mut();
+                let Ok(mut profile) = state.app.profile.try_borrow_mut() else {
+                    return;
+                };
                 let visible_indices: Vec<usize> = profile
                     .custom_rules
                     .iter()
@@ -3668,13 +3707,21 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
                     RuleKind::Blocklist,
                 )
             };
-            let filter = state.search_text.borrow().clone();
+            let Ok(filter_borrow) = state.search_text.try_borrow() else {
+                return;
+            };
+            let filter = filter_borrow.clone();
+            drop(filter_borrow);
             let target = rules
                 .iter()
                 .filter(|r| search_match(&r.name, &filter))
                 .nth(row as usize);
             if let Some(rule) = target {
-                let mut overrides = state.app.internal_rules_state.borrow_mut();
+                let Ok(mut overrides) =
+                    state.app.internal_rules_state.try_borrow_mut()
+                else {
+                    return;
+                };
                 overrides.set(kind, &rule.name, new_enabled, rule.is_enabled);
                 overrides_dirty = true;
             }
@@ -3687,8 +3734,19 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
         save_profile_to_disk(state);
     }
     if overrides_dirty {
-        let path = state.app.internal_rules_state_path.borrow().clone();
-        let overrides = state.app.internal_rules_state.borrow();
+        // Path is a RefCell<PathBuf> but the GUI only ever sets it
+        // once during startup, so `try_borrow` here is effectively
+        // free. Skipping save on contention is fine — the next
+        // toggle will retry.
+        let Ok(path_borrow) = state.app.internal_rules_state_path.try_borrow()
+        else {
+            return;
+        };
+        let path = path_borrow.clone();
+        drop(path_borrow);
+        let Ok(overrides) = state.app.internal_rules_state.try_borrow() else {
+            return;
+        };
         if let Err(e) = overrides.save(&path) {
             eprintln!(
                 "amwall: failed to persist internal_rules_state to {}: {e}",
