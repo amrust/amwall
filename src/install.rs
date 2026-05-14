@@ -448,6 +448,23 @@ pub fn install_with_internal(
     global_rules: &GlobalRulesConfig,
     persistent: bool,
 ) -> Result<InstallReport, InstallError> {
+    // Wrap the entire install in one WFP transaction. Each
+    // FwpmFilterAdd0 / FwpmSubLayerAdd0 / FwpmProviderAdd0 is
+    // synchronous-kernel-commit when called outside a transaction —
+    // amwall's bundled profile holds ~1500 rules, each fanning out
+    // to multiple filters via the cross-product walk in
+    // install_one_rule, so the non-transactional path is many
+    // seconds of frozen UI. Inside a transaction the kernel buffers
+    // every modification and applies them all at commit time, which
+    // is the difference between "feels frozen" and "<1 s click".
+    // Mirrors upstream simplewall's `wfp.c:631-660`.
+    //
+    // The transaction is opened FIRST so even the
+    // provider+sublayer Add calls below benefit. Any `?`-style
+    // early return drops the guard, which aborts; only the
+    // explicit `commit()` at the end persists.
+    let tx = engine.transaction_begin()?;
+
     provider::add_with_key(
         engine,
         PROVIDER_NAME,
@@ -598,6 +615,12 @@ pub fn install_with_internal(
         global_rules,
         &mut report.filter_ids.stealth,
     )?;
+
+    // Atomically apply everything queued in this transaction. If
+    // any of the steps above bailed via `?`, the Drop impl on `tx`
+    // already aborted and the kernel state is untouched — partial
+    // installs are impossible.
+    tx.commit()?;
 
     Ok(report)
 }

@@ -1,5 +1,22 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.7 (current)\par
+What's new in amwall v1.1.8 (current)\par
+\par
+  - Enable / Disable filters is now near-instant. The install\par
+    and uninstall paths now wrap their kernel calls in a\par
+    single WFP transaction (FwpmTransactionBegin0 /\par
+    FwpmTransactionCommit0) instead of issuing one\par
+    synchronous-kernel-commit per filter. Full install with\par
+    the bundled blocklist drops from many seconds to under\par
+    a second, matching simplewall's responsiveness\par
+  - New portable distribution: amwall-x86_64-portable.zip\par
+    attached to every release. Unzip anywhere and run --\par
+    profile, settings, and logs live next to the .exe\par
+    instead of in %APPDATA%. Same self-contained binary as\par
+    the MSI install, no system-wide footprint, no installer\par
+    step. Useful for USB drives, sandbox VMs, secondary\par
+    user accounts\par
+\par
+What's new in amwall v1.1.7\par
 \par
   - Fix amwall.exe failing to launch with "VCRUNTIME140.dll\par
     was not found" on Windows machines that don't have the\par

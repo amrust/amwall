@@ -120,6 +120,45 @@ jobs:
           "versioned=$($msi.FullName)" >> $env:GITHUB_OUTPUT
           "stable=$stable" >> $env:GITHUB_OUTPUT
 
+      - name: Build portable ZIP
+        # amwall already supports portable mode (src/paths.rs detects
+        # an `amwall.ini` marker next to amwall.exe and routes profile,
+        # settings, log, etc. into the exe's directory instead of
+        # %APPDATA%). Ship a zip containing the release exe plus an
+        # empty `amwall.ini` so unzipping anywhere — USB drive, sandbox
+        # VM, secondary user account — gets a self-contained install
+        # with no system-wide footprint and no installer step.
+        #
+        # Two zips: versioned (asset-list clarity) + stable-named (so
+        # the README's "Download portable" button can use
+        # releases/latest/download/amwall-x86_64-portable.zip).
+        # Layout is intentionally minimal: exe + marker. The exe is
+        # fully self-contained (static CRT from v1.1.7, embedded
+        # resources, embedded i18n) so no DLLs / assets / docs ride
+        # along.
+        id: portable
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "amwall-portable"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/amwall.exe" $stage
+          # Empty file IS the marker — paths::is_portable only checks
+          # for file existence, not contents. The format (when non-
+          # empty) is the same key=value store as settings.txt in
+          # portable mode, so users can pre-seed preferences before
+          # zipping for distribution.
+          New-Item -ItemType File -Path (Join-Path $stage "amwall.ini") -Force | Out-Null
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
+                      ForEach-Object { $_.Matches[0].Groups[1].Value })
+          $versioned = Join-Path "target/wix" "amwall-$version-x86_64-portable.zip"
+          $stable    = Join-Path "target/wix" "amwall-x86_64-portable.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $versioned -Force
+          Copy-Item $versioned $stable -Force
+          "versioned=$versioned" >> $env:GITHUB_OUTPUT
+          "stable=$stable" >> $env:GITHUB_OUTPUT
+          Write-Host "Built portable zip: $versioned"
+
       - name: Extract release notes from tag annotation
         # The Windows MSI is produced from the main branch which
         # also carries the Linux port work — `generate_release_notes:
@@ -159,7 +198,9 @@ jobs:
         # in-progress Linux port.
         # Both the versioned and the stable-named MSI are
         # attached so the README's "Download" button can use
-        # `releases/latest/download/amwall-x86_64.msi`.
+        # `releases/latest/download/amwall-x86_64.msi`. Same
+        # versioned/stable pairing for the portable zip so a
+        # similarly-stable "Download portable" link works.
         uses: softprops/action-gh-release@v2
         with:
           draft: true
@@ -167,5 +208,7 @@ jobs:
           files: |
             ${{ steps.msi.outputs.versioned }}
             ${{ steps.msi.outputs.stable }}
+            ${{ steps.portable.outputs.versioned }}
+            ${{ steps.portable.outputs.stable }}
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}

@@ -23,7 +23,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineOpen0, FwpmFilterCreateEnumHandle0, FwpmFilterDeleteByKey0,
     FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0, FwpmProviderDeleteByKey0,
     FwpmSubLayerCreateEnumHandle0, FwpmSubLayerDeleteByKey0, FwpmSubLayerDestroyEnumHandle0,
-    FwpmSubLayerEnum0,
+    FwpmSubLayerEnum0, FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0,
 };
 use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, UuidCreate};
 use windows::core::{GUID, PWSTR};
@@ -95,6 +95,14 @@ pub enum WfpError {
     /// that specific code as the idempotent path, so callers only
     /// see `ProviderDelete(...)` for genuine errors.
     ProviderDelete(u32),
+    /// `FwpmTransactionBegin0` returned a non-zero Win32 error.
+    /// Common: 0x80320002 (`FWP_E_TXN_IN_PROGRESS`) if a transaction
+    /// was already open on the engine handle.
+    TransactionBegin(u32),
+    /// `FwpmTransactionCommit0` returned a non-zero Win32 error.
+    /// The kernel auto-aborts the transaction on commit failure, so
+    /// no explicit cleanup is needed on this path.
+    TransactionCommit(u32),
 }
 
 impl std::fmt::Display for WfpError {
@@ -117,6 +125,12 @@ impl std::fmt::Display for WfpError {
             }
             Self::SubLayerDelete(s) => {
                 write!(f, "FwpmSubLayerDeleteByKey0 failed (Win32 error {s:#010x})")
+            }
+            Self::TransactionBegin(s) => {
+                write!(f, "FwpmTransactionBegin0 failed (Win32 error {s:#010x})")
+            }
+            Self::TransactionCommit(s) => {
+                write!(f, "FwpmTransactionCommit0 failed (Win32 error {s:#010x})")
             }
             Self::ProviderDelete(s) => {
                 write!(f, "FwpmProviderDeleteByKey0 failed (Win32 error {s:#010x})")
@@ -246,6 +260,32 @@ impl WfpEngine {
         self.session_key
     }
 
+    /// Begin a WFP transaction on this engine. Returns an RAII guard
+    /// that commits on `commit()` and aborts on Drop if `commit()`
+    /// was never called (early return on error, panic, etc.).
+    ///
+    /// Every `FwpmFilterAdd0` / `FwpmFilterDeleteByKey0` /
+    /// `FwpmSubLayerAdd0` / etc. issued through this engine handle
+    /// while the transaction is open is buffered in user-mode
+    /// session state and applied to the kernel atomically at commit
+    /// time — instead of being its own synchronous kernel commit.
+    /// For amwall's full install path (1500+ bundled blocklist rules
+    /// plus user / system / preset rules, each fanning out to
+    /// multiple filters), this is the difference between a
+    /// many-second "feels frozen" Enable filters click and a sub-
+    /// second one. Mirrors upstream simplewall's `wfp.c:631-660`
+    /// transaction wrapping around its install loop.
+    pub fn transaction_begin(&self) -> Result<Transaction<'_>, WfpError> {
+        let status = unsafe { FwpmTransactionBegin0(self.handle, 0) };
+        if status != ERROR_SUCCESS {
+            return Err(WfpError::TransactionBegin(status));
+        }
+        Ok(Transaction {
+            engine: self,
+            committed: false,
+        })
+    }
+
     /// Walk the kernel's filter and sublayer tables and remove every
     /// entry whose `providerKey` matches `provider_key`, then remove
     /// the provider itself. The upstream simplewall pattern for
@@ -267,6 +307,15 @@ impl WfpEngine {
         &self,
         provider_key: &GUID,
     ) -> Result<CleanupReport, WfpError> {
+        // Same transactional batching as the install side: amwall's
+        // provider can carry 2000+ filters after a full install
+        // (1500 bundled blocklist + system + per-app), and walking
+        // them with one FwpmFilterDeleteByKey0 per filter outside a
+        // transaction is many seconds of kernel commits. Inside a
+        // transaction the deletes are buffered and applied at
+        // commit time — same difference as install.
+        let tx = self.transaction_begin()?;
+
         let filters_deleted = self.delete_filters_for_provider(provider_key)?;
         let sublayers_deleted = self.delete_sublayers_for_provider(provider_key)?;
 
@@ -284,6 +333,8 @@ impl WfpEngine {
             0x8032_0005 => false, // FWP_E_PROVIDER_NOT_FOUND
             other => return Err(WfpError::ProviderDelete(other)),
         };
+
+        tx.commit()?;
 
         Ok(CleanupReport {
             filters_deleted,
@@ -496,6 +547,46 @@ pub struct CleanupReport {
     pub filters_deleted: u32,
     pub sublayers_deleted: u32,
     pub provider_deleted: bool,
+}
+
+/// RAII guard for a WFP transaction. Returned by
+/// `WfpEngine::transaction_begin`. Call `commit` to apply the
+/// buffered changes; on Drop without commit (early return, panic,
+/// `?` propagation, etc.) the transaction is aborted so the kernel
+/// state is left untouched. Borrowing the engine for `'a` prevents
+/// callers from accidentally closing the engine handle mid-
+/// transaction.
+pub struct Transaction<'a> {
+    engine: &'a WfpEngine,
+    committed: bool,
+}
+
+impl Transaction<'_> {
+    /// Apply every buffered Fwpm*Add0 / Fwpm*Delete* call to the
+    /// kernel in one atomic commit. Consumes self so a single
+    /// transaction can only be committed once.
+    pub fn commit(mut self) -> Result<(), WfpError> {
+        let status = unsafe { FwpmTransactionCommit0(self.engine.handle) };
+        // Mark committed regardless of status — the kernel auto-
+        // aborts on commit failure, so the Drop impl must not
+        // double-abort (which would surface FWP_E_NO_TXN_IN_PROGRESS).
+        self.committed = true;
+        if status != ERROR_SUCCESS {
+            return Err(WfpError::TransactionCommit(status));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Transaction<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Best-effort abort — if it fails (already aborted by
+            // the kernel, etc.) there's nothing we can usefully do
+            // from a Drop impl.
+            let _ = unsafe { FwpmTransactionAbort0(self.engine.handle) };
+        }
+    }
 }
 
 impl Drop for WfpEngine {
