@@ -9,8 +9,10 @@
 #include <QHeaderView>
 #include <QHostAddress>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -191,7 +193,16 @@ ConnectionsTab::ConnectionsTab(DbusClient *dbus, QWidget *parent)
     header->addWidget(title);
     m_countLabel = new QLabel(QStringLiteral("(0)"), this);
     header->addWidget(m_countLabel);
-    header->addStretch(1);
+    header->addSpacing(12);
+
+    header->addWidget(new QLabel(tr("Filter:"), this));
+    m_filter = new QLineEdit(this);
+    m_filter->setPlaceholderText(tr("process, IP, or port..."));
+    m_filter->setClearButtonEnabled(true);
+    connect(m_filter, &QLineEdit::textChanged,
+            this, &ConnectionsTab::onFilterChanged);
+    header->addWidget(m_filter, 1);
+
     auto *refreshBtn = new QPushButton(
         style()->standardIcon(QStyle::SP_BrowserReload),
         tr("Refresh"), this);
@@ -296,4 +307,34 @@ void ConnectionsTab::refresh() {
     m_table->setSortingEnabled(true);
     m_countLabel->setText(
         tr("(%1 sockets, %2 resolved)").arg(rows.size()).arg(resolved));
+
+    // Re-apply the active filter so newly-arrived sockets don't pop
+    // into view ignoring the user's current search needle.
+    if (m_filter && !m_filter->text().isEmpty()) {
+        onFilterChanged(m_filter->text());
+    }
+}
+
+void ConnectionsTab::onFilterChanged(const QString &text) {
+    // Hide rows whose Process / Proto / Local / Remote / State columns
+    // don't contain the needle (case-insensitive substring). Same shape
+    // as AppsTab and UserRulesTab. Empty needle = show all.
+    const QString needle = text.trimmed();
+    QSignalBlocker block(m_table);
+    for (int r = 0; r < m_table->rowCount(); ++r) {
+        bool hide = false;
+        if (!needle.isEmpty()) {
+            bool hit = false;
+            for (int c = 0; c < m_table->columnCount(); ++c) {
+                if (auto *it = m_table->item(r, c)) {
+                    if (it->text().contains(needle, Qt::CaseInsensitive)) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            if (!hit) hide = true;
+        }
+        m_table->setRowHidden(r, hide);
+    }
 }

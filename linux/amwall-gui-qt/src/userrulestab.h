@@ -16,6 +16,7 @@
 #include "dbusclient.h"
 
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QTableWidget;
 
@@ -37,6 +38,7 @@ private slots:
     void onDeleteRule();
     void onTableActivated();   // double-click / Enter
     void onTableContextMenu(const QPoint &pos);  // right-click → Properties/Allow/Block/Remove/Copy
+    void onFilterChanged(const QString &text);   // search bar → hide non-matching rows
 
 private:
     void rebuildTable();
@@ -44,6 +46,7 @@ private:
 
     DbusClient   *m_dbus = nullptr;
     QTableWidget *m_table = nullptr;
+    QLineEdit    *m_filter = nullptr;
     QPushButton  *m_addBtn = nullptr;
     QPushButton  *m_editBtn = nullptr;
     QPushButton  *m_deleteBtn = nullptr;

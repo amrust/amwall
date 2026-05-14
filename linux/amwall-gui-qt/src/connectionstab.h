@@ -15,6 +15,7 @@
 
 class DbusClient;
 class QLabel;
+class QLineEdit;
 class QTableWidget;
 class QTimer;
 
@@ -29,9 +30,13 @@ public:
 public slots:
     void refresh();
 
+private slots:
+    void onFilterChanged(const QString &text);
+
 private:
     DbusClient   *m_dbus = nullptr;
     QTimer       *m_timer = nullptr;
     QTableWidget *m_table = nullptr;
+    QLineEdit    *m_filter = nullptr;
     QLabel       *m_countLabel = nullptr;
 };

@@ -9,6 +9,7 @@
 #include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
@@ -25,14 +26,23 @@ UserRulesTab::UserRulesTab(DbusClient *dbus, QWidget *parent)
     outer->setContentsMargins(8, 8, 8, 8);
     outer->setSpacing(6);
 
-    // ─── Header (count) ──────────────────────────────────────────
+    // ─── Header (count + filter) ─────────────────────────────────
     auto *header = new QHBoxLayout;
     auto *title = new QLabel(tr("<b>User rules</b>"), this);
     title->setTextFormat(Qt::RichText);
     header->addWidget(title);
     m_countLabel = new QLabel(QStringLiteral("(0)"), this);
     header->addWidget(m_countLabel);
-    header->addStretch(1);
+    header->addSpacing(12);
+
+    header->addWidget(new QLabel(tr("Filter:"), this));
+    m_filter = new QLineEdit(this);
+    m_filter->setPlaceholderText(tr("comm, action, or destination..."));
+    m_filter->setClearButtonEnabled(true);
+    connect(m_filter, &QLineEdit::textChanged,
+            this, &UserRulesTab::onFilterChanged);
+    header->addWidget(m_filter, 1);
+
     outer->addLayout(header);
 
     // ─── Table ───────────────────────────────────────────────────
@@ -170,6 +180,12 @@ void UserRulesTab::rebuildTable() {
     }
     m_table->setSortingEnabled(true);
     m_countLabel->setText(QStringLiteral("(%1)").arg(rules.size()));
+
+    // Re-apply the active filter so newly-added rules don't pop
+    // into view if they don't match the current search needle.
+    if (m_filter && !m_filter->text().isEmpty()) {
+        onFilterChanged(m_filter->text());
+    }
 
     // Re-select the row whose (comm, ip, port) matches what was
     // selected before. Done AFTER setSortingEnabled re-applies the
@@ -347,5 +363,29 @@ void UserRulesTab::onTableContextMenu(const QPoint &pos) {
         const QString summary = QStringLiteral("%1\t%2\t%3\t%4")
             .arg(r.comm, r.action, r.ip, portText);
         QApplication::clipboard()->setText(summary);
+    }
+}
+
+void UserRulesTab::onFilterChanged(const QString &text) {
+    // Hide rows whose comm / action / IP / port columns don't
+    // contain the needle (case-insensitive substring). Same shape
+    // as AppsTab::onFilterChanged. Empty needle = show all.
+    const QString needle = text.trimmed();
+    QSignalBlocker block(m_table);
+    for (int r = 0; r < m_table->rowCount(); ++r) {
+        bool hide = false;
+        if (!needle.isEmpty()) {
+            bool hit = false;
+            for (int c = 0; c < m_table->columnCount(); ++c) {
+                if (auto *it = m_table->item(r, c)) {
+                    if (it->text().contains(needle, Qt::CaseInsensitive)) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            if (!hit) hide = true;
+        }
+        m_table->setRowHidden(r, hide);
     }
 }
