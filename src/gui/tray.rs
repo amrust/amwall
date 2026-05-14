@@ -118,11 +118,29 @@ pub fn remove(hwnd: HWND) {
 /// NIM_MODIFY — swap icon + tooltip to reflect a filter on/off
 /// transition without removing & re-adding the icon (which would
 /// flicker the notification area).
-pub fn update(hwnd: HWND, active: bool) {
+///
+/// Self-heals when the shell silently lost track of our icon
+/// (happens after some explorer.exe glitches that don't broadcast
+/// `TaskbarCreated`): if NIM_MODIFY returns FALSE we fall back to
+/// NIM_ADD, which re-installs the icon with the correct
+/// active/inactive variant. Without this fallback the desync is
+/// invisible — the user clicks "Enable filters", the kernel side
+/// works, but the tray stays gray + "filters off" forever because
+/// every subsequent NIM_MODIFY targets a slot that no longer
+/// exists. Returns true if the icon is in the requested state by
+/// the time we return (either MODIFY succeeded or the ADD
+/// fallback did).
+pub fn update(hwnd: HWND, active: bool) -> bool {
     let nid = build_data(hwnd, active);
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    let modified = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() };
+    if modified {
+        return true;
     }
+    eprintln!(
+        "amwall: tray::update — NIM_MODIFY failed (shell may have lost the icon); \
+         retrying as NIM_ADD"
+    );
+    unsafe { Shell_NotifyIconW(NIM_ADD, &nid).as_bool() }
 }
 
 /// Pop a tray-icon balloon ("info" style — title + body, OS-

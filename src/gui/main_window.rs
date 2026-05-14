@@ -1818,7 +1818,7 @@ fn expire_timed_apps(hwnd: HWND, state: &WndState) {
     populate_apps_tab(state);
     on_tab_change(hwnd);
     force_active_apps_listview_jiggle(hwnd, state);
-    reinstall_filters_if_active(state);
+    reinstall_filters_if_active(hwnd, state);
     set_status_text(
         state.status.get(),
         0,
@@ -1861,6 +1861,7 @@ fn is_microsoft_signed(path: &std::path::Path) -> bool {
 }
 
 fn auto_catalog_drops(
+    hwnd: HWND,
     state: &WndState,
     events: &[crate::wfp::events::NetEvent],
 ) -> Vec<(std::path::PathBuf, String)> {
@@ -1988,7 +1989,7 @@ fn auto_catalog_drops(
         // sit in profile.apps but no per-app permit filter
         // exists in WFP yet, so the very next packet still gets
         // dropped by the default-deny.
-        reinstall_filters_if_active(state);
+        reinstall_filters_if_active(hwnd, state);
         let label = if auto_allowed_count == 1 {
             t!("status.auto_allowed_one")
         } else {
@@ -2256,7 +2257,7 @@ fn on_connect_allow(hwnd: HWND, wparam: WPARAM) {
     save_profile_to_disk(state);
     populate_apps_tab(state);
     on_tab_change(hwnd);
-    reinstall_filters_if_active(state);
+    reinstall_filters_if_active(hwnd, state);
     let name = path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
@@ -2313,7 +2314,7 @@ fn drain_events(hwnd: HWND, state: &WndState) {
     // ever".
     let mut profile_changed = false;
     let new_apps = if filters_active && !batch.is_empty() {
-        auto_catalog_drops(state, &batch)
+        auto_catalog_drops(hwnd, state, &batch)
     } else {
         Vec::new()
     };
@@ -3606,7 +3607,7 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
     // scrolls or resizes. Forcing an InvalidateRect on the
     // listview's parent rect re-runs the paint pipeline cleanly.
     force_active_apps_listview_jiggle(hwnd, state);
-    reinstall_filters_if_active(state);
+    reinstall_filters_if_active(hwnd, state);
     set_status_text(state.status.get(), 0, &t!("status.removed_entries", count = removed));
 }
 
@@ -3718,7 +3719,7 @@ fn on_context_set_enabled(hwnd: HWND, enable: bool) {
     // One reinstall covers every path's permit / removal in a
     // single cleanup_provider + install pass — much cheaper than
     // re-pushing per app.
-    reinstall_filters_if_active(state);
+    reinstall_filters_if_active(hwnd, state);
 
     let verb = if enable { "Allowed" } else { "Blocked" };
     let msg = if affected == 1 {
@@ -3828,7 +3829,7 @@ fn on_context_remove(hwnd: HWND) {
     populate_uwp_tab(state);
     on_tab_change(hwnd);
     force_active_apps_listview_jiggle(hwnd, state);
-    reinstall_filters_if_active(state);
+    reinstall_filters_if_active(hwnd, state);
     set_status_text(
         state.status.get(),
         0,
@@ -3926,7 +3927,7 @@ fn on_context_properties(hwnd: HWND) {
     populate_services_tab(state);
     populate_uwp_tab(state);
     on_tab_change(hwnd);
-    reinstall_filters_if_active(state);
+    reinstall_filters_if_active(hwnd, state);
     set_status_text(
         state.status.get(),
         0,
@@ -4069,7 +4070,7 @@ fn on_toggle(hwnd: HWND, id: u16) {
             // through immediately so the toggle is visible without
             // making the user click "Disable filters" then "Enable
             // filters" by hand.
-            reinstall_filters_if_active(state);
+            reinstall_filters_if_active(hwnd, state);
         }
         IDM_USECERTIFICATES_CHK => {
             // Update the worker's atomic flag, then re-enqueue
@@ -4361,7 +4362,7 @@ fn on_enable_filters(hwnd: HWND) {
 /// machinery. cleanup_provider runs in O(filter count) syscalls
 /// and even on a 200-app profile (~1000 filters) finishes in
 /// well under a second.
-fn reinstall_filters_if_active(state: &WndState) {
+fn reinstall_filters_if_active(hwnd: HWND, state: &WndState) {
     if !state.filters_active.get() {
         return;
     }
@@ -4409,15 +4410,19 @@ fn reinstall_filters_if_active(state: &WndState) {
             eprintln!("amwall: reinstall: install failed: {e}");
             // We tore down successfully but the reinstall failed
             // — flip filters_active so the toolbar reflects the
-            // actual state and the user can investigate.
+            // actual state and the user can investigate. Title-bar
+            // icon + tray icon also need the swap (Bug 1 from the
+            // 1.1.4 tray-desync report: the comment used to say
+            // "no hwnd here, callers will refresh later" but that
+            // refresh path doesn't actually exist for any caller
+            // of reinstall_filters_if_active — the user reliably
+            // ended up with toolbar saying "Enable" while the tray
+            // still showed the color "filters on" icon and tooltip.
+            // Now we have hwnd and can do all three updates in one
+            // place.).
             state.filters_active.set(false);
             update_enable_filters_button(state, false);
-            // No hwnd here — the toolbar update reaches the
-            // window via `state.toolbar`, but the title-bar
-            // icon swap needs the main hwnd. Caller-paths
-            // (right-click handlers) all run on the GUI thread
-            // and will refresh on the next apply_initial pass
-            // if needed.
+            update_titlebar_icon(hwnd, false);
             return;
         }
     };
@@ -5129,7 +5134,7 @@ fn on_purge_unused(hwnd: HWND) {
     populate_apps_tab(state);
     on_tab_change(hwnd);
     force_active_apps_listview_jiggle(hwnd, state);
-    reinstall_filters_if_active(state);
+    reinstall_filters_if_active(hwnd, state);
     set_status_text(state.status.get(), 0, &t!("status.purged_apps", count = removed));
 }
 
@@ -5163,7 +5168,7 @@ fn on_purge_timers(hwnd: HWND) {
     populate_apps_tab(state);
     on_tab_change(hwnd);
     force_active_apps_listview_jiggle(hwnd, state);
-    reinstall_filters_if_active(state);
+    reinstall_filters_if_active(hwnd, state);
     set_status_text(state.status.get(), 0, &t!("status.cleared_timers", count = cleared));
 }
 
