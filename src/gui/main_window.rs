@@ -2092,7 +2092,14 @@ fn on_update_available(hwnd: HWND, wparam: WPARAM) {
     }
     let info = unsafe { Box::from_raw(raw) };
 
-    let body = t!("message.update_available_body", latest = &info.latest_tag, current = env!("CARGO_PKG_VERSION"));
+    // Prepend "v" so "Current version" and "Latest version" lines
+    // both render with the same v-prefixed shape (GitHub's tag
+    // comes in as "v1.2.3"; CARGO_PKG_VERSION is the bare "1.2.3").
+    // The version-comparison in update_check::is_strictly_newer
+    // strips "v" from both inputs already, so this only affects
+    // what the user sees in the dialog.
+    let current_display = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let body = t!("message.update_available_body", latest = &info.latest_tag, current = &current_display);
     let mut wbody = wide(&body);
     let mut wtitle = wide(&t!("dialog.update_available"));
     let result = unsafe {
@@ -2150,7 +2157,10 @@ fn on_update_uptodate(hwnd: HWND, wparam: WPARAM) {
     }
     let info = unsafe { Box::from_raw(raw) };
 
-    let body = t!("message.update_uptodate_body", current = env!("CARGO_PKG_VERSION"), latest = &info.latest_tag);
+    // Same v-prefix shape match as on_update_available — keeps the
+    // "Current" / "Latest" lines consistent in the dialog.
+    let current_display = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let body = t!("message.update_uptodate_body", current = &current_display, latest = &info.latest_tag);
     let mut wbody = wide(&body);
     let mut wtitle = wide(&t!("dialog.check_updates"));
     unsafe {
