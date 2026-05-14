@@ -15,7 +15,7 @@ use aya_ebpf::{
     cty::c_void,
     helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_probe_read_kernel},
     macros::{lsm, map},
-    maps::{HashMap, RingBuf},
+    maps::{Array, HashMap, RingBuf},
     programs::LsmContext,
 };
 
@@ -107,6 +107,32 @@ static BLOCKLIST_V4: HashMap<u32, u8> = HashMap::with_max_entries(65536, 0);
 #[map]
 static BLOCKLIST_V6: HashMap<[u8; 16], u8> = HashMap::with_max_entries(65536, 0);
 
+// Master enforcement toggle. 1-element Array (key=0) holding a u32:
+//   1 = filters ENABLED (default — every connect goes through the
+//       blocklist + per-comm rule lookup)
+//   0 = filters DISABLED (decide() short-circuits to ACT_ALLOW
+//       before any lookup; useful when the user wants to temporarily
+//       lift enforcement without stopping the daemon — same shape as
+//       simplewall's "Disable filters" toggle)
+//
+// The daemon writes to this map from its SetEnabled D-Bus method
+// (polkit-gated) and persists the chosen value to /etc/amwall/enabled
+// so the state survives daemon restarts. Default on missing file = 1
+// (enforce) — fail-closed.
+#[map]
+static ENABLED: Array<u32> = Array::with_max_entries(1, 0);
+
+#[inline(always)]
+fn is_enforcement_enabled() -> bool {
+    // Default to enabled if the daemon hasn't initialized the map
+    // yet (between BPF program load and the daemon's first write,
+    // a connect could fire and we want fail-closed semantics).
+    match ENABLED.get(0) {
+        Some(&v) => v != 0,
+        None => true,
+    }
+}
+
 #[repr(C)]
 struct SockAddrFamily { family: u16 }
 
@@ -166,6 +192,15 @@ fn current_comm() -> [u8; 16] {
 }
 
 fn decide(ctx: &LsmContext) -> u8 {
+    // Master toggle — when filters are disabled at the daemon level,
+    // bypass every check and allow everything. We deliberately skip
+    // the ringbuf event submission too: the GUI's Packets log would
+    // otherwise fill with "allowed" entries that aren't really
+    // policy decisions, just bypass passthroughs.
+    if !is_enforcement_enabled() {
+        return ACT_ALLOW;
+    }
+
     let addr_ptr: *const c_void = unsafe { ctx.arg(1) };
 
     let family = match unsafe {

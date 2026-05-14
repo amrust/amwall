@@ -84,6 +84,14 @@ public:
     QDateTime lastRefresh() const    { return m_lastRefresh; }
     QString lastError() const        { return m_lastError; }
 
+    // Master enforcement toggle — true = filters active, false =
+    // bypass (every connect ALLOWed at BPF). Refreshed on every
+    // poll tick AND immediately whenever the daemon emits the
+    // EnabledChanged signal. Defaults to true at construction so
+    // the GUI starts in "enforcement on" mode while the first poll
+    // is in flight.
+    bool isEnforcementEnabled() const { return m_enforcementEnabled; }
+
     // True if rules.toml already contains ANY rule (allow or deny,
     // any IP, any port) for this comm. Once the user has decided
     // about an app — even just one specific destination — we don't
@@ -136,6 +144,14 @@ public slots:
     // intentional.
     void resetDaemon();
 
+    // Master enforcement toggle. setEnforcementEnabled() fires the
+    // polkit-gated SetEnabled D-Bus method async — once it lands,
+    // the daemon emits EnabledChanged which we re-emit here as
+    // enforcementEnabledChanged so the toolbar / tray / status-bar
+    // all flip in sync. Status updates also propagate via the
+    // periodic refresh tick (calls IsEnabled).
+    void setEnforcementEnabled(bool enabled);
+
 signals:
     void stateChanged();
 
@@ -149,6 +165,13 @@ signals:
     // MainWindow so the user-config cleanup + UI refresh runs.
     void resetCompleted(bool ok, const QString &errOut);
 
+    // Master enforcement state changed (either via our own
+    // setEnforcementEnabled, another GUI client, or amwall-cli).
+    // MainWindow uses it to flip the toolbar/tray/status badge in
+    // real time — refresh poll catches it eventually but the signal
+    // is sub-second.
+    void enforcementEnabledChanged(bool enabled);
+
 private slots:
     // Private — wired to QDBusConnection::connect() with the OLD-
     // style SLOT() macro because Qt's D-Bus signal demarshaller
@@ -156,6 +179,11 @@ private slots:
     void onDbusConnectAttempt(uint pid, const QString &comm,
                               const QString &ip, ushort port,
                               const QString &action);
+
+    // Same OLD-style SLOT() pattern for the daemon's
+    // EnabledChanged signal. Updates m_enforcementEnabled and
+    // re-emits enforcementEnabledChanged for downstream listeners.
+    void onDbusEnabledChanged(bool enabled);
 
 private:
     bool pingDaemon(QString *errOut);
@@ -167,6 +195,7 @@ private:
     QTimer *m_timer = nullptr;
 
     bool             m_reachable = false;
+    bool             m_enforcementEnabled = true;  // optimistic default
     QList<RuleEntry> m_rules;
     QDateTime        m_lastRefresh;
     QString          m_lastError;

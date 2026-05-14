@@ -50,6 +50,8 @@ private slots:
     void onAddRuleFromMenu();   // Edit > Add Rule — switches to User Rules tab
     void onResetAll();          // Help > Reset all rules and config — polkit-gated wipe
     void onResetCompleted(bool ok, const QString &errOut);
+    void onToggleEnforcement(); // File > Disable/Enable filters & toolbar/tray equivalents
+    void onEnforcementChanged(bool enabled);  // Daemon-side state changed → re-paint UI
 
 private:
     void setupCentralWidget();
@@ -77,4 +79,15 @@ private:
     QAction *m_quitAction = nullptr;
 
     QAction *m_alwaysOnTopAction = nullptr;
+
+    // Master enforcement toggle widgets — kept as members so File
+    // menu, tray menu, toolbar, and status badge all stay in sync
+    // when the daemon emits EnabledChanged. Updated by
+    // onEnforcementChanged(); each is allowed to be null if the
+    // corresponding setup function hasn't run yet (e.g., tray
+    // unavailable on this desktop).
+    QAction *m_enforcementMenuAction  = nullptr;  // File menu entry
+    QAction *m_enforcementTrayAction  = nullptr;  // tray menu entry
+    QAction *m_enforcementToolbarAction = nullptr;  // toolbar button
+    QLabel  *m_statusEnforcement = nullptr;        // status-bar badge
 };

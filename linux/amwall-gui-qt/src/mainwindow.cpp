@@ -103,6 +103,20 @@ void MainWindow::setupMenuBar() {
     refresh->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     connect(refresh, &QAction::triggered, m_dbus, &DbusClient::refresh);
     file->addSeparator();
+
+    // Master enforcement toggle. Label flips between "Disable
+    // filters" and "Enable filters" based on current state — same
+    // shape as Win32 amwall's IDM_TRAY_START toolbar button. Stored
+    // as a member so onEnforcementChanged can keep the label in
+    // sync with whatever the daemon reports.
+    m_enforcementMenuAction = file->addAction(tr("&Disable filters"));
+    m_enforcementMenuAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D));
+    m_enforcementMenuAction->setIcon(
+        style()->standardIcon(QStyle::SP_MediaPause));
+    connect(m_enforcementMenuAction, &QAction::triggered,
+            this, &MainWindow::onToggleEnforcement);
+    file->addSeparator();
+
     auto *settings = file->addAction(tr("&Settings..."));
     settings->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Comma));
     settings->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
@@ -155,6 +169,8 @@ void MainWindow::setupMenuBar() {
     if (m_dbus) {
         connect(m_dbus, &DbusClient::resetCompleted,
                 this, &MainWindow::onResetCompleted);
+        connect(m_dbus, &DbusClient::enforcementEnabledChanged,
+                this, &MainWindow::onEnforcementChanged);
     }
 }
 
@@ -166,6 +182,16 @@ void MainWindow::setupStatusBar() {
     m_statusDaemon = new QLabel(tr("● Daemon: probing..."), this);
     m_statusDaemon->setMargin(4);
     statusBar()->addPermanentWidget(m_statusDaemon, /*stretch=*/1);
+
+    // Master-toggle badge — bright red "FILTERS DISABLED" when the
+    // daemon is in bypass mode so the user can't miss it; hidden
+    // (zero-width) when filters are on. Same urgency as Win32
+    // amwall's status-bar reflection of IDM_TRAY_START.
+    m_statusEnforcement = new QLabel(this);
+    m_statusEnforcement->setMargin(4);
+    m_statusEnforcement->setTextFormat(Qt::RichText);
+    m_statusEnforcement->setVisible(false);  // shown by onEnforcementChanged
+    statusBar()->addPermanentWidget(m_statusEnforcement, /*stretch=*/0);
 
     m_statusRefresh = new QLabel(tr("Last refresh: —"), this);
     m_statusRefresh->setMargin(4);
@@ -188,6 +214,17 @@ void MainWindow::setupTrayIcon() {
     m_trayMenu = new QMenu(this);
     m_showHideAction = m_trayMenu->addAction(tr("&Show / Hide"));
     connect(m_showHideAction, &QAction::triggered, this, &MainWindow::onShowHide);
+    m_trayMenu->addSeparator();
+
+    // Master enforcement toggle — same handler as the File-menu
+    // entry, label kept in sync via onEnforcementChanged. Critical
+    // tray entry: lets the user pause/resume firewall enforcement
+    // without having to open the main window first.
+    m_enforcementTrayAction = m_trayMenu->addAction(tr("&Disable filters"));
+    m_enforcementTrayAction->setIcon(
+        style()->standardIcon(QStyle::SP_MediaPause));
+    connect(m_enforcementTrayAction, &QAction::triggered,
+            this, &MainWindow::onToggleEnforcement);
     m_trayMenu->addSeparator();
     m_quitAction = m_trayMenu->addAction(tr("&Quit"));
     connect(m_quitAction, &QAction::triggered, this, &MainWindow::onQuit);
@@ -398,6 +435,78 @@ void MainWindow::onResetCompleted(bool ok, const QString &errOut) {
         tr("All rules, blocklists, and preferences have been cleared. "
            "The daemon is running on default-deny — new outbound "
            "connections will prompt the next time they're attempted."));
+}
+
+void MainWindow::onToggleEnforcement() {
+    if (!m_dbus) return;
+
+    // Disabling enforcement is destructive (every outbound connection
+    // gets through, even ones that would have been denied), so we
+    // confirm before flipping it OFF. Re-enabling is safe and goes
+    // through with no prompt.
+    const bool currentlyEnabled = m_dbus->isEnforcementEnabled();
+    if (currentlyEnabled) {
+        const auto choice = QMessageBox::warning(
+            this, tr("Disable filters?"),
+            tr("This will put amwall into bypass mode — every outbound "
+               "connection will be ALLOWED at the kernel level, "
+               "regardless of rules or blocklists. The daemon stays "
+               "running and rules are preserved; you can re-enable "
+               "filters at any time from this menu or the tray.\n\n"
+               "Use this only when you need to temporarily lift "
+               "enforcement (e.g., debugging a network issue)."),
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel);
+        if (choice != QMessageBox::Yes) return;
+    }
+
+    // Fires the polkit-gated D-Bus call. EnabledChanged signal will
+    // re-paint the UI via onEnforcementChanged when the daemon
+    // commits the change; failures bounce back through
+    // DbusClient::setEnforcementEnabled's error path (qWarning +
+    // forced refresh).
+    m_dbus->setEnforcementEnabled(!currentlyEnabled);
+}
+
+void MainWindow::onEnforcementChanged(bool enabled) {
+    // Sync every UI affordance for the master toggle: File-menu
+    // entry label/icon, tray-menu entry label/icon, toolbar button
+    // (when present), and the status-bar badge visibility.
+    const QString disableTxt = tr("&Disable filters");
+    const QString enableTxt  = tr("&Enable filters");
+    const QIcon pauseIcon = style()->standardIcon(QStyle::SP_MediaPause);
+    const QIcon playIcon  = style()->standardIcon(QStyle::SP_MediaPlay);
+
+    if (m_enforcementMenuAction) {
+        m_enforcementMenuAction->setText(enabled ? disableTxt : enableTxt);
+        m_enforcementMenuAction->setIcon(enabled ? pauseIcon : playIcon);
+    }
+    if (m_enforcementTrayAction) {
+        m_enforcementTrayAction->setText(enabled ? disableTxt : enableTxt);
+        m_enforcementTrayAction->setIcon(enabled ? pauseIcon : playIcon);
+    }
+    if (m_enforcementToolbarAction) {
+        m_enforcementToolbarAction->setText(enabled ? disableTxt : enableTxt);
+        m_enforcementToolbarAction->setIcon(enabled ? pauseIcon : playIcon);
+    }
+
+    if (m_statusEnforcement) {
+        if (enabled) {
+            m_statusEnforcement->setVisible(false);
+        } else {
+            m_statusEnforcement->setText(
+                tr("<span style='color:#c62828; font-weight:bold'>"
+                   "⚠ FILTERS DISABLED — bypass mode"
+                   "</span>"));
+            m_statusEnforcement->setVisible(true);
+        }
+    }
+
+    if (m_trayIcon) {
+        m_trayIcon->setToolTip(enabled
+            ? tr("amwall — filters active")
+            : tr("amwall — FILTERS DISABLED (bypass)"));
+    }
 }
 
 void MainWindow::onDbusStateChanged() {

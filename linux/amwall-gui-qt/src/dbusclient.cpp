@@ -98,12 +98,34 @@ void DbusClient::subscribeSignals() {
         qWarning() << "DbusClient: failed to subscribe to ConnectAttempt:"
                    << bus.lastError().message();
     }
+    bool ok2 = bus.connect(
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("/org/amwall/Daemon1"),
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("EnabledChanged"),
+        this,
+        SLOT(onDbusEnabledChanged(bool)));
+    if (!ok2) {
+        qWarning() << "DbusClient: failed to subscribe to EnabledChanged:"
+                   << bus.lastError().message();
+    }
 }
 
 void DbusClient::onDbusConnectAttempt(uint pid, const QString &comm,
                                       const QString &ip, ushort port,
                                       const QString &action) {
     emit connectAttempt(pid, comm, ip, port, action);
+}
+
+void DbusClient::onDbusEnabledChanged(bool enabled) {
+    if (m_enforcementEnabled == enabled) return;
+    m_enforcementEnabled = enabled;
+    qInfo() << "DbusClient: enforcement →" << (enabled ? "ON" : "OFF (bypass)");
+    emit enforcementEnabledChanged(enabled);
+    // stateChanged also fires so listeners that re-render on any
+    // state delta (status bar, tabs) catch this without subscribing
+    // separately.
+    emit stateChanged();
 }
 
 void DbusClient::startAutoRefresh(int intervalMs) {
@@ -124,6 +146,34 @@ void DbusClient::refresh() {
             m_reachable = true;
             m_rules = std::move(rules);
             m_lastError.clear();
+
+            // Poll IsEnabled every refresh tick so the toolbar /
+            // status badge stays accurate even if the EnabledChanged
+            // signal got dropped (rare) or another GUI client
+            // changed state before we connected. Sync .call() —
+            // this is a single-bool reply, sub-millisecond on the
+            // local bus. Fire enforcementEnabledChanged on transition
+            // so downstream listeners flip without waiting for a
+            // signal-broadcast that already happened.
+            QDBusMessage msg = QDBusMessage::createMethodCall(
+                QStringLiteral("org.amwall.Daemon1"),
+                QStringLiteral("/org/amwall/Daemon1"),
+                QStringLiteral("org.amwall.Daemon1"),
+                QStringLiteral("IsEnabled"));
+            QDBusMessage reply = QDBusConnection::systemBus().call(
+                msg, QDBus::Block, 2000);
+            if (reply.type() == QDBusMessage::ReplyMessage
+                && !reply.arguments().isEmpty()) {
+                bool newState = reply.arguments().first().toBool();
+                if (newState != m_enforcementEnabled) {
+                    m_enforcementEnabled = newState;
+                    emit enforcementEnabledChanged(newState);
+                }
+            }
+            // If IsEnabled is unreachable (e.g., daemon predates the
+            // method), leave m_enforcementEnabled at its last known
+            // value — the optimistic-true default at construction
+            // matches default-on semantics.
         } else {
             m_reachable = false;
             m_rules.clear();
@@ -205,6 +255,39 @@ QList<BlocklistEntry> DbusClient::blocklistList() {
     const QDBusArgument arg = outArgs.first().value<QDBusArgument>();
     arg >> out;
     return out;
+}
+
+void DbusClient::setEnforcementEnabled(bool enabled) {
+    // Polkit-gated SetEnabled call. Async because polkit auth can
+    // take a moment to render and we don't want to freeze the GUI.
+    // The daemon emits EnabledChanged on success which our
+    // onDbusEnabledChanged subscriber picks up — no need to handle
+    // success here, just surface failures.
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("/org/amwall/Daemon1"),
+        QStringLiteral("org.amwall.Daemon1"),
+        QStringLiteral("SetEnabled"));
+    msg.setArguments({ enabled });
+    auto pending = QDBusConnection::systemBus().asyncCall(
+        msg, /*timeoutMs=*/30000);
+    auto *watcher = new QDBusPendingCallWatcher(pending, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished,
+            this, [this, enabled](QDBusPendingCallWatcher *w) {
+        QDBusPendingReply<> r = *w;
+        if (r.isError()) {
+            qWarning() << "SetEnabled(" << enabled << ") failed:"
+                       << r.error().message();
+            // Fire enforcementEnabledChanged with the OLD value so
+            // any UI that optimistically flipped (e.g., a toolbar
+            // toggle) reverts. Force a refresh to be sure.
+            emit enforcementEnabledChanged(m_enforcementEnabled);
+            refresh();
+        }
+        // Success: EnabledChanged signal already updated state via
+        // onDbusEnabledChanged → enforcementEnabledChanged.
+        w->deleteLater();
+    });
 }
 
 void DbusClient::resetDaemon() {

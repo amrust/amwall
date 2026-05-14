@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use aya::maps::{HashMap as AyaHashMap, MapData, RingBuf};
+use aya::maps::{Array as AyaArray, HashMap as AyaHashMap, MapData, RingBuf};
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf, Pod};
 use tokio::sync::mpsc;
@@ -102,6 +102,14 @@ type BlocklistV4Map = AyaHashMap<MapData, u32, u8>;
 type BlocklistV6Map = AyaHashMap<MapData, [u8; 16], u8>;
 type BlocklistV4Shared = Arc<Mutex<BlocklistV4Map>>;
 type BlocklistV6Shared = Arc<Mutex<BlocklistV6Map>>;
+
+// Master enforcement toggle BPF map (1-element Array<u32>). The
+// BPF program reads index 0; 1=on (default), 0=off. Daemon writes
+// from the SetEnabled D-Bus method and persists the chosen value
+// to /etc/amwall/enabled so the state survives daemon restarts.
+type EnabledMap    = AyaArray<MapData, u32>;
+type EnabledShared = Arc<Mutex<EnabledMap>>;
+const ENABLED_STATE_PATH: &str = "/etc/amwall/enabled";
 
 // ─── Blocklist module (Phase 6.9) ───────────────────────────────────
 
@@ -262,6 +270,7 @@ struct AmwallDaemon {
     rules_path:   PathBuf,
     blocklist_v4: BlocklistV4Shared,
     blocklist_v6: BlocklistV6Shared,
+    enabled:      EnabledShared,
 }
 
 #[zbus::interface(name = "org.amwall.Daemon1")]
@@ -427,6 +436,77 @@ impl AmwallDaemon {
         eprintln!("[USER ] RESET complete (rules + blocklists cleared)");
         Ok(())
     }
+
+    // ─── Master enforcement toggle ────────────────────────────────
+    //
+    // SetEnabled lets the GUI flip the BPF program between
+    // "enforce normally" (true) and "bypass everything as ACT_ALLOW"
+    // (false), mirroring simplewall's "Disable filters" toggle.
+    // Polkit-gated by the same modify-rules action because the
+    // security implication is at least as large as adding a rule.
+    // Persists the chosen value to /etc/amwall/enabled so daemon
+    // restarts pick it up. Emits EnabledChanged on success so every
+    // connected GUI re-paints in real time.
+    async fn set_enabled(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(signal_context)] sig_ctx: zbus::SignalContext<'_>,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        check_polkit(conn, &header, POLKIT_ACTION_MODIFY).await?;
+
+        // 1. Update the BPF map first — if the kernel-side write
+        //    fails we don't want a stale on-disk state telling the
+        //    next daemon launch the opposite of reality.
+        {
+            let mut map = self.enabled.lock()
+                .map_err(|e| zbus::fdo::Error::Failed(format!("enabled lock: {}", e)))?;
+            map.set(0, if enabled { 1u32 } else { 0u32 }, 0)
+                .map_err(|e| zbus::fdo::Error::Failed(
+                    format!("setting BPF ENABLED map: {}", e)))?;
+        }
+
+        // 2. Persist to disk so the next daemon start agrees with
+        //    the running kernel state. The file is a single byte:
+        //    "1\n" or "0\n".
+        let body = if enabled { b"1\n" as &[u8] } else { b"0\n" };
+        if let Err(e) = std::fs::write(ENABLED_STATE_PATH, body) {
+            // Non-fatal: BPF map is already authoritative for the
+            // running process. Surface the error so the user sees
+            // it; on next daemon restart the on-disk default kicks
+            // in (which is "enabled").
+            eprintln!(
+                "amwall-daemon: warning — persisting enabled state to {} failed: {}",
+                ENABLED_STATE_PATH, e);
+        }
+
+        eprintln!("[USER ] enforcement {}",
+            if enabled { "ENABLED" } else { "DISABLED (bypass)" });
+
+        // 3. Fire the signal so every GUI listener flips its UI.
+        let _ = Self::enabled_changed(&sig_ctx, enabled).await;
+        Ok(())
+    }
+
+    // IsEnabled is unauthenticated read — the GUI polls it on every
+    // refresh tick so the toolbar/status badge stays accurate even
+    // if state changed via amwall-cli or a second GUI process.
+    async fn is_enabled(&self) -> zbus::fdo::Result<bool> {
+        let map = self.enabled.lock()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("enabled lock: {}", e)))?;
+        let v: u32 = map.get(&0, 0)
+            .map_err(|e| zbus::fdo::Error::Failed(
+                format!("reading BPF ENABLED map: {}", e)))?;
+        Ok(v != 0)
+    }
+
+    // Emitted whenever SetEnabled mutates state — GUI clients
+    // listen and flip their toolbar/status badge without waiting
+    // for the next poll.
+    #[zbus(signal)]
+    async fn enabled_changed(sig_ctx: &zbus::SignalContext<'_>, enabled: bool)
+        -> zbus::Result<()>;
 
     async fn resolve_sockets(
         &self,
@@ -673,6 +753,7 @@ async fn run_dbus_server(
     rules_v6: RulesV6Shared,
     blocklist_v4: BlocklistV4Shared,
     blocklist_v6: BlocklistV6Shared,
+    enabled: EnabledShared,
     rules_path: PathBuf,
     mut event_rx: mpsc::UnboundedReceiver<ConnectEvent>,
 ) -> Result<()> {
@@ -680,7 +761,7 @@ async fn run_dbus_server(
 
     let iface = AmwallDaemon {
         rules, rules_v6, rules_path,
-        blocklist_v4, blocklist_v6,
+        blocklist_v4, blocklist_v6, enabled,
     };
     let conn = zbus::connection::Builder::system()
         .context("system bus connection (is dbus running?)")?
@@ -770,6 +851,31 @@ fn main() -> Result<()> {
         .context("BLOCKLIST_V6 is not a HashMap")?;
     let blocklist_v6: BlocklistV6Shared = Arc::new(Mutex::new(bl6_raw));
 
+    // Master enforcement toggle map. Read persisted state from
+    // /etc/amwall/enabled if it exists (single byte: '0' or '1');
+    // default = enabled. Then write it to the BPF map so the program
+    // sees the current state before the first connect fires.
+    let enabled_raw_map = ebpf.take_map("ENABLED").context("ENABLED map missing")?;
+    let mut enabled_raw: EnabledMap = AyaArray::try_from(enabled_raw_map)
+        .context("ENABLED is not an Array")?;
+    let initial_enabled = match std::fs::read_to_string(ENABLED_STATE_PATH) {
+        Ok(s) => s.trim() != "0",
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            eprintln!(
+                "amwall-daemon: warning — reading {} failed ({}); defaulting to ENABLED",
+                ENABLED_STATE_PATH, e);
+            true
+        }
+    };
+    enabled_raw.set(0, if initial_enabled { 1u32 } else { 0u32 }, 0)
+        .context("seeding ENABLED map at startup")?;
+    eprintln!(
+        "amwall-daemon: enforcement = {} (persisted state at {})",
+        if initial_enabled { "ENABLED" } else { "DISABLED (bypass)" },
+        ENABLED_STATE_PATH);
+    let enabled: EnabledShared = Arc::new(Mutex::new(enabled_raw));
+
     let events_map = ebpf.take_map("EVENTS").context("EVENTS map missing")?;
     let mut events = RingBuf::try_from(events_map).context("EVENTS map is not a ring buffer")?;
 
@@ -805,6 +911,7 @@ fn main() -> Result<()> {
     let dbus_rules_v6 = rules_v6.clone();
     let dbus_bl4      = blocklist_v4.clone();
     let dbus_bl6      = blocklist_v6.clone();
+    let dbus_enabled  = enabled.clone();
     let dbus_path     = rules_path.clone();
     let dbus_thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -812,7 +919,8 @@ fn main() -> Result<()> {
             .build()
             .expect("tokio runtime build");
         if let Err(e) = rt.block_on(run_dbus_server(
-            dbus_rules, dbus_rules_v6, dbus_bl4, dbus_bl6, dbus_path, event_rx))
+            dbus_rules, dbus_rules_v6, dbus_bl4, dbus_bl6,
+            dbus_enabled, dbus_path, event_rx))
         {
             eprintln!("amwall-daemon: D-Bus server stopped:");
             for cause in e.chain() {
