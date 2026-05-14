@@ -103,7 +103,20 @@ Get-ChildItem wix\lang\*.wxl |
 
 # Rewrite the Template summary so Windows Installer treats the MSI
 # as multilingual and auto-picks the right transform.
-$lcidCsv = ($lcids | Sort-Object -Unique) -join ","
+#
+# CRITICAL: the first LCID in the list is the package's base
+# language; every other LCID is expected to have a matching transform
+# embedded in _Storages. We embed one transform per non-en-us wxl,
+# never an en-us transform (it's the base — no patch needed). So if
+# we naively `Sort-Object` here, ar-SA (1025) lands first and 1033
+# falls into the middle of the list — Windows Installer then treats
+# 1033 as a transform language and errors out with
+# "Error applying transforms" on any English system, because no
+# :1033 substorage exists. Force the base LCID first and sort only
+# the rest.
+$baseLcid = [System.Globalization.CultureInfo]::new("en-US").LCID
+$otherLcids = $lcids | Where-Object { $_ -ne $baseLcid } | Sort-Object -Unique
+$lcidCsv = (@($baseLcid) + $otherLcids) -join ","
 cscript //nologo wix\scripts\set-languages.vbs $baseMsi $lcidCsv
 if ($LASTEXITCODE -ne 0) { throw "set-languages.vbs failed" }
 
