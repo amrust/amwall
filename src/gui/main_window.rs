@@ -977,19 +977,32 @@ unsafe extern "system" fn wnd_proc(
         }
         m if m == WM_USER_SIGNED_REFRESH => {
             // Worker filled new cache entries — repaint the
-            // active apps listview so freshly-verified rows
-            // show their green/no-green colour.
+            // active apps listview so freshly-verified rows show
+            // their green Signed colour.
             //
-            // Plain InvalidateRect(bErase=false) used to be the
-            // call here, but with LVS_EX_DOUBLEBUFFER on every
-            // apps listview that turned out to not actually
-            // re-trigger our NM_CUSTOMDRAW handler on the cached
-            // double-buffer surface — colours would only land
-            // after a manual window resize (which goes through
-            // the heavier RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW
-            // path in force_active_apps_listview_jiggle). Use
-            // RedrawWindow with the same flag bundle so worker
-            // batches paint correctly on the first try.
+            // Painting history of this handler:
+            //   v1.1.10 and earlier: InvalidateRect(bErase=false) —
+            //     too weak; LVS_EX_DOUBLEBUFFER's cached surface
+            //     stayed the old non-coloured pixels.
+            //   v1.1.11: RedrawWindow with RDW_INVALIDATE | RDW_ERASE
+            //     | RDW_ALLCHILDREN | RDW_UPDATENOW — also too weak.
+            //     Even an explicit synchronous repaint doesn't make
+            //     comctl32 rebuild its double-buffer; it just
+            //     re-blits the cached buffer.
+            //
+            // What actually works: WM_SIZE-equivalent via the
+            // MoveWindow +1px-then-back jiggle in
+            // force_active_apps_listview_jiggle. comctl32 rebuilds
+            // the double-buffer cache on WM_SIZE, and only THEN
+            // re-runs CDDS_ITEMPREPAINT for every visible row,
+            // picking up the freshly-cached signed verdicts.
+            //
+            // Frequency safe: the worker only posts this every
+            // BATCH_FOR_REFRESH (10) verifications, so even on a
+            // fresh install with hundreds of apps the jiggle fires
+            // a few dozen times total during catch-up — well below
+            // any user-visible flicker threshold given the +1/-1px
+            // delta and the existing LVS_EX_DOUBLEBUFFER.
             if let Some(state) = unsafe { state_ref(hwnd) } {
                 let tab = state.tab.get();
                 if tab.0 != 0 {
@@ -998,24 +1011,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                     .0 as isize;
                     if (0..=2).contains(&sel) {
-                        let lv = state.listviews[sel as usize].get();
-                        if lv.0 != 0 {
-                            use windows::Win32::Graphics::Gdi::{
-                                RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE,
-                                RDW_UPDATENOW, RedrawWindow,
-                            };
-                            unsafe {
-                                let _ = RedrawWindow(
-                                    lv,
-                                    None,
-                                    None,
-                                    RDW_INVALIDATE
-                                        | RDW_ERASE
-                                        | RDW_ALLCHILDREN
-                                        | RDW_UPDATENOW,
-                                );
-                            }
-                        }
+                        force_active_apps_listview_jiggle(hwnd, state);
                     }
                 }
             }

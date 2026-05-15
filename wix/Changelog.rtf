@@ -1,5 +1,19 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.11 (current)\par
+What's new in amwall v1.1.12 (current)\par
+\par
+  - Third try at the Apps tab cold-launch row colours --\par
+    v1.1.11's RedrawWindow upgrade still wasn't enough\par
+    because LVS_EX_DOUBLEBUFFER means comctl32 just\par
+    re-blits its cached buffer on RedrawWindow; the cache\par
+    only rebuilds (and therefore re-runs the colour\par
+    handler) on a real WM_SIZE. The sign-verification\par
+    worker callback now does the same MoveWindow +1px /-1px\par
+    jiggle the post-resize cleanup uses, which DOES rebuild\par
+    the double-buffer. Cold launch should finally show\par
+    Signed (green) rows within a second or two of opening,\par
+    no resize required\par
+\par
+What's new in amwall v1.1.11\par
 \par
   - Fix Apps tab category row colours (Invalid / System /\par
     Signed / Pico) still not appearing on cold launch in\par
