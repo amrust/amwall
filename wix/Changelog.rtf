@@ -1,5 +1,20 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.13 (current)\par
+What's new in amwall v1.1.14 (current)\par
+\par
+  - Apps tab cold-launch row colours: actually fixed.\par
+    The bug across v1.1.10-v1.1.13 was a message-id\par
+    collision -- WM_USER_SIGNED_REFRESH (the worker's\par
+    "I have new entries, please repaint" signal) shared\par
+    its numeric value with WM_USER_CONNECT_BLOCK. The\par
+    wnd_proc match-arm dispatch picked the connect_block\par
+    arm first and silently dropped the signal because\par
+    its wparam was null. The handler I kept editing was\par
+    never being called -- four releases all changed\par
+    code that didn't run. v1.1.14 moves the signal to\par
+    a non-colliding id; rows now turn green as soon as\par
+    their signature is verified, no resize needed\par
+\par
+What's new in amwall v1.1.13\par
 \par
   - Apps tab Signed (green) row colours on cold launch:\par
     fourth and final attempt. Per a user observation that\par

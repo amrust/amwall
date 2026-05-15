@@ -1020,7 +1020,18 @@ unsafe extern "system" fn wnd_proc(
                     }
                     .0 as isize;
                     if (0..=2).contains(&sel) {
+                        // populate_apps_tab re-inserts items so
+                        // pick_app_row_color is consulted with the
+                        // fresh cache; on_tab_change then ShowWindow's
+                        // the listview and runs force_listview_repaint
+                        // (the MoveWindow +1px jiggle) — same
+                        // sequence on_connect_allow uses. populate
+                        // alone leaves comctl32's cached
+                        // LVS_EX_DOUBLEBUFFER surface stale; the
+                        // jiggle after the re-insert is what makes
+                        // the new colours actually paint.
                         populate_apps_tab(state);
+                        on_tab_change(hwnd);
                     }
                 }
             }
@@ -1408,22 +1419,6 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
         }
     }
 
-    // First-paint jiggle. Without this, the Apps tab on a cold
-    // launch renders rows with plain backgrounds instead of the
-    // category colors (Invalid / System / Signed / Pico) that the
-    // NM_CUSTOMDRAW handler produces — comctl32 paints the
-    // listview once during initial show before our populator's
-    // signed-cache + WinVerifyTrust state has settled enough for
-    // CDDS_ITEMPREPAINT to return the right colour, and never
-    // re-paints on its own. A WM_SIZE (manual window resize)
-    // fixes it because the size handler already calls
-    // `force_active_apps_listview_jiggle`, which is exactly the
-    // synchronous InvalidateRect + RedrawWindow(RDW_UPDATENOW)
-    // pass the first paint needs. Firing it here as the last
-    // step of WM_CREATE means a fresh launch shows the same
-    // colours a post-resize launch already did.
-    force_active_apps_listview_jiggle(hwnd, state);
-
     Ok(())
 }
 
@@ -1768,8 +1763,18 @@ fn nt_path_to_win32(nt_path: &str) -> Option<String> {
 /// it determines a batch of paths' signed status. Triggers an
 /// apps-tab repaint so freshly-verified rows pick up the green
 /// "signed" highlight.
+// 0x120 is in a deliberately empty range. Used to be 0x103 — same
+// value as connect_dialog::WM_USER_CONNECT_BLOCK. The worker would
+// PostMessageW(0x103) thinking it was kicking the apps-tab repaint;
+// the wnd_proc match-arm dispatch picked the connect_block arm first
+// (declared earlier in the file), and on_connect_block silently
+// returned because wparam was 0 (worker passes null). Net result:
+// every WM_USER_SIGNED_REFRESH the worker has ever posted since
+// M11.5 was silently dropped, which is why row colours never
+// appeared on cold launch — the four attempts in v1.1.10–v1.1.13
+// were all editing a handler that was never being called.
 const WM_USER_SIGNED_REFRESH: u32 =
-    windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x103;
+    windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x120;
 
 /// Worker-thread entry. Drains `rx` for paths to verify,
 /// updates `cache` with each result, and posts
