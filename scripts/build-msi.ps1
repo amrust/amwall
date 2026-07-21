@@ -1,9 +1,9 @@
-# amwall — multilingual MSI installer build.
+# amwall - multilingual MSI installer build.
 # Copyright (C) 2026  amwall contributors. Licensed GPL-3.0-or-later.
 #
 # Builds one MSI containing every language transform under wix/lang/.
 # Used by both .github/workflows/release.yml (CI) and
-# .vscode/tasks.json (Ctrl+Shift+B → "Build MSI installer") so the
+# .vscode/tasks.json (Ctrl+Shift+B -> "Build MSI installer") so the
 # local build matches what tag-driven releases produce.
 #
 # Pipeline:
@@ -19,7 +19,7 @@
 #      install time based on the user's UI language.
 #
 # Assumes the release binary already exists at
-# target\x86_64-pc-windows-msvc\release\amwall.exe — call sites are
+# target\x86_64-pc-windows-msvc\release\amwall.exe - call sites are
 # expected to run cargo build first.
 
 $ErrorActionPreference = 'Stop'
@@ -40,14 +40,14 @@ $wixDir = "target\wix"
 $langDir = "$wixDir\lang"
 
 if (-not (Test-Path "$targetBin\amwall.exe")) {
-    Write-Error "Release exe missing at $targetBin\amwall.exe — run cargo build --release --target x86_64-pc-windows-msvc first."
+    Write-Error "Release exe missing at $targetBin\amwall.exe - run cargo build --release --target x86_64-pc-windows-msvc first."
     exit 1
 }
 
 New-Item -ItemType Directory -Path $wixDir -Force | Out-Null
 New-Item -ItemType Directory -Path $langDir -Force | Out-Null
 
-# Compile main.wxs once — the same .wixobj is linked per culture.
+# Compile main.wxs once - the same .wixobj is linked per culture.
 # -arch x64 sets the platform so the Template summary lists x64
 # (required by ICE80 because main.wxs has Win64="yes" components).
 candle.exe -nologo `
@@ -107,9 +107,9 @@ Get-ChildItem wix\lang\*.wxl |
 # CRITICAL: the first LCID in the list is the package's base
 # language; every other LCID is expected to have a matching transform
 # embedded in _Storages. We embed one transform per non-en-us wxl,
-# never an en-us transform (it's the base — no patch needed). So if
+# never an en-us transform (it's the base - no patch needed). So if
 # we naively `Sort-Object` here, ar-SA (1025) lands first and 1033
-# falls into the middle of the list — Windows Installer then treats
+# falls into the middle of the list - Windows Installer then treats
 # 1033 as a transform language and errors out with
 # "Error applying transforms" on any English system, because no
 # :1033 substorage exists. Force the base LCID first and sort only
