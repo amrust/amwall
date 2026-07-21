@@ -1,0 +1,63 @@
+# amwall - continuous integration (gate triad).
+# Copyright (C) 2026  amwall contributors. Licensed GPL-3.0-or-later.
+#
+# Runs the exact build / clippy / test gate the repo requires locally
+# (CLAUDE.md "gate triad") on every push and pull request, so a
+# regression is caught in CI rather than at release-tag time - the
+# release workflow (release.yml) only fires on `v*` tags, never on a
+# normal commit, so without this workflow nothing gates day-to-day
+# pushes. Windows-only because amwall targets x86_64-pc-windows-msvc.
+name: ci
+
+on:
+  push:
+    # All branches, but NOT tags (a `tags:` key would be required for
+    # those) - tag pushes are handled by release.yml, which runs the
+    # same gate before building the MSI.
+    branches: ['**']
+  pull_request:
+
+# A newer push to the same ref cancels an in-flight run for it, so a
+# rapid series of pushes doesn't queue redundant CI.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: build + clippy + test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # Pinned to 1.85 to match Cargo.toml's rust-version, so CI
+        # fails on any accidental use of a newer-than-MSRV feature.
+        # clippy must be requested explicitly on a pinned (non-stable)
+        # toolchain or `cargo clippy` errors with "not installed".
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Gate triad (build / clippy / test)
+        # PowerShell does not stop on a native command's non-zero exit,
+        # so each step is followed by an explicit $LASTEXITCODE check -
+        # otherwise a build or clippy failure would be swallowed if the
+        # trailing cargo test happened to succeed. Mirrors release.yml.
+        shell: pwsh
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
