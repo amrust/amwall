@@ -152,6 +152,20 @@ pub enum FilterCondition {
     ServiceSecurityDescriptor(Vec<u8>),
 }
 
+/// Resolve an app path to its WFP app-id blob and immediately free it,
+/// reporting only whether resolution *succeeds*. The installer uses
+/// this to pre-flight every `apps=` path in a rule BEFORE adding any
+/// of that rule's filters, so a rule referencing an uninstalled binary
+/// fails atomically instead of leaving a partially-installed rule (a
+/// partial BLOCK rule could fail open). Returns
+/// `WfpError::AppIdFromFileName` for a missing/unreadable file, exactly
+/// as the `AppPath` path in `compile` does. Security audit finding B.
+pub(crate) fn app_id_resolves(path: &std::path::Path) -> Result<(), WfpError> {
+    // Resolving into a throwaway `CompiledConditions` frees the
+    // WFP-heap blob on drop; the real `filter::add` re-resolves.
+    compile(&[FilterCondition::AppPath(path.to_path_buf())]).map(|_| ())
+}
+
 /// Compile a slice of `FilterCondition` into a parallel array of
 /// native `FWPM_FILTER_CONDITION0` plus the backing storage their
 /// pointer fields reference into.

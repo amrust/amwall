@@ -266,6 +266,15 @@ pub struct InstallReport {
     /// the current MVP doesn't compile yet). Helpful for surfacing
     /// "your profile has 50 rules but only 30 filtered" feedback.
     pub rules_skipped: u32,
+    /// Number of rules that FAILED to install because of a malformed
+    /// `rule`/`rule_local` string or an `apps=` path that no longer
+    /// resolves to an app id. Unlike `rules_skipped` (deliberately not
+    /// installed - disabled, service-only, etc.), these are errors
+    /// that were downgraded to non-fatal so one bad rule can't abort
+    /// the whole WFP transaction and drop the default-deny catch-all
+    /// (fail-open on the startup auto-enable path - security audit
+    /// finding B).
+    pub rules_failed: u32,
     /// Runtime filter ids grouped by category. Consumed by the
     /// GUI's drain_events to gate the connect-prompt dialog
     /// against the user's `exclude_*` flags — drops sourced from
@@ -491,17 +500,17 @@ pub fn install_with_internal(
             continue;
         }
         let action = filter_action_from_rule(rule);
-        let added = install_one_rule(
+        match install_one_rule_nonfatal(
             engine,
             persistent,
             rule,
             action,
             &mut report.filter_ids.user_rules,
-        )?;
-        if added == 0 {
-            report.rules_skipped += 1;
+        )? {
+            RuleInstall::Added(n) => report.filters_added += n,
+            RuleInstall::Skipped => report.rules_skipped += 1,
+            RuleInstall::Failed => report.rules_failed += 1,
         }
-        report.filters_added += added;
     }
 
     // 2. System rules (DHCP, DNS, NetBIOS, etc.) — always Permit.
@@ -517,17 +526,17 @@ pub fn install_with_internal(
                 report.rules_skipped += 1;
                 continue;
             }
-            let added = install_one_rule(
+            match install_one_rule_nonfatal(
                 engine,
                 persistent,
                 rule,
                 FilterAction::Permit,
                 &mut report.filter_ids.system_rules,
-            )?;
-            if added == 0 {
-                report.rules_skipped += 1;
+            )? {
+                RuleInstall::Added(n) => report.filters_added += n,
+                RuleInstall::Skipped => report.rules_skipped += 1,
+                RuleInstall::Failed => report.rules_failed += 1,
             }
-            report.filters_added += added;
         }
 
         // 2b. Preset user rules (the 9 simplewall-style protocol
@@ -545,17 +554,17 @@ pub fn install_with_internal(
                 continue;
             }
             let action = filter_action_from_rule(rule);
-            let added = install_one_rule(
+            match install_one_rule_nonfatal(
                 engine,
                 persistent,
                 rule,
                 action,
                 &mut report.filter_ids.user_rules,
-            )?;
-            if added == 0 {
-                report.rules_skipped += 1;
+            )? {
+                RuleInstall::Added(n) => report.filters_added += n,
+                RuleInstall::Skipped => report.rules_skipped += 1,
+                RuleInstall::Failed => report.rules_failed += 1,
             }
-            report.filters_added += added;
         }
 
         // 3. Blocklist rules — per-category mode decides the action.
@@ -571,17 +580,17 @@ pub fn install_with_internal(
                 BlocklistAction::Allow => FilterAction::Permit,
                 BlocklistAction::Block => FilterAction::Block,
             };
-            let added = install_one_rule(
+            match install_one_rule_nonfatal(
                 engine,
                 persistent,
                 rule,
                 action,
                 &mut report.filter_ids.blocklist,
-            )?;
-            if added == 0 {
-                report.rules_skipped += 1;
+            )? {
+                RuleInstall::Added(n) => report.filters_added += n,
+                RuleInstall::Skipped => report.rules_skipped += 1,
+                RuleInstall::Failed => report.rules_failed += 1,
             }
-            report.filters_added += added;
         }
     }
 
@@ -1159,6 +1168,63 @@ pub fn uninstall(engine: &WfpEngine) -> Result<CleanupReport, WfpError> {
 /// The app dimension is `[None]` for rules without an `apps`
 /// attribute (one no-AppPath-condition pseudo-app), or a `Vec` of
 /// resolved file paths for rules with `apps`.
+/// Whether an install error is confined to a *single rule* - a
+/// malformed `rule`/`rule_local` string, or an `apps=` path that no
+/// longer resolves to an app id - and can therefore be downgraded to
+/// a skip so the rest of the install still commits. Every other error
+/// (provider/sublayer/filter-engine/transaction failure) stays fatal.
+///
+/// This is the crux of security-audit finding B: without it, a single
+/// bad rule in `profile.xml` aborts the whole WFP transaction, which
+/// drops the default-deny catch-all installed later in the same
+/// transaction and leaves the machine unfiltered (fail-open) on the
+/// startup auto-enable path.
+fn is_single_rule_error(err: &InstallError) -> bool {
+    matches!(
+        err,
+        InstallError::RuleParse { .. } | InstallError::Wfp(WfpError::AppIdFromFileName(_))
+    )
+}
+
+/// Outcome of installing one rule without letting a single-rule
+/// failure abort the surrounding transaction.
+enum RuleInstall {
+    /// Filters actually added to the kernel.
+    Added(u32),
+    /// Produced zero filters by design (disabled, service-only, or no
+    /// compilable conditions).
+    Skipped,
+    /// A single-rule error (see `is_single_rule_error`) was caught and
+    /// downgraded so the default-deny still commits.
+    Failed,
+}
+
+/// Install one rule, converting single-rule failures into
+/// `RuleInstall::Failed` instead of propagating them. Safe because
+/// `install_one_rule` pre-flights every `apps=` path before adding any
+/// filter, so a downgraded failure means NOTHING was buffered for this
+/// rule - skipping it can never leave a partially-installed rule.
+fn install_one_rule_nonfatal(
+    engine: &WfpEngine,
+    persistent: bool,
+    rule: &Rule,
+    action: FilterAction,
+    ids: &mut Vec<u64>,
+) -> Result<RuleInstall, InstallError> {
+    match install_one_rule(engine, persistent, rule, action, ids) {
+        Ok(0) => Ok(RuleInstall::Skipped),
+        Ok(n) => Ok(RuleInstall::Added(n)),
+        Err(e) if is_single_rule_error(&e) => {
+            eprintln!(
+                "amwall: rule `{}` not installed ({e}); continuing so the default-deny still applies",
+                rule.name
+            );
+            Ok(RuleInstall::Failed)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn install_one_rule(
     engine: &WfpEngine,
     persistent: bool,
@@ -1179,6 +1245,16 @@ fn install_one_rule(
             return Ok(0);
         }
     };
+
+    // Pre-flight every app path so a rule referencing an uninstalled
+    // binary fails BEFORE any of its filters are buffered into the
+    // transaction - keeping each rule all-or-nothing. A partially
+    // installed BLOCK rule (some conditions dropped) could fail open,
+    // so atomicity matters here. Mirrors how install_per_app_filters
+    // validates the SID / service descriptor up front. Finding B.
+    for app_path in apps.iter().flatten() {
+        crate::wfp::condition::app_id_resolves(app_path)?;
+    }
 
     let mut count = 0u32;
     for remote in &remotes {
@@ -1458,6 +1534,38 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use crate::rules::{AddrSpec, PortSpec};
+
+    #[test]
+    fn single_rule_errors_are_recoverable_engine_errors_are_fatal() {
+        // Security audit finding B: a malformed rule string or an
+        // `apps=` path that no longer resolves must be downgraded to a
+        // skip so the default-deny catch-all still commits - but a
+        // genuine engine/transaction failure must stay FATAL so we
+        // never commit a half-built filter set. If a future change
+        // widens this classification to swallow engine errors, the
+        // whole-firewall fail-open returns; this test guards it.
+        let parse_err = crate::rules::parse_str("1.2.3.4/33").unwrap_err();
+        assert!(is_single_rule_error(&InstallError::RuleParse {
+            rule_name: "bad".into(),
+            source: parse_err,
+        }));
+        assert!(is_single_rule_error(&InstallError::Wfp(
+            WfpError::AppIdFromFileName(2), // ERROR_FILE_NOT_FOUND
+        )));
+
+        for fatal in [
+            WfpError::FilterAdd(5),
+            WfpError::ProviderAdd(5),
+            WfpError::SubLayerAdd(5),
+            WfpError::TransactionBegin(0x8032_0002),
+            WfpError::TransactionCommit(1),
+        ] {
+            assert!(
+                !is_single_rule_error(&InstallError::Wfp(fatal)),
+                "engine/transaction errors must stay fatal, not be skipped",
+            );
+        }
+    }
 
     fn port_only_clause(port: u16) -> RuleClause {
         RuleClause {
