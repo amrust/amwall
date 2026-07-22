@@ -94,7 +94,10 @@ impl EventLogWriter {
             NetEvent::Other(_) => unreachable!(),
         };
 
-        let path = resolve_path(&settings.log_path);
+        // effective_log_path (not resolve_path) so an elevated write to
+        // an attacker-controlled log_path is confined to the data dir.
+        // Security audit finding D.
+        let path = effective_log_path(&settings.log_path);
         let limit_bytes = (settings.log_size_limit as u64).saturating_mul(1024);
 
         // Reopen if the resolved path changed (settings edited) or
@@ -236,6 +239,34 @@ fn resolve_path(configured: &str) -> PathBuf {
     crate::paths::default_log_path()
 }
 
+/// Confine an elevated log write to the amwall data dir. When amwall
+/// holds the admin token, `Settings.log_path` comes from the
+/// user-writable settings file, so a Medium-integrity user could
+/// redirect the writer (create_dir_all + append + rename + truncate)
+/// to an arbitrary High-integrity path. Pure policy — elevation and
+/// data_dir are passed in — so it's unit-testable without elevation.
+/// Not elevated => the configured path is used verbatim (no behavior
+/// change for the common case). Security audit finding D.
+fn confined_log_path(configured: &str, elevated: bool, data_dir: &Path) -> PathBuf {
+    let resolved = resolve_path(configured);
+    if elevated && !crate::paths::path_is_contained(data_dir, &resolved) {
+        eprintln!(
+            "amwall: log: refusing to write to {} while elevated (outside {}); using the default log path",
+            resolved.display(),
+            data_dir.display()
+        );
+        return crate::paths::default_log_path();
+    }
+    resolved
+}
+
+/// `confined_log_path` wired to the real process elevation state and
+/// data dir. The single place every log write resolves its path, so
+/// `open` / `rotate` / `truncate` all inherit the confinement.
+fn effective_log_path(configured: &str) -> PathBuf {
+    confined_log_path(configured, super::is_elevated(), &crate::paths::data_dir())
+}
+
 fn bak_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".bak");
@@ -333,6 +364,33 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn effective_log_path_not_elevated_keeps_configured() {
+        // Not elevated: an arbitrary configured path is preserved
+        // verbatim (parity with pre-fix behavior; no constraint off the
+        // admin token). Security audit finding D.
+        let data = Path::new(r"C:\Users\me\AppData\Roaming\amwall");
+        let got = confined_log_path(r"C:\Windows\Temp\x.log", false, data);
+        assert_eq!(got, PathBuf::from(r"C:\Windows\Temp\x.log"));
+    }
+
+    #[test]
+    fn effective_log_path_elevated_allows_inside_data_dir() {
+        let data = Path::new(r"C:\Users\me\AppData\Roaming\amwall");
+        let inside = r"C:\Users\me\AppData\Roaming\amwall\sub\packets.log";
+        assert_eq!(confined_log_path(inside, true, data), PathBuf::from(inside));
+    }
+
+    #[test]
+    fn effective_log_path_elevated_rejects_outside_data_dir() {
+        // Elevated + outside the data dir -> falls back to the default
+        // log path, never the attacker path. The core D.2 invariant.
+        let data = Path::new(r"C:\Users\me\AppData\Roaming\amwall");
+        let got = confined_log_path(r"C:\Windows\amwall.log", true, data);
+        assert_ne!(got, PathBuf::from(r"C:\Windows\amwall.log"));
+        assert_eq!(got, crate::paths::default_log_path());
+    }
 
     fn sample_details() -> NetEventDetails {
         NetEventDetails {

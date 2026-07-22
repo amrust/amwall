@@ -56,6 +56,20 @@ use windows::core::PCWSTR;
 use crate::profile::{self, Profile};
 use app::App;
 
+/// Cached process-elevation check. `IsUserAnAdmin()` is stable for the
+/// process lifetime (UAC elevation is decided at launch), so cache it
+/// in a `OnceLock`. Used by security gates that must fail safe when
+/// amwall holds the admin token — e.g. refusing to execute a
+/// user-writable log viewer, or to write a log outside the data dir.
+/// Security audit finding D.
+pub(crate) fn is_elevated() -> bool {
+    static ELEVATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ELEVATED.get_or_init(|| {
+        use windows::Win32::UI::Shell::IsUserAnAdmin;
+        unsafe { IsUserAnAdmin() }.as_bool()
+    })
+}
+
 /// Entry point invoked from `main.rs` when no CLI subcommand is given.
 /// Owns the lifetime of the `App` and drives the standard Win32
 /// message loop until `WM_QUIT`.

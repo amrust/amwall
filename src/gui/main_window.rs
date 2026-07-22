@@ -5788,6 +5788,25 @@ fn on_log_show(hwnd: HWND) {
         return;
     }
 
+    // When amwall holds the admin token, a custom log_viewer taken from
+    // the user-writable settings file is a code-execution vector: a
+    // Medium-integrity user could plant a binary and have "Show log"
+    // launch it elevated. Refuse a viewer that isn't in an admin-only
+    // location and fall back to the OS default handler (the
+    // viewer.is_empty() branch below). Security audit finding D.
+    let viewer = if !viewer.is_empty()
+        && super::is_elevated()
+        && !crate::paths::is_admin_only_location(std::path::Path::new(&viewer))
+    {
+        eprintln!(
+            "amwall: refusing to launch configured log viewer {viewer:?} while elevated \
+             (not in an admin-only-writable location); opening with the default handler"
+        );
+        String::new()
+    } else {
+        viewer
+    };
+
     let path_w = wide(&resolved.display().to_string());
     let result = if viewer.is_empty() {
         // No configured viewer → ShellExecute "open" the file
