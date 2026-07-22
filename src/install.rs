@@ -1281,15 +1281,40 @@ fn install_one_rule(
 ) -> Result<u32, InstallError> {
     let remotes = parse_rule_string(&rule.name, rule.remote.as_deref())?;
     let locals = parse_rule_string(&rule.name, rule.local.as_deref())?;
-    let apps = match parse_apps(rule.apps.as_deref()) {
+    // Build one app-condition per `apps=` token. Each token — an
+    // executable path or a Windows service name — becomes its own
+    // condition (and its own filter in the cross product below),
+    // matching upstream's per-app filter semantics. `None` means the
+    // rule carries no app constraint. Service tokens are keyed on the
+    // service-SID descriptor exactly as per-app `AppKind::Service`
+    // entries are (mirrors upstream wfp.c:1029-1048); an unresolvable
+    // service name is skipped nonfatally so one bad token can't drop
+    // the whole rule.
+    let apps: Vec<Option<FilterCondition>> = match parse_apps(rule.apps.as_deref()) {
         AppSet::None => vec![None],
-        AppSet::Paths(paths) => paths.into_iter().map(Some).collect(),
-        AppSet::AllSkipped => {
-            // Rule references only service names (no executable
-            // paths). Service-name → exe-path resolution isn't yet
-            // implemented; treat the whole rule as skipped so the
-            // operator sees it in `rules_skipped`.
-            return Ok(0);
+        AppSet::Apps(tokens) => {
+            let mut resolved: Vec<Option<FilterCondition>> = Vec::new();
+            for tok in tokens {
+                match tok {
+                    AppToken::Path(p) => {
+                        resolved.push(Some(FilterCondition::AppPath(p)));
+                    }
+                    AppToken::Service(name) => match service_security_descriptor(&name) {
+                        Some(sd) => resolved
+                            .push(Some(FilterCondition::ServiceSecurityDescriptor(sd))),
+                        None => eprintln!(
+                            "amwall: rule `{}` service `{name}` skipped (could not resolve service SID)",
+                            rule.name
+                        ),
+                    },
+                }
+            }
+            if resolved.is_empty() {
+                // Every token was an unresolvable service name — nothing
+                // installable. Treat as skipped (surfaces in rules_skipped).
+                return Ok(0);
+            }
+            resolved
         }
     };
 
@@ -1299,8 +1324,10 @@ fn install_one_rule(
     // installed BLOCK rule (some conditions dropped) could fail open,
     // so atomicity matters here. Mirrors how install_per_app_filters
     // validates the SID / service descriptor up front. Finding B.
-    for app_path in apps.iter().flatten() {
-        crate::wfp::condition::app_id_resolves(app_path)?;
+    for app in apps.iter().flatten() {
+        if let FilterCondition::AppPath(p) = app {
+            crate::wfp::condition::app_id_resolves(p)?;
+        }
     }
 
     let mut count = 0u32;
@@ -1334,8 +1361,8 @@ fn install_one_rule(
                             std::slice::from_ref(l),
                         ));
                     }
-                    if let Some(path) = app {
-                        conds.push(FilterCondition::AppPath(path.clone()));
+                    if let Some(app_cond) = app {
+                        conds.push(app_cond.clone());
                     }
                     // No conditions == match-all-traffic — too
                     // dangerous to install silently. Skip; surfaces
@@ -1366,50 +1393,59 @@ fn install_one_rule(
     Ok(count)
 }
 
+/// A single `apps="..."` token, classified by how it becomes a WFP
+/// condition.
+#[derive(Debug, PartialEq)]
+enum AppToken {
+    /// Executable path → `AppPath` (app-id) condition.
+    Path(PathBuf),
+    /// Windows service short name (e.g. `Dnscache`) → resolved to a
+    /// service-SID security descriptor and matched via
+    /// `ServiceSecurityDescriptor` (`FWPM_CONDITION_ALE_USER_ID`) — the
+    /// same keying per-app `AppKind::Service` entries use in
+    /// `install_per_app_filters`. Mirrors upstream simplewall
+    /// `wfp.c:1029-1048`.
+    Service(String),
+}
+
 /// Outcome of parsing a rule's `apps="..."` attribute.
 enum AppSet {
     /// Attribute absent or empty/whitespace — no app constraint.
     None,
-    /// One or more resolved file paths. Each becomes its own
-    /// `AppPath` condition (and its own filter, in the cross-product).
-    Paths(Vec<PathBuf>),
-    /// Attribute had tokens but every one of them was a service
-    /// name (no path separator). We don't yet resolve service
-    /// names to executable paths, so the entire rule is skipped.
-    AllSkipped,
+    /// One or more app tokens (executable paths and/or service names).
+    /// Each becomes its own condition — and its own filter in the
+    /// cross-product — matching upstream's per-app filter semantics.
+    Apps(Vec<AppToken>),
 }
 
 /// Parse a `rule.apps` attribute. Tokens are `|`-separated. A token
 /// is treated as a path if it contains `\`, `/`, or `:` (drive-letter,
 /// directory separator, or UNC path); otherwise it's treated as a
-/// service name and dropped.
+/// Windows service short name and resolved to a service-SID descriptor
+/// at install time (unresolvable names are skipped nonfatally there).
 ///
 /// Path tokens go through `expand_env` first to handle entries like
 /// `%systemroot%\system32\lsass.exe` from `profile_internal.xml`.
 fn parse_apps(s: Option<&str>) -> AppSet {
     let Some(s) = s else { return AppSet::None };
 
-    let mut had_token = false;
-    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut tokens: Vec<AppToken> = Vec::new();
     for tok in s.split('|') {
         let tok = tok.trim();
         if tok.is_empty() {
             continue;
         }
-        had_token = true;
         if looks_like_path(tok) {
-            paths.push(PathBuf::from(expand_env(tok)));
+            tokens.push(AppToken::Path(PathBuf::from(expand_env(tok))));
+        } else {
+            tokens.push(AppToken::Service(tok.to_string()));
         }
-        // Service-name tokens silently skipped here. Aggregated as
-        // AllSkipped below if every token was a service name.
     }
 
-    if !had_token {
+    if tokens.is_empty() {
         AppSet::None
-    } else if paths.is_empty() {
-        AppSet::AllSkipped
     } else {
-        AppSet::Paths(paths)
+        AppSet::Apps(tokens)
     }
 }
 
@@ -1418,10 +1454,11 @@ fn parse_apps(s: Option<&str>) -> AppSet {
 /// else is assumed to be a service name.
 ///
 /// Edge cases:
-///   - `firefox.exe` (no separator) → service-name. Loses some real
-///     bare-exe-name profiles. Resolution: encourage full paths in
-///     user profiles. Service-name resolution is a future M4.x
-///     follow-up.
+///   - `firefox.exe` (no separator) → treated as a service name; the
+///     install-time SID lookup fails and the token is skipped. Real
+///     bare-exe-name app profiles still need a full path. Genuine
+///     service names (`Dnscache`, `Dhcp`) now resolve to a service-SID
+///     descriptor rather than being dropped.
 ///   - `\\server\share\app.exe` (UNC) → path (contains `\`).
 fn looks_like_path(s: &str) -> bool {
     s.contains('\\') || s.contains('/') || s.contains(':')
@@ -1763,10 +1800,19 @@ mod tests {
     // ---- parse_apps / expand_env / looks_like_path ----
 
     fn paths(set: AppSet) -> Vec<PathBuf> {
+        app_tokens(set)
+            .into_iter()
+            .filter_map(|t| match t {
+                AppToken::Path(p) => Some(p),
+                AppToken::Service(_) => None,
+            })
+            .collect()
+    }
+
+    fn app_tokens(set: AppSet) -> Vec<AppToken> {
         match set {
-            AppSet::Paths(v) => v,
-            AppSet::None => panic!("expected Paths, got None"),
-            AppSet::AllSkipped => panic!("expected Paths, got AllSkipped"),
+            AppSet::Apps(v) => v,
+            AppSet::None => panic!("expected Apps, got None"),
         }
     }
 
@@ -1797,20 +1843,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_apps_service_name_only_yields_all_skipped() {
-        assert!(matches!(parse_apps(Some("Dnscache")), AppSet::AllSkipped));
-        assert!(matches!(
-            parse_apps(Some("Dnscache|Dhcp|Spooler")),
-            AppSet::AllSkipped
-        ));
+    fn parse_apps_service_names_preserved_as_service_tokens() {
+        assert_eq!(
+            app_tokens(parse_apps(Some("Dnscache"))),
+            vec![AppToken::Service("Dnscache".into())]
+        );
+        assert_eq!(
+            app_tokens(parse_apps(Some("Dnscache|Dhcp|Spooler"))),
+            vec![
+                AppToken::Service("Dnscache".into()),
+                AppToken::Service("Dhcp".into()),
+                AppToken::Service("Spooler".into()),
+            ]
+        );
     }
 
     #[test]
-    fn parse_apps_mixed_drops_services_keeps_paths() {
-        let p = paths(parse_apps(Some(r"C:\a.exe|Dnscache|D:\b.exe")));
+    fn parse_apps_mixed_keeps_paths_and_services_in_order() {
         assert_eq!(
-            p,
-            vec![PathBuf::from(r"C:\a.exe"), PathBuf::from(r"D:\b.exe")]
+            app_tokens(parse_apps(Some(r"C:\a.exe|Dnscache|D:\b.exe"))),
+            vec![
+                AppToken::Path(PathBuf::from(r"C:\a.exe")),
+                AppToken::Service("Dnscache".into()),
+                AppToken::Path(PathBuf::from(r"D:\b.exe")),
+            ]
         );
     }
 
