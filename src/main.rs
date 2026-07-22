@@ -447,6 +447,19 @@ mod cli {
     }
 
     fn handle_uninstall(silent: bool) -> ExitCode {
+        // Remove the skip-UAC scheduled task on uninstall so we never
+        // leave an orphaned HIGHEST-runlevel auto-elevation entry
+        // behind. Best-effort: an absent task or a permission hiccup
+        // must not fail the uninstall. Deliberately here (CLI
+        // -uninstall) and NOT in install::uninstall, which the GUI
+        // "Disable filters" toggle also calls — that is a temporary
+        // firewall toggle, not an app uninstall. Security audit
+        // finding E. (The MSI uninstall path is a separate follow-up:
+        // it needs a WiX custom action, verifiable only against a live
+        // MSI, so it is intentionally not added here.)
+        if let Err(e) = amwall::skipuac::unregister() {
+            eprintln!("amwall: note: skip-UAC task not removed on uninstall: {e}");
+        }
         let engine = match WfpEngine::open() {
             Ok(e) => e,
             Err(e) => {
