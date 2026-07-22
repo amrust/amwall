@@ -3768,10 +3768,23 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
             // matches pre-1.1.7 inert checkbox behaviour for
             // those tabs).
             if listview_id == IDC_APPS_PROFILE {
+                // The Apps Profile list is sorted (Added-desc) and
+                // search-filtered, so the visual `row` is NOT the
+                // profile.apps index. Resolve the source index the
+                // populator stamped into lParam (listviews[0] =
+                // IDC_APPS_PROFILE), like every other Profile handler.
+                // Using `row` directly toggled the wrong app -> the
+                // clicked app's permit stayed live (fail-open).
+                // Security audit finding C. (Pure Win32 read, so it's
+                // safe to call before try_borrow_mut.)
+                let lv = state.listviews[0].get();
+                let Some(source_idx) = listview_item_param(lv, row).map(|p| p as usize) else {
+                    return;
+                };
                 let Ok(mut profile) = state.app.profile.try_borrow_mut() else {
                     return;
                 };
-                if let Some(app) = profile.apps.get_mut(row as usize) {
+                if let Some(app) = profile.apps.get_mut(source_idx) {
                     if app.is_enabled != new_enabled {
                         app.is_enabled = new_enabled;
                         profile_dirty = true;
@@ -5258,7 +5271,15 @@ fn on_edit_selected_rule(hwnd: HWND) {
     if idx < 0 {
         return;
     }
-    let idx = idx as usize;
+    // Resolve the selected VISUAL row to its source index in
+    // profile.custom_rules via the lParam the populator stamped. A
+    // preset row (negative sentinel) or a row with no lParam is
+    // toggle-only and must not open the editor on an unrelated user
+    // rule. Security audit finding C.
+    let idx = match listview_item_param(lv, idx as i32).map(classify_user_rule_row) {
+        Some(UserRuleRow::User(i)) => i,
+        _ => return,
+    };
 
     // Clone for the editor — we need the borrow to drop before
     // calling open() (which pumps Win32 messages and could
@@ -5306,7 +5327,14 @@ fn on_delete_selected_rule(hwnd: HWND) {
     if idx < 0 {
         return;
     }
-    let idx = idx as usize;
+    // Resolve the selected VISUAL row to its source index via the
+    // stamped lParam; a preset row (negative sentinel) or a row with
+    // no lParam is a no-op so Del never removes an unrelated user
+    // rule. Security audit finding C.
+    let idx = match listview_item_param(lv, idx as i32).map(classify_user_rule_row) {
+        Some(UserRuleRow::User(i)) => i,
+        _ => return,
+    };
 
     let title = wide(&t!("dialog.delete_rule"));
     let rule_name = state
@@ -6626,6 +6654,41 @@ fn end_listview_refill(lv: HWND, saved: SavedScroll, new_count: i32) {
 /// profile's custom rules. The Apps / Services / UWP / Blocklist /
 /// System rules / Connections / Log tabs follow their own
 /// populators (Apps from `profile.apps`; the rest are M6+).
+/// The two kinds of row the User Rules listview renders. Preset rows
+/// come from the bundled `internal_profile.custom_rules` and are
+/// toggle-only (not editable / deletable); user-added rows come from
+/// `profile.custom_rules` and carry their source index. Which one a
+/// row is gets stamped into `LVITEMW.lParam` by `populate_user_rules`,
+/// so the double-click (edit) and Del (delete) handlers round-trip a
+/// selected row back to the correct backing slot instead of trusting
+/// the visual row index (which the preset rows above and the search
+/// filter both shift). Security audit finding C. Mirrors upstream
+/// simplewall reading the item's context code from lParam, never iItem
+/// (simplewall-master/src/main.c:2836).
+#[derive(Debug, PartialEq, Eq)]
+enum UserRuleRow {
+    /// A bundled preset row — toggle-only, no edit / delete.
+    Preset,
+    /// A user-added row at this index into `profile.custom_rules`.
+    User(usize),
+}
+
+/// Sentinel stamped into a preset row's `lParam`. Presets have no slot
+/// in `profile.custom_rules`, so any negative value marks a preset;
+/// user rows stamp their (non-negative) source index.
+const USER_RULE_ROW_PRESET: isize = -1;
+
+/// Decode the `lParam` stamped on a User Rules row into its kind. Pure
+/// so a regression test can lock the preset/user split without a live
+/// listview.
+fn classify_user_rule_row(lparam: isize) -> UserRuleRow {
+    if lparam < 0 {
+        UserRuleRow::Preset
+    } else {
+        UserRuleRow::User(lparam as usize)
+    }
+}
+
 fn populate_user_rules(state: &WndState) {
     use crate::internal_rules_state::RuleKind;
     use crate::profile::Action;
@@ -6665,13 +6728,17 @@ fn populate_user_rules(state: &WndState) {
             overrides.effective_is_enabled(RuleKind::Custom, &rule.name, rule.is_enabled);
         let state_image = if effective_enabled { 2u32 } else { 1u32 };
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM,
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image << 12),
             iGroupId: super::listview_groups::rule_group_id_with(rule, effective_enabled),
+            // Preset rows are toggle-only: stamp the sentinel so
+            // on_edit / on_delete_selected_rule bail on them instead
+            // of mistaking a preset for profile.custom_rules[row].
+            lParam: LPARAM(USER_RULE_ROW_PRESET),
             ..Default::default()
         };
         let _ = unsafe {
@@ -6688,7 +6755,7 @@ fn populate_user_rules(state: &WndState) {
     // Second pass: the user's own profile.custom_rules — fully
     // editable (Properties, Remove, etc. via the context menu),
     // toggled via the existing profile.custom_rules[i].is_enabled.
-    for rule in profile.custom_rules.iter() {
+    for (orig_idx, rule) in profile.custom_rules.iter().enumerate() {
         if !search_match(&rule.name, &filter) {
             continue;
         }
@@ -6697,13 +6764,18 @@ fn populate_user_rules(state: &WndState) {
         let mut name_buf = wide(&rule.name);
         let state_image = if rule.is_enabled { 2u32 } else { 1u32 };
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID,
+            mask: LVIF_TEXT | LVIF_STATE | LVIF_GROUPID | LVIF_PARAM,
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image << 12),
             iGroupId: super::listview_groups::rule_group_id(rule),
+            // Stamp the source index into profile.custom_rules (always
+            // >= 0, so it classifies as User) so edit/delete act on the
+            // clicked rule, not the visual row shifted by the preset
+            // rows above and the search filter. Finding C.
+            lParam: LPARAM(orig_idx as isize),
             ..Default::default()
         };
         let _ = unsafe {
@@ -7697,6 +7769,19 @@ const fn windows_lvm_getitemcount() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_user_rule_row_splits_preset_from_user() {
+        // Security audit finding C: edit/delete must tell a toggle-only
+        // preset row (negative lParam sentinel) from a user-added row,
+        // and recover the user row's source index from lParam rather
+        // than trusting the visual row (shifted by presets + search).
+        assert_eq!(classify_user_rule_row(USER_RULE_ROW_PRESET), UserRuleRow::Preset);
+        assert_eq!(classify_user_rule_row(-1), UserRuleRow::Preset);
+        assert_eq!(classify_user_rule_row(-42), UserRuleRow::Preset);
+        assert_eq!(classify_user_rule_row(0), UserRuleRow::User(0));
+        assert_eq!(classify_user_rule_row(7), UserRuleRow::User(7));
+    }
 
     #[test]
     fn scale_dpi_identity_at_96() {
