@@ -263,8 +263,21 @@ fn confined_log_path(configured: &str, elevated: bool, data_dir: &Path) -> PathB
 /// `confined_log_path` wired to the real process elevation state and
 /// data dir. The single place every log write resolves its path, so
 /// `open` / `rotate` / `truncate` all inherit the confinement.
+#[cfg(not(test))]
 fn effective_log_path(configured: &str) -> PathBuf {
     confined_log_path(configured, super::is_elevated(), &crate::paths::data_dir())
+}
+
+/// Test build: skip the elevation-based confinement. The append/rotate
+/// unit tests write to an isolated temp path and read it back, and
+/// GitHub CI runs the test binary ELEVATED — so the real confinement
+/// would redirect those writes into the data dir and break the tests
+/// non-deterministically by environment. The confinement policy itself
+/// is covered by the `confined_log_path` unit tests, and the elevated
+/// behavior is verified by a live run. Security audit finding D.
+#[cfg(test)]
+fn effective_log_path(configured: &str) -> PathBuf {
+    resolve_path(configured)
 }
 
 fn bak_path(path: &Path) -> PathBuf {
