@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &conds,
         FilterAction::Permit,
         false,
-        None,
+        filter::weight::APP,
     )?;
     let key = f.key();
     println!(

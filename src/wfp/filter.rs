@@ -9,8 +9,9 @@
 
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_ACTION_BLOCK, FWP_ACTION_CALLOUT_TERMINATING, FWP_ACTION_PERMIT, FWP_ACTION_TYPE,
-    FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER_FLAG_PERSISTENT, FwpmFilterAdd0,
-    FwpmFilterDeleteByKey0,
+    FWP_UINT8, FWP_VALUE0, FWP_VALUE0_0, FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0,
+    FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT, FWPM_FILTER_FLAG_PERSISTENT, FWPM_FILTER_FLAGS,
+    FwpmFilterAdd0, FwpmFilterDeleteByKey0,
 };
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows::Win32::System::Rpc::UuidCreate;
@@ -94,6 +95,64 @@ impl FilterAction {
     }
 }
 
+/// Upstream simplewall's FW_WEIGHT_* filter-weight band ladder (verified
+/// against simplewall-master/src/wfp.h:22-29). A filter's weight is an
+/// FWP_UINT8 BAND, not a raw value: a higher band deterministically
+/// beats a lower one within the sublayer, so a blocklist / user-block
+/// rule overrides a per-app permit which overrides the catch-all.
+/// Encoding the weight as a raw FWP_UINT64 (or leaving it FWP_EMPTY), as
+/// amwall did before, collapsed this ordering and could fail open.
+/// Security audit finding A.
+pub mod weight {
+    /// Loopback + global allows (FW_WEIGHT_HIGHEST_IMPORTANT).
+    pub const HIGHEST_IMPORTANT: u8 = 0x0F;
+    /// Stealth blocks + terminating callouts (FW_WEIGHT_HIGHEST).
+    pub const HIGHEST: u8 = 0x0E;
+    /// Blocklist rules (FW_WEIGHT_RULE_BLOCKLIST).
+    pub const RULE_BLOCKLIST: u8 = 0x0D;
+    /// User Block rules (FW_WEIGHT_RULE_USER_BLOCK).
+    pub const RULE_USER_BLOCK: u8 = 0x0C;
+    /// User Permit rules (FW_WEIGHT_RULE_USER).
+    pub const RULE_USER: u8 = 0x0B;
+    /// System rules (FW_WEIGHT_RULE_SYSTEM).
+    pub const RULE_SYSTEM: u8 = 0x0A;
+    /// Per-app permits (FW_WEIGHT_APP).
+    pub const APP: u8 = 0x09;
+    /// Default-deny catch-all + global blocks (FW_WEIGHT_LOWEST).
+    pub const LOWEST: u8 = 0x08;
+}
+
+/// Which category a rule filter belongs to, for weight-band selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleCategory {
+    /// Bundled blocklist rules — always outrank user / system / per-app.
+    Blocklist,
+    /// User custom rules (User Rules tab).
+    User,
+    /// Bundled system rules (DHCP / DNS / etc.).
+    System,
+}
+
+/// Map a rule's category + whether it BLOCKS to its upstream weight
+/// band. Pure + unit-tested so the allow-over-deny precedence ladder is
+/// locked without a live BFE. A Block user rule sits above a Permit user
+/// rule (upstream db.c:405-407); blocklist rules take the blocklist band
+/// regardless of action (db.c:399); system rules take the system band.
+/// Security audit finding A.
+pub fn rule_weight_band(category: RuleCategory, is_block: bool) -> u8 {
+    match category {
+        RuleCategory::Blocklist => weight::RULE_BLOCKLIST,
+        RuleCategory::User => {
+            if is_block {
+                weight::RULE_USER_BLOCK
+            } else {
+                weight::RULE_USER
+            }
+        }
+        RuleCategory::System => weight::RULE_SYSTEM,
+    }
+}
+
 /// Register a new filter at `layer_key` under `sublayer_key`.
 ///
 /// `conditions` describes the match clauses combined with AND
@@ -105,11 +164,12 @@ impl FilterAction {
 /// upstream `simplewall -install` flow. Should match the
 /// persistence of the owning provider+sublayer.
 ///
-/// `weight = None` lets the kernel auto-assign a mid-range weight
-/// inside the sublayer; `Some(n)` pins it. Per-app permits use
-/// auto; the default-deny catch-all installed at the end of
-/// `install_with_internal` pins its weight to `0` so any per-app
-/// permit at higher weight wins.
+/// `weight_band` is the FWP_UINT8 band (see `weight` / the upstream
+/// FW_WEIGHT_* ladder) assigned to every filter: a higher band beats a
+/// lower one within the sublayer, so blocklist / user-block rules
+/// deterministically override per-app permits (band `APP`) which
+/// override the default-deny catch-all (band `LOWEST`). Security audit
+/// finding A.
 ///
 /// Requires admin. Returns the filter key (GUID) and runtime id.
 #[allow(clippy::too_many_arguments)]
@@ -123,7 +183,7 @@ pub fn add(
     conditions: &[FilterCondition],
     action: FilterAction,
     persistent: bool,
-    weight: Option<u64>,
+    weight_band: u8,
 ) -> Result<Filter, WfpError> {
     let mut key = GUID::zeroed();
     let rpc_status = unsafe { UuidCreate(&mut key) };
@@ -153,28 +213,34 @@ pub fn add(
     };
     filter.layerKey = *layer_key;
     filter.subLayerKey = *sublayer_key;
+    // Compose flags: PERSISTENT (caller-driven) plus, on every block /
+    // terminating-callout filter, CLEAR_ACTION_RIGHT, which upstream
+    // sets so a lower-weight permit in another sublayer cannot override
+    // the block (wfp.c:805-806). Security audit finding A.
+    let mut flags = FWPM_FILTER_FLAGS(0);
     if persistent {
-        filter.flags = FWPM_FILTER_FLAG_PERSISTENT;
+        flags |= FWPM_FILTER_FLAG_PERSISTENT;
     }
-    // Weight handling: None leaves the FWP_VALUE0 zero-init
-    // (FWP_EMPTY → kernel picks a default mid-range). `Some(n)`
-    // builds an FWP_UINT64 with `n`; we own a Box-allocated u64
-    // so the pointer the FWP_VALUE0 carries stays valid through
-    // FwpmFilterAdd0 (which copies the value out before
-    // returning). Without the box the stack-allocated u64 would
-    // dangle past the call's lifetime.
-    let _weight_box: Option<Box<u64>> = if let Some(w) = weight {
-        let boxed = Box::new(w);
-        filter.weight = windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0 {
-            r#type: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_UINT64,
-            Anonymous:
-                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 {
-                    uint64: &*boxed as *const u64 as *mut u64,
-                },
-        };
-        Some(boxed)
-    } else {
-        None
+    if matches!(
+        action,
+        FilterAction::Block | FilterAction::CalloutTerminating { .. }
+    ) {
+        flags |= FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT;
+    }
+    filter.flags = flags;
+
+    // Weight is an FWP_UINT8 BAND (the upstream FW_WEIGHT_* ladder), not
+    // a raw FWP_UINT64 value and never FWP_EMPTY: a higher band
+    // deterministically beats a lower one, so allow/deny precedence is
+    // explicit rather than left to the kernel's condition-count
+    // heuristic. The u8 lives inline in the FWP_VALUE0 union, so there
+    // is no heap pointer to keep alive across the FFI call. Security
+    // audit finding A.
+    filter.weight = FWP_VALUE0 {
+        r#type: FWP_UINT8,
+        Anonymous: FWP_VALUE0_0 {
+            uint8: weight_band,
+        },
     };
     filter.numFilterConditions = cond_slice.len() as u32;
     if !cond_slice.is_empty() {
@@ -209,7 +275,6 @@ pub fn add(
     };
     drop(name_buf);
     drop(desc_buf);
-    drop(_weight_box);
 
     if status != ERROR_SUCCESS {
         return Err(WfpError::FilterAdd(status));
@@ -225,6 +290,50 @@ mod tests {
     use crate::wfp::condition::{FilterCondition, IpProto};
     use crate::wfp::{provider, sublayer};
     use windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+
+    #[test]
+    fn weight_band_ladder_is_monotonic_and_matches_upstream() {
+        // Security audit finding A: the allow-over-deny precedence
+        // ladder must be strictly ordered (verified against upstream
+        // simplewall-master/src/wfp.h:22-29) so a blocklist / user block
+        // deterministically beats a per-app permit which beats the
+        // catch-all. Provable without a live BFE.
+        use weight::*;
+        assert_eq!(HIGHEST_IMPORTANT, 0x0F);
+        assert_eq!(HIGHEST, 0x0E);
+        assert_eq!(RULE_BLOCKLIST, 0x0D);
+        assert_eq!(RULE_USER_BLOCK, 0x0C);
+        assert_eq!(RULE_USER, 0x0B);
+        assert_eq!(RULE_SYSTEM, 0x0A);
+        assert_eq!(APP, 0x09);
+        assert_eq!(LOWEST, 0x08);
+        // Strictly descending ladder (runtime check over the array so
+        // it isn't a constant assertion).
+        let ladder = [
+            HIGHEST_IMPORTANT,
+            HIGHEST,
+            RULE_BLOCKLIST,
+            RULE_USER_BLOCK,
+            RULE_USER,
+            RULE_SYSTEM,
+            APP,
+            LOWEST,
+        ];
+        assert!(
+            ladder.windows(2).all(|w| w[0] > w[1]),
+            "weight bands must be strictly descending: {ladder:?}"
+        );
+        // The core fail-open guard: a blocklist block and a user block
+        // both outrank a per-app permit, which outranks the catch-all;
+        // a user Block outranks a user Permit.
+        assert!(rule_weight_band(RuleCategory::Blocklist, true) > APP);
+        assert!(rule_weight_band(RuleCategory::User, true) > APP);
+        assert!(
+            rule_weight_band(RuleCategory::User, true)
+                > rule_weight_band(RuleCategory::User, false)
+        );
+        assert!(rule_weight_band(RuleCategory::System, false) > APP);
+    }
 
     /// Live admin-only smoke test: end-to-end provider → sublayer →
     /// filter chain at the IPv4 outbound-connect ALE layer with a
@@ -259,7 +368,7 @@ mod tests {
             &[],
             FilterAction::Permit,
             false,
-            None,
+            weight::APP,
         )
         .expect("FwpmFilterAdd0 failed");
         let k = f.key();
@@ -309,7 +418,7 @@ mod tests {
             &conds,
             FilterAction::Permit,
             false,
-            None,
+            weight::APP,
         )
         .expect("FwpmFilterAdd0 with AppPath failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
@@ -347,7 +456,7 @@ mod tests {
             &[],
             FilterAction::Permit,
             false,
-            None,
+            weight::APP,
         )
         .expect("filter add failed");
 
@@ -406,7 +515,7 @@ mod tests {
             &conds,
             FilterAction::Permit,
             false,
-            None,
+            weight::APP,
         )
         .expect("FwpmFilterAdd0 with conditions failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
@@ -453,7 +562,7 @@ mod tests {
             &conds,
             FilterAction::Permit,
             false,
-            None,
+            weight::APP,
         )
         .expect("FwpmFilterAdd0 with range conditions failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");
@@ -498,7 +607,7 @@ mod tests {
             &[FilterCondition::RemotePort(65530)],
             FilterAction::Permit,
             true,
-            None,
+            weight::APP,
         )
         .expect("persistent filter add failed");
         assert_ne!(f.runtime_id(), 0, "filter runtime id was 0");

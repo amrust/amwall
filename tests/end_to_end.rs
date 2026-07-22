@@ -108,7 +108,7 @@ fn full_pipeline_profile_to_kernel_to_cleanup() {
                 &conds,
                 action,
                 false,
-                None,
+                wfp_filter::weight::APP,
             )
             .expect("filter add failed");
             installed += 1;

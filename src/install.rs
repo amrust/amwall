@@ -218,10 +218,13 @@ fn parse_sid_string(s: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Sublayer weight — mid-range so we don't override system filters
-/// at higher weights but rank above default ones. Matches the
-/// upstream `FW_SUBLAYER_WEIGHT` default.
-const SUBLAYER_WEIGHT: u16 = 0x4000;
+/// Sublayer weight. Matches the upstream `FW_SUBLAYER_WEIGHT`
+/// (simplewall-master/src/wfp.h:19) — the maximum — so amwall's
+/// sublayer wins cross-sublayer arbitration rather than being vetoed by
+/// a higher-weight sublayer from another security product. Was 0x4000,
+/// which left amwall's blocks overridable by any sublayer in
+/// 0x4001..=0xFFFF. Security audit finding A.
+const SUBLAYER_WEIGHT: u16 = 0xFFFF;
 
 /// Errors surfaced by `install_profile`.
 #[derive(Debug)]
@@ -500,11 +503,20 @@ pub fn install_with_internal(
             continue;
         }
         let action = filter_action_from_rule(rule);
+        // User custom rules: Block sits at RULE_USER_BLOCK (0x0C),
+        // Permit at RULE_USER (0x0B) — above per-app permits and the
+        // catch-all, so a user block overrides an app's permit
+        // (upstream db.c:405-407). Security audit finding A.
+        let band = filter::rule_weight_band(
+            filter::RuleCategory::User,
+            matches!(action, FilterAction::Block),
+        );
         match install_one_rule_nonfatal(
             engine,
             persistent,
             rule,
             action,
+            band,
             &mut report.filter_ids.user_rules,
         )? {
             RuleInstall::Added(n) => report.filters_added += n,
@@ -531,6 +543,7 @@ pub fn install_with_internal(
                 persistent,
                 rule,
                 FilterAction::Permit,
+                filter::weight::RULE_SYSTEM, // 0x0A, finding A
                 &mut report.filter_ids.system_rules,
             )? {
                 RuleInstall::Added(n) => report.filters_added += n,
@@ -554,11 +567,16 @@ pub fn install_with_internal(
                 continue;
             }
             let action = filter_action_from_rule(rule);
+            let band = filter::rule_weight_band(
+                filter::RuleCategory::User,
+                matches!(action, FilterAction::Block),
+            );
             match install_one_rule_nonfatal(
                 engine,
                 persistent,
                 rule,
                 action,
+                band,
                 &mut report.filter_ids.user_rules,
             )? {
                 RuleInstall::Added(n) => report.filters_added += n,
@@ -580,11 +598,20 @@ pub fn install_with_internal(
                 BlocklistAction::Allow => FilterAction::Permit,
                 BlocklistAction::Block => FilterAction::Block,
             };
+            // Blocklist rules always take the RULE_BLOCKLIST band
+            // (0x0D) regardless of Allow/Block, so they outrank per-app
+            // permits and user/system rules (upstream db.c:399).
+            // Security audit finding A.
+            let band = filter::rule_weight_band(
+                filter::RuleCategory::Blocklist,
+                matches!(action, FilterAction::Block),
+            );
             match install_one_rule_nonfatal(
                 engine,
                 persistent,
                 rule,
                 action,
+                band,
                 &mut report.filter_ids.blocklist,
             )? {
                 RuleInstall::Added(n) => report.filters_added += n,
@@ -667,7 +694,12 @@ fn install_global_rules(
                 &[],
                 FilterAction::Block,
                 persistent,
-                Some(14),
+                // 0x0E band (upstream FW_WEIGHT_HIGHEST): above per-app
+                // permits (APP) so "Block all" overrides them, below
+                // loopback (HIGHEST_IMPORTANT). Was raw Some(14) which,
+                // as an FWP_UINT64, ranked BELOW auto per-app permits.
+                // Security audit finding A.
+                filter::weight::HIGHEST,
             )?;
             ids.push(f.runtime_id());
             count += 1;
@@ -690,7 +722,12 @@ fn install_global_rules(
                 &[],
                 FilterAction::Block,
                 persistent,
-                Some(14),
+                // 0x0E band (upstream FW_WEIGHT_HIGHEST): above per-app
+                // permits (APP) so "Block all" overrides them, below
+                // loopback (HIGHEST_IMPORTANT). Was raw Some(14) which,
+                // as an FWP_UINT64, ranked BELOW auto per-app permits.
+                // Security audit finding A.
+                filter::weight::HIGHEST,
             )?;
             ids.push(f.runtime_id());
             count += 1;
@@ -720,7 +757,10 @@ fn install_global_rules(
                 std::slice::from_ref(&v4_loopback),
                 FilterAction::Permit,
                 persistent,
-                Some(15),
+                // 0x0F (FW_WEIGHT_HIGHEST_IMPORTANT): loopback/global
+                // allows sit at the top so they win over rules and the
+                // block-all toggles. Was raw Some(15). Finding A.
+                filter::weight::HIGHEST_IMPORTANT,
             )?;
             ids.push(f.runtime_id());
             count += 1;
@@ -736,7 +776,7 @@ fn install_global_rules(
                 std::slice::from_ref(&v6_loopback),
                 FilterAction::Permit,
                 persistent,
-                Some(15),
+                filter::weight::HIGHEST_IMPORTANT,
             )?;
             ids.push(f.runtime_id());
             count += 1;
@@ -766,7 +806,7 @@ fn install_global_rules(
                     std::slice::from_ref(&cond),
                     FilterAction::Permit,
                     persistent,
-                    Some(15),
+                    filter::weight::HIGHEST_IMPORTANT,
                 )?;
                 ids.push(f.runtime_id());
                 count += 1;
@@ -813,7 +853,7 @@ fn install_global_rules(
             std::slice::from_ref(&ipv6_in_ipv4),
             FilterAction::Permit,
             persistent,
-            Some(15),
+            filter::weight::HIGHEST_IMPORTANT,
         )?;
         ids.push(f.runtime_id());
         count += 1;
@@ -844,7 +884,7 @@ fn install_global_rules(
                 std::slice::from_ref(&cond),
                 FilterAction::Permit,
                 persistent,
-                Some(15),
+                filter::weight::HIGHEST_IMPORTANT,
             )?;
             ids.push(f.runtime_id());
             count += 1;
@@ -914,7 +954,9 @@ fn install_stealth_filters(
             &icmp_stealth_conds,
             FilterAction::Block,
             persistent,
-            Some(15),
+            // 0x0E (FW_WEIGHT_HIGHEST): stealth blocks sit above rules
+            // and permits (upstream wfp.c:2091). Was raw Some(15).
+            filter::weight::HIGHEST,
         )?;
         ids.push(f.runtime_id());
         count += 1;
@@ -950,7 +992,7 @@ fn install_stealth_filters(
                 callout_key: *callout_key,
             },
             persistent,
-            Some(15),
+            filter::weight::HIGHEST,
         )?;
         ids.push(f.runtime_id());
         count += 1;
@@ -1070,7 +1112,10 @@ fn install_per_app_filters(
                 &conds,
                 FilterAction::Permit,
                 persistent,
-                None, // kernel-assigned mid-range weight
+                // 0x09 (FW_WEIGHT_APP): per-app permits win over the
+                // catch-all (LOWEST) but lose to blocklist/user-block
+                // rules. Was FWP_EMPTY auto-weight. Finding A.
+                filter::weight::APP,
             );
             match result {
                 Ok(f) => {
@@ -1137,7 +1182,7 @@ fn install_default_deny(
             &[], // no conditions = match-all
             FilterAction::Block,
             persistent,
-            Some(0), // FW_WEIGHT_LOWEST — every per-app permit wins
+            filter::weight::LOWEST, // FW_WEIGHT_LOWEST: every higher band wins
         )?;
         ids.push(f.runtime_id());
         count += 1;
@@ -1209,9 +1254,10 @@ fn install_one_rule_nonfatal(
     persistent: bool,
     rule: &Rule,
     action: FilterAction,
+    band: u8,
     ids: &mut Vec<u64>,
 ) -> Result<RuleInstall, InstallError> {
-    match install_one_rule(engine, persistent, rule, action, ids) {
+    match install_one_rule(engine, persistent, rule, action, band, ids) {
         Ok(0) => Ok(RuleInstall::Skipped),
         Ok(n) => Ok(RuleInstall::Added(n)),
         Err(e) if is_single_rule_error(&e) => {
@@ -1230,6 +1276,7 @@ fn install_one_rule(
     persistent: bool,
     rule: &Rule,
     action: FilterAction,
+    band: u8,
     ids: &mut Vec<u64>,
 ) -> Result<u32, InstallError> {
     let remotes = parse_rule_string(&rule.name, rule.remote.as_deref())?;
@@ -1308,7 +1355,7 @@ fn install_one_rule(
                         &conds,
                         action,
                         persistent,
-                        None, // kernel-assigned weight
+                        band, // per-rule category band (see caller)
                     )?;
                     ids.push(f.runtime_id());
                     count += 1;
