@@ -466,6 +466,14 @@ const GROUP_COLLAPSE_REPAINT_MS: u32 = 100;
 /// `Settings.update_dismissed_tag`). Stays silent on no-update or
 /// on transient network failures — only signal, no noise.
 const TIMER_UPDATE_CHECK: usize = 9006;
+
+/// use_hashes drift-enforcement tick id. Every 10 minutes (matching
+/// upstream's app-monitor cadence, helper.c:1778) `check_hash_drift`
+/// disables any enabled File app whose binary changed on disk and
+/// rebuilds filters so the tampered binary loses its permit. Security
+/// audit finding F.1.
+const TIMER_HASH_CHECK: usize = 9007;
+const HASH_CHECK_INTERVAL_MS: u32 = 10 * 60 * 1000;
 const UPDATE_CHECK_INTERVAL_MS: u32 = 60 * 60 * 1000;
 
 /// `LVN_GROUPINFO` — sent by a list-view control when a group's
@@ -1071,6 +1079,10 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(state) = unsafe { state_ref(hwnd) } {
                     expire_timed_apps(hwnd, state);
                 }
+            } else if wparam.0 == TIMER_HASH_CHECK {
+                if let Some(state) = unsafe { state_ref(hwnd) } {
+                    check_hash_drift(hwnd, state);
+                }
             } else if wparam.0 == TIMER_UPDATE_CHECK {
                 // Hourly auto-check: re-runs the same worker the
                 // startup auto-check uses, with the currently-
@@ -1344,7 +1356,16 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     unsafe {
         SetTimer(hwnd, TIMER_EVENT_DRAIN, EVENT_DRAIN_INTERVAL_MS, None);
         SetTimer(hwnd, TIMER_APP_EXPIRY, APP_EXPIRY_INTERVAL_MS, None);
+        // use_hashes drift enforcement, every 10 min (check_hash_drift
+        // no-ops when use_hashes is off). Security audit finding F.1.
+        SetTimer(hwnd, TIMER_HASH_CHECK, HASH_CHECK_INTERVAL_MS, None);
     }
+
+    // First drift check at launch, BEFORE the startup filter
+    // reconciliation below, so a binary that was tampered while amwall
+    // was closed is disabled and never receives a permit this run.
+    // Security audit finding F.1.
+    check_hash_drift(hwnd, state);
 
     // Filters installed on a previous run survive process exit
     // (we ask BFE to persist them across reboots, which also
@@ -1923,7 +1944,9 @@ fn spawn_signed_worker(
                     }
                 }
             }
-            let info = verify_signature(&path, want_signer);
+            // Display-only signer worker: no revocation network check
+            // (fast, offline-safe). Security audit finding F.2.
+            let info = verify_signature(&path, want_signer, false);
             if let Ok(mut g) = cache.lock() {
                 g.insert(path, info);
             }
@@ -2091,7 +2114,11 @@ fn is_microsoft_signed(path: &std::path::Path) -> bool {
     if path.as_os_str().is_empty() {
         return false;
     }
-    let info = verify_signature(path, true);
+    // Auto-ALLOW decision: verify with whole-chain revocation checking
+    // (WTD_REVOKE_WHOLECHAIN) so a revoked-but-unexpired Microsoft cert
+    // fails closed and the binary falls to the connect prompt instead
+    // of being silently permitted. Security audit finding F.2.
+    let info = verify_signature(path, true, true);
     if !info.signed {
         return false;
     }
@@ -3523,12 +3550,33 @@ pub struct SignedInfo {
     pub signer: Option<String>,
 }
 
+/// Map "does this decision care about certificate revocation?" to the
+/// WinVerifyTrust revocation-check flags. The auto-ALLOW path
+/// (is_microsoft_signed) passes true -> WTD_REVOKE_WHOLECHAIN so a
+/// revoked-but-unexpired cert fails closed (nothing wrongly permitted);
+/// the display-only signer worker passes false -> WTD_REVOKE_NONE (fast,
+/// offline-safe, and grants nothing on its own). Security audit finding
+/// F.2. Upstream verifies with WHOLECHAIN (helper.c:833,846) and uses
+/// NONE only on the display/cache path (helper.c:851).
+fn revocation_checks(
+    check_revocation: bool,
+) -> windows::Win32::Security::WinTrust::WINTRUST_DATA_REVOCATION_CHECKS {
+    use windows::Win32::Security::WinTrust::{WTD_REVOKE_NONE, WTD_REVOKE_WHOLECHAIN};
+    if check_revocation {
+        WTD_REVOKE_WHOLECHAIN
+    } else {
+        WTD_REVOKE_NONE
+    }
+}
+
 /// `WinVerifyTrust(WINTRUST_ACTION_GENERIC_VERIFY_V2)` returning
 /// `0` means the binary's signature chain is valid. Anything else
 /// (TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN, etc.) means we
-/// treat it as unsigned. We pass `WTD_REVOKE_NONE` to skip the
-/// revocation network check — keeps each call latency-bounded
-/// and avoids hangs on offline machines.
+/// treat it as unsigned. `check_revocation` selects the revocation
+/// policy via `revocation_checks`: the auto-ALLOW caller passes true
+/// (WTD_REVOKE_WHOLECHAIN, fails closed on a revoked cert); the
+/// display-only signer worker passes false (WTD_REVOKE_NONE, fast and
+/// offline-safe). Security audit finding F.2.
 ///
 /// When `extract_signer` is true (settings.use_certificates), the
 /// state-data emitted by VERIFY is walked via
@@ -3538,7 +3586,11 @@ pub struct SignedInfo {
 /// display name (typically the publisher org, e.g. "Microsoft
 /// Corporation" or "GitHub, Inc."). When false, signer is None
 /// even for signed binaries.
-fn verify_signature(path: &std::path::Path, extract_signer: bool) -> SignedInfo {
+fn verify_signature(
+    path: &std::path::Path,
+    extract_signer: bool,
+    check_revocation: bool,
+) -> SignedInfo {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Security::Cryptography::{
@@ -3546,7 +3598,7 @@ fn verify_signature(path: &std::path::Path, extract_signer: bool) -> SignedInfo 
     };
     use windows::Win32::Security::WinTrust::{
         WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
-        WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+        WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
         WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
         WTHelperProvDataFromStateData, WinVerifyTrust,
     };
@@ -3565,7 +3617,7 @@ fn verify_signature(path: &std::path::Path, extract_signer: bool) -> SignedInfo 
     let mut data: WINTRUST_DATA = unsafe { std::mem::zeroed() };
     data.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
     data.dwUIChoice = WTD_UI_NONE;
-    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.fdwRevocationChecks = revocation_checks(check_revocation);
     data.dwUnionChoice = WTD_CHOICE_FILE;
     data.dwStateAction = WTD_STATEACTION_VERIFY;
     data.Anonymous = WINTRUST_DATA_0 {
@@ -5431,14 +5483,17 @@ fn update_hashes_if_enabled(state: &WndState) {
             // simply have been uninstalled).
             continue;
         };
-        match &app.hash {
-            None => {
+        // Save-path pass stays WARN-ONLY; periodic enforcement (disable
+        // + rebuild filters on drift) is check_hash_drift on
+        // TIMER_HASH_CHECK. Shared classifier so both agree on "drift".
+        match hash_drift_verdict(app.hash.as_deref(), &current) {
+            HashVerdict::Store => {
                 app.hash = Some(current);
             }
-            Some(stored) if stored.eq_ignore_ascii_case(&current) => {
-                // Match — nothing to do.
+            HashVerdict::Match => {
+                // Nothing to do.
             }
-            Some(_) => {
+            HashVerdict::Drift => {
                 let name = app
                     .path
                     .file_name()
@@ -5463,6 +5518,97 @@ fn update_hashes_if_enabled(state: &WndState) {
         };
         set_status_text(state.status.get(), 0, &msg);
     }
+}
+
+/// Verdict for a File-app's stored hash vs the current on-disk binary.
+/// Pure, so the drift policy is unit-testable without disk or a live
+/// BFE. Security audit finding F.1.
+#[derive(Debug, PartialEq, Eq)]
+enum HashVerdict {
+    /// No stored hash yet — adopt the current hash as the baseline.
+    Store,
+    /// Stored hash matches the current binary (case-insensitive hex).
+    Match,
+    /// Stored hash differs — the binary at this path changed.
+    Drift,
+}
+
+fn hash_drift_verdict(stored: Option<&str>, current: &str) -> HashVerdict {
+    match stored {
+        None => HashVerdict::Store,
+        Some(s) if s.eq_ignore_ascii_case(current) => HashVerdict::Match,
+        Some(_) => HashVerdict::Drift,
+    }
+}
+
+/// Periodic (and one-shot at launch) `use_hashes` ENFORCEMENT. Unlike
+/// the save-path warner `update_hashes_if_enabled`, this acts on drift:
+/// an enabled File app whose binary changed on disk is disabled and its
+/// stored hash refreshed, then filters are rebuilt so the tampered
+/// binary loses its WFP permit. Mirrors upstream's INFO_DISABLE on
+/// drift (helper.c:1745-1778 -> profile.c:262-277). No-op when
+/// `use_hashes` is off. Same mutate -> save -> repopulate -> jiggle ->
+/// reinstall shape as `expire_timed_apps`. Security audit finding F.1.
+fn check_hash_drift(hwnd: HWND, state: &WndState) {
+    use crate::profile::AppKind;
+
+    if !state.app.settings.borrow().use_hashes {
+        return;
+    }
+    let mut disabled: Vec<String> = Vec::new();
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        for app in profile.apps.iter_mut() {
+            if app.kind() != AppKind::File {
+                continue;
+            }
+            let Some(current) = crate::hash::sha256_file(&app.path) else {
+                // Unreadable (perhaps uninstalled) — leave it alone;
+                // don't treat a missing file as drift.
+                continue;
+            };
+            match hash_drift_verdict(app.hash.as_deref(), &current) {
+                HashVerdict::Store => app.hash = Some(current),
+                HashVerdict::Match => {}
+                HashVerdict::Drift => {
+                    // Refresh the baseline to the new binary and, if the
+                    // app was enabled, disable it so the reinstall below
+                    // tears down its now-stale permit.
+                    let name = app
+                        .path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| app.path.display().to_string());
+                    app.hash = Some(current);
+                    if app.is_enabled {
+                        app.is_enabled = false;
+                        disabled.push(name);
+                    }
+                }
+            }
+        }
+    }
+    if disabled.is_empty() {
+        return;
+    }
+    eprintln!(
+        "amwall: hash drift: disabled {} app(s) whose binary changed: {}",
+        disabled.len(),
+        disabled.join(", ")
+    );
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+    force_active_apps_listview_jiggle(hwnd, state);
+    reinstall_filters_if_active(hwnd, state);
+    set_status_text(
+        state.status.get(),
+        0,
+        &format!(
+            "{} app(s) disabled after their binary changed on disk (hash drift).",
+            disabled.len()
+        ),
+    );
 }
 
 /// File → Import: pick a `.xml` profile, parse it, swap it in as
@@ -7788,6 +7934,32 @@ const fn windows_lvm_getitemcount() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revocation_policy_maps_allow_vs_display() {
+        // Security audit finding F.2: the auto-ALLOW path must verify
+        // with whole-chain revocation (fails closed on a revoked cert);
+        // the display-only worker keeps the fast no-revocation path.
+        use windows::Win32::Security::WinTrust::{WTD_REVOKE_NONE, WTD_REVOKE_WHOLECHAIN};
+        assert_eq!(revocation_checks(true).0, WTD_REVOKE_WHOLECHAIN.0);
+        assert_eq!(revocation_checks(false).0, WTD_REVOKE_NONE.0);
+    }
+
+    #[test]
+    fn hash_drift_verdict_classifies_store_match_drift() {
+        // Security audit finding F.1: no stored hash -> Store (adopt
+        // baseline); hex-case-only difference -> Match (never disables
+        // an app); a genuine change -> Drift (drives disable + rebuild).
+        assert_eq!(hash_drift_verdict(None, "abc123"), HashVerdict::Store);
+        assert_eq!(
+            hash_drift_verdict(Some("ABC123"), "abc123"),
+            HashVerdict::Match
+        );
+        assert_eq!(
+            hash_drift_verdict(Some("deadbeef"), "abc123"),
+            HashVerdict::Drift
+        );
+    }
 
     #[test]
     fn classify_user_rule_row_splits_preset_from_user() {
