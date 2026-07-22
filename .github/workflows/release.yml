@@ -175,7 +175,24 @@ jobs:
         shell: pwsh
         run: |
           $tag = '${{ github.ref_name }}'
-          $body = git tag -l --format='%(contents)' $tag
+          # actions/checkout@v4 fetches only the tagged COMMIT and writes
+          # a LIGHTWEIGHT local tag pointing at it — so `git tag -l
+          # --format='%(contents)'` returns the COMMIT message, not the
+          # annotation. This silently shipped the bump-commit subject
+          # ("release: bump version to 1.1.16") as the v1.1.16 body until
+          # caught; earlier tags happened to sit on rich feature commits
+          # so the same bug looked correct. Force-fetch the real annotated
+          # tag object from origin so %(contents) resolves the tag message.
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          # Only read %(contents) when the object is a genuine annotated
+          # tag; a lightweight tag would otherwise fall through to the
+          # commit message and mask the mistake.
+          $type = (git cat-file -t $tag) 2>$null
+          if ($type -eq 'tag') {
+            $body = git tag -l --format='%(contents)' $tag
+          } else {
+            $body = ''
+          }
           if (-not $body) {
             $body = "No release description — the tag is lightweight. Annotate with ``git tag -a $tag -m '...'`` and re-push to get focused notes."
           }
