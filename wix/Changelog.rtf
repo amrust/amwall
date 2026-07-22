@@ -1,5 +1,39 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.15 (current)\par
+What's new in amwall v1.1.16 (current)\par
+\par
+  - Security hardening release. Fixes several issues found\par
+    in an internal audit; the firewall-precedence fix was\par
+    verified against the live Windows Filtering Platform\par
+  - One bad rule no longer disables your whole firewall.\par
+    A single malformed rule (or a rule pointing at an app\par
+    you had uninstalled) could previously cancel the entire\par
+    firewall setup at startup, leaving nothing blocked. The\par
+    bad rule is now skipped and the default "block\par
+    everything else" rule always stays in place\par
+  - Blocks now reliably beat allows. Filter priorities were\par
+    set in a way Windows did not rank as intended, so a\par
+    blocklisted site could still be reached by an app you\par
+    had allowed. Priorities now match upstream simplewall so\par
+    a block always wins over an allow\par
+  - Clicks land on the right row. In the Apps and Rules\par
+    lists a checkbox, Edit, or Delete could act on the wrong\par
+    entry when the list was sorted or filtered; it now\par
+    always acts on the row you clicked\par
+  - Running as administrator is safer. When elevated, amwall\par
+    no longer launches a custom log-viewer program from an\par
+    untrusted folder and keeps its log file inside its own\par
+    folder\par
+  - "Skip UAC" is safer. It will not turn on from a folder\par
+    where another program could replace amwall.exe (for\par
+    example, portable mode in Downloads); uninstalling now\par
+    also removes that scheduled task\par
+  - Hash checking now acts. With "verify by hash" on, a\par
+    program whose file changes on disk is automatically\par
+    disabled and its allow-rule removed (checked every 10\par
+    minutes) instead of only showing a warning; "auto-allow\par
+    Microsoft-signed" now also rejects revoked certificates\par
+\par
+What's new in amwall v1.1.15\par
 \par
   - Filters now stay on across reboots and crashes by default.\par
     Two changes work together: (1) "Install boot-time filters"\par
