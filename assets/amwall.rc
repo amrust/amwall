@@ -131,6 +131,10 @@ BEGIN
     "E",    254, VIRTKEY, CONTROL           // Export profile
     "R",    323, VIRTKEY, CONTROL           // Create rule
     "Q",    255, VIRTKEY, CONTROL           // Quit (Exit)
+    "F",    259, VIRTKEY, CONTROL           // Find (focus search box)   [Fable #33]
+    VK_F1,  303, VIRTKEY                    // About                     [Fable #33]
+    "T",    257, VIRTKEY, CONTROL, SHIFT    // Purge timers              [Fable #33]
+    "X",    256, VIRTKEY, CONTROL, SHIFT    // Purge unused              [Fable #33]
 END
 
 // ---------------------------------------------------------------

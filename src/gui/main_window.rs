@@ -78,7 +78,7 @@ use super::ids::{
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
     IDM_ALLOW, IDM_BLOCK, IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK,
     IDM_BLOCKLIST_UPDATE_DISABLE, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_COPY, IDM_EXIT,
-    IDM_EXPLORE, IDM_EXPORT, IDM_FONT, IDM_IMPORT,
+    IDM_EXPLORE, IDM_EXPORT, IDM_FIND, IDM_FONT, IDM_IMPORT,
     IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_OPENRULESEDITOR, IDM_PROPERTIES, IDM_PURGE_TIMERS,
     IDM_REMOVE_FROM_PROFILE,
     IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK,
@@ -2587,6 +2587,22 @@ fn on_connect_allow(hwnd: HWND, wparam: WPARAM) {
 /// trimming the front to keep the buffer at most `EVENT_LOG_CAP`
 /// entries. If the Log tab is currently visible, repopulate the
 /// listview so the new rows show up live.
+/// Ctrl+F — move keyboard focus to the search box so the user can filter
+/// the active list without reaching for the mouse. IDM_FIND was a defined
+/// but unwired stub. Fable sweep finding #33.
+fn on_focus_search(hwnd: HWND) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    let Some(state) = (unsafe { state_ref(hwnd) }) else {
+        return;
+    };
+    let search = state.search.get();
+    if search.0 != 0 {
+        unsafe {
+            let _ = SetFocus(search);
+        }
+    }
+}
+
 /// Play the system "MailBeep" event sound for a connect prompt when
 /// Settings -> notification sound is enabled. Best-effort and async so it
 /// never blocks the event drain. Mirrors upstream simplewall's connect-
@@ -3189,6 +3205,7 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         IDM_CHECKUPDATES => on_check_updates_manual(hwnd),
         IDM_PURGE_UNUSED => on_purge_unused(hwnd),
         IDM_PURGE_TIMERS => on_purge_timers(hwnd),
+        IDM_FIND => on_focus_search(hwnd),
         IDM_LOGCLEAR | IDM_TRAY_LOGCLEAR => on_log_clear(hwnd),
         IDM_TRAY_LOGSHOW => on_log_show(hwnd),
 
