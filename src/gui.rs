@@ -425,7 +425,11 @@ fn lcid_to_available_locale(lcid: u32) -> Option<String> {
 }
 
 fn try_load_profile(path: &std::path::Path) -> Result<Profile, Box<dyn std::error::Error>> {
-    let xml = std::fs::read_to_string(path)?;
+    // Read bytes (not a String) so a simplewall compressed "profile2"
+    // container decodes transparently; decode_profile_bytes returns plain
+    // XML either way. Fable sweep finding #25.
+    let raw = std::fs::read(path)?;
+    let xml = profile::decode_profile_bytes(&raw)?;
     let p = profile::parse_str(&xml)?;
     Ok(p)
 }

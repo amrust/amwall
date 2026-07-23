@@ -401,13 +401,23 @@ mod cli {
     }
 
     fn handle_install(path: &Path, temp: bool, silent: bool) -> ExitCode {
-        let xml = match std::fs::read_to_string(path) {
-            Ok(s) => s,
+        // Read bytes so a simplewall compressed "profile2" container
+        // decodes transparently (Fable #25); decode_profile_bytes yields
+        // plain XML for both compressed and ordinary profiles.
+        let raw = match std::fs::read(path) {
+            Ok(b) => b,
             Err(e) => {
                 eprintln!(
                     "amwall: failed to read profile at {}: {e}",
                     path.display()
                 );
+                return ExitCode::from(1);
+            }
+        };
+        let xml = match profile::decode_profile_bytes(&raw) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("amwall: profile decode failed: {e}");
                 return ExitCode::from(1);
             }
         };

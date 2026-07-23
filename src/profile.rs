@@ -39,7 +39,7 @@ pub mod serialize;
 
 use std::path::PathBuf;
 
-pub use parse::{parse_str, ParseError};
+pub use parse::{decode_profile_bytes, parse_str, ParseError};
 pub use serialize::to_string;
 
 /// Top-level profile — the deserialized form of one `<root>` element.

@@ -46,6 +46,17 @@ pub enum ParseError {
         attribute: &'static str,
         value: String,
     },
+    /// The decoded profile bytes weren't valid UTF-8. (Fable #25.)
+    NotUtf8,
+    /// The profile is a simplewall AES-encrypted "profile2" container
+    /// (type 0x32). amwall can't decrypt it without the passphrase; the
+    /// user must export it unencrypted from simplewall first. (Fable #25.)
+    Encrypted,
+    /// A compressed "profile2" container whose body neither LZNT1 nor
+    /// XPRESS could decompress. (Fable #25.)
+    DecompressFailed,
+    /// Unknown "profile2" container type byte. (Fable #25.)
+    UnknownContainer(u8),
 }
 
 impl std::fmt::Display for ParseError {
@@ -60,6 +71,15 @@ impl std::fmt::Display for ParseError {
                 f,
                 "<{element}> attribute `{attribute}` has invalid value `{value}`"
             ),
+            Self::NotUtf8 => write!(f, "profile is not valid UTF-8"),
+            Self::Encrypted => write!(
+                f,
+                "profile is AES-encrypted (simplewall profile2) -- export it unencrypted first"
+            ),
+            Self::DecompressFailed => write!(f, "could not decompress the profile body"),
+            Self::UnknownContainer(t) => {
+                write!(f, "unknown profile2 container type byte 0x{t:02x}")
+            }
         }
     }
 }
@@ -70,6 +90,97 @@ impl From<quick_xml::Error> for ParseError {
     fn from(e: quick_xml::Error) -> Self {
         Self::Xml(e)
     }
+}
+
+// simplewall's "profile2" container header (upstream db.h / db.c): a
+// 3-byte fourcc ("SWC" or legacy "swc"), a 1-byte type, and a 32-byte
+// SHA-256 of the body. A plain profile.xml has no header. Fable #25.
+const P2_FOURCC: &[u8; 3] = b"SWC";
+const P2_FOURCC_OLD: &[u8; 3] = b"swc";
+const P2_HEADER_LEN: usize = 3 + 1 + 32;
+const P2_TYPE_PLAIN: u8 = 0x30;
+const P2_TYPE_COMPRESSED: u8 = 0x31;
+const P2_TYPE_ENCRYPTED: u8 = 0x32;
+
+/// Decode raw profile bytes into XML text, transparently handling
+/// simplewall's compressed "profile2" container so a migrated compressed
+/// `profile.xml` still loads. Plain profiles (no fourcc header — the
+/// common case, including amwall's own saves) are returned as UTF-8 as-is.
+/// Mirrors upstream `_app_db_decodebody` (db.c:558-620). Fable sweep #25.
+pub fn decode_profile_bytes(raw: &[u8]) -> Result<String, ParseError> {
+    let has_header = raw.len() >= P2_HEADER_LEN
+        && (raw.starts_with(P2_FOURCC) || raw.starts_with(P2_FOURCC_OLD));
+    if !has_header {
+        return String::from_utf8(raw.to_vec()).map_err(|_| ParseError::NotUtf8);
+    }
+    let container_type = raw[3];
+    let body = &raw[P2_HEADER_LEN..]; // skip fourcc + type + sha256
+    match container_type {
+        P2_TYPE_PLAIN => String::from_utf8(body.to_vec()).map_err(|_| ParseError::NotUtf8),
+        P2_TYPE_COMPRESSED => {
+            String::from_utf8(decompress_profile(body)?).map_err(|_| ParseError::NotUtf8)
+        }
+        P2_TYPE_ENCRYPTED => Err(ParseError::Encrypted),
+        other => Err(ParseError::UnknownContainer(other)),
+    }
+}
+
+/// Decompress a "profile2" compressed body via ntdll `RtlDecompressBuffer`,
+/// trying LZNT1 then XPRESS like upstream (db.c:561). The uncompressed
+/// size isn't stored in the header, so grow the output buffer until it
+/// fits (STATUS_BAD_COMPRESSION_BUFFER) up to a 64 MiB safety cap.
+#[cfg(windows)]
+fn decompress_profile(compressed: &[u8]) -> Result<Vec<u8>, ParseError> {
+    const COMPRESSION_FORMAT_LZNT1: u16 = 2;
+    const COMPRESSION_FORMAT_XPRESS: u16 = 3;
+    const STATUS_BAD_COMPRESSION_BUFFER: i32 = 0xC000_0242u32 as i32;
+    const CAP: usize = 64 * 1024 * 1024;
+
+    for &fmt in &[COMPRESSION_FORMAT_LZNT1, COMPRESSION_FORMAT_XPRESS] {
+        let mut size = compressed.len().max(4096).saturating_mul(4);
+        loop {
+            let mut out = vec![0u8; size];
+            let mut final_size: u32 = 0;
+            let status = unsafe {
+                RtlDecompressBuffer(
+                    fmt,
+                    out.as_mut_ptr(),
+                    out.len() as u32,
+                    compressed.as_ptr(),
+                    compressed.len() as u32,
+                    &mut final_size,
+                )
+            };
+            if status == 0 {
+                out.truncate(final_size as usize);
+                return Ok(out);
+            }
+            if status == STATUS_BAD_COMPRESSION_BUFFER && size < CAP {
+                size = size.saturating_mul(2).min(CAP);
+                continue;
+            }
+            break; // this format failed — try the next
+        }
+    }
+    Err(ParseError::DecompressFailed)
+}
+
+#[cfg(not(windows))]
+fn decompress_profile(_compressed: &[u8]) -> Result<Vec<u8>, ParseError> {
+    Err(ParseError::DecompressFailed)
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn RtlDecompressBuffer(
+        format: u16,
+        uncompressed: *mut u8,
+        uncompressed_size: u32,
+        compressed: *const u8,
+        compressed_size: u32,
+        final_uncompressed_size: *mut u32,
+    ) -> i32;
 }
 
 /// Parse an in-memory profile XML document into a `Profile` struct.
@@ -289,6 +400,45 @@ fn attr_bool(e: &BytesStart, attr: &'static str) -> Result<Option<bool>, ParseEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_plain_xml_passthrough() {
+        // No fourcc header -> returned as-is (the common case).
+        let xml = "<root></root>";
+        assert_eq!(decode_profile_bytes(xml.as_bytes()).unwrap(), xml);
+    }
+
+    #[test]
+    fn decode_profile2_plain_container_strips_header() {
+        // "SWC" + type 0x30 (plain) + 32-byte SHA-256 + body.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"SWC");
+        raw.push(P2_TYPE_PLAIN);
+        raw.extend_from_slice(&[0u8; 32]);
+        raw.extend_from_slice(b"<root/>");
+        assert_eq!(decode_profile_bytes(&raw).unwrap(), "<root/>");
+    }
+
+    #[test]
+    fn decode_encrypted_container_is_rejected() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"SWC");
+        raw.push(P2_TYPE_ENCRYPTED);
+        raw.extend_from_slice(&[0u8; 32]);
+        raw.extend_from_slice(b"ciphertext");
+        assert!(matches!(
+            decode_profile_bytes(&raw),
+            Err(ParseError::Encrypted)
+        ));
+    }
+
+    #[test]
+    fn decode_short_swc_prefix_is_treated_as_plain() {
+        // Too short to be a real container -> treated as plain bytes
+        // (avoids misreading a tiny file that happens to start with SWC).
+        let raw = b"SWC";
+        assert!(decode_profile_bytes(raw).is_ok());
+    }
 
     const MINIMAL_USER: &str = r#"<?xml version="1.0" ?>
 <root timestamp="1700000000" type="4" version="5">
