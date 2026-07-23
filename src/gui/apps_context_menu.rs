@@ -31,11 +31,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use super::ids::{
-    IDC_APPS_PROFILE, IDC_APPS_SERVICE, IDC_APPS_UWP, IDM_ALLOW, IDM_BLOCK, IDM_COPY, IDM_EXPLORE,
-    IDM_PROPERTIES, IDM_REMOVE_FROM_PROFILE, IDM_TIMER_15MIN, IDM_TIMER_1HR, IDM_TIMER_30MIN,
-    IDM_TIMER_4HR, IDM_TOGGLE_SILENT, IDM_TOGGLE_UNDELETABLE,
+    IDC_APPS_PROFILE, IDC_APPS_SERVICE, IDC_APPS_UWP, IDM_ALLOW, IDM_BLOCK,
+    IDM_CONTEXT_RULE_FIRST, IDM_CONTEXT_RULE_LAST, IDM_COPY, IDM_COPY_VALUE, IDM_EXPLORE,
+    IDM_OPENRULESEDITOR, IDM_PROPERTIES, IDM_REMOVE_FROM_PROFILE, IDM_TIMER_15MIN, IDM_TIMER_1HR,
+    IDM_TIMER_30MIN, IDM_TIMER_4HR, IDM_TOGGLE_SILENT, IDM_TOGGLE_UNDELETABLE,
 };
 use super::wide;
+
+/// One togglable rule in the apps context menu's "Rules" submenu
+/// (Fable #28). Built by the caller from `profile.system_rules` then
+/// `profile.custom_rules` (in that combined order), excluding global
+/// rules; `checked` is set when the rule's `apps` already contains the
+/// right-clicked app. The combined index maps to command id
+/// `IDM_CONTEXT_RULE_FIRST + index`, which the dispatch handler decodes
+/// against the identical list.
+pub struct RuleMenuItem {
+    pub label: String,
+    pub checked: bool,
+}
 
 /// What the user right-clicked on. Captured at popup time and
 /// stashed on `WndState.context_target` so the WM_COMMAND handler
@@ -70,6 +83,14 @@ pub struct ContextTarget {
     /// If `in_profile`, the current `is_undeletable` flag (Fable #28) —
     /// drives the "Prevent removal" check mark.
     pub current_is_undeletable: bool,
+    /// The right-clicked column index (`NMITEMACTIVATE.iSubItem`), used
+    /// by "Copy value" to copy that column across the selection. 0 when
+    /// unknown (Fable #28).
+    pub column: i32,
+    /// Text of the right-clicked cell — the label for "Copy value"
+    /// (`Copy "<text>"`). `None` (or empty) hides the item, matching
+    /// upstream's "only when the column has text" gate (Fable #28).
+    pub column_text: Option<String>,
 }
 
 /// Show the context menu at the cursor and return the selected
@@ -77,7 +98,7 @@ pub struct ContextTarget {
 /// The caller is responsible for dispatching the command via
 /// SendMessage(WM_COMMAND) — keeping the dispatch in `main_window`'s
 /// existing WM_COMMAND handler avoids a second routing path.
-pub fn show(hwnd: HWND, target: &ContextTarget) -> Option<u16> {
+pub fn show(hwnd: HWND, target: &ContextTarget, rules: &[RuleMenuItem]) -> Option<u16> {
     let menu = unsafe { CreatePopupMenu() }.ok()?;
 
     let is_uwp = target.listview_id == IDC_APPS_UWP;
@@ -131,6 +152,42 @@ pub fn show(hwnd: HWND, target: &ContextTarget) -> Option<u16> {
         }
     }
 
+    // "Rules" submenu — assign / unassign this app to specific user or
+    // system rules (Fable #28, mirrors upstream _app_generate_rulescontrol).
+    // Omitted for UWP: a package SID stored in a rule's `apps` string
+    // would be misparsed by install::parse_apps (looks_like_path fails on
+    // an S-1-15-… token), so the rule would silently produce no filter.
+    // Each entry is a command id IDM_CONTEXT_RULE_FIRST + combined index;
+    // the tail is "Create rule...".
+    if has_id && !is_uwp {
+        if let Ok(submenu) = unsafe { CreatePopupMenu() } {
+            if rules.is_empty() {
+                // Disabled "Empty." placeholder (id 0 = no command).
+                append_string(submenu, 0, &rust_i18n::t!("context.rules_empty"), false);
+            } else {
+                // Cap at the reserved id span so a huge rule set can't
+                // collide with ids past IDM_CONTEXT_RULE_LAST.
+                let cap = (IDM_CONTEXT_RULE_LAST - IDM_CONTEXT_RULE_FIRST) as usize;
+                for (i, r) in rules.iter().take(cap).enumerate() {
+                    let check = if r.checked { MF_CHECKED.0 } else { MF_UNCHECKED.0 };
+                    append_string_with_state(
+                        submenu,
+                        IDM_CONTEXT_RULE_FIRST + i as u16,
+                        &r.label,
+                        MF_STRING.0 | check,
+                        true,
+                    );
+                }
+            }
+            append_separator(submenu);
+            append_string(submenu, IDM_OPENRULESEDITOR, &rust_i18n::t!("context.create_rule"), true);
+            let w = wide(&rust_i18n::t!("context.rules_submenu"));
+            unsafe {
+                let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(w.as_ptr()));
+            }
+        }
+    }
+
     if target.in_profile {
         append_separator(menu);
         append_string(menu, IDM_REMOVE_FROM_PROFILE, &rust_i18n::t!("context.remove_from_profile"), true);
@@ -153,6 +210,15 @@ pub fn show(hwnd: HWND, target: &ContextTarget) -> Option<u16> {
     append_string(menu, IDM_EXPLORE, &rust_i18n::t!("context.explore"), can_explore);
 
     append_string(menu, IDM_COPY, &rust_i18n::t!("context.copy"), true);
+    // "Copy <value>" — the right-clicked column's text, copied across the
+    // selection (Fable #28). Present only when that cell has text, matching
+    // upstream's gate (messages.c:663-672).
+    if let Some(val) = target.column_text.as_deref() {
+        if !val.is_empty() {
+            let label = rust_i18n::t!("context.copy_value", value = val);
+            append_string(menu, IDM_COPY_VALUE, &label, true);
+        }
+    }
 
     let mut pt = POINT::default();
     unsafe {
@@ -271,6 +337,8 @@ pub fn target_from_source(
                 current_is_enabled: app.is_enabled,
                 current_is_silent: app.is_silent,
                 current_is_undeletable: app.is_undeletable,
+                column: 0,
+                column_text: None,
             })
         }
         IDC_APPS_SERVICE => {
@@ -301,6 +369,8 @@ pub fn target_from_source(
                 current_is_enabled: existing.map(|a| a.is_enabled).unwrap_or(false),
                 current_is_silent: existing.map(|a| a.is_silent).unwrap_or(false),
                 current_is_undeletable: existing.map(|a| a.is_undeletable).unwrap_or(false),
+                column: 0,
+                column_text: None,
             })
         }
         IDC_APPS_UWP => {
@@ -332,6 +402,8 @@ pub fn target_from_source(
                 current_is_enabled: existing.map(|a| a.is_enabled).unwrap_or(false),
                 current_is_silent: existing.map(|a| a.is_silent).unwrap_or(false),
                 current_is_undeletable: existing.map(|a| a.is_undeletable).unwrap_or(false),
+                column: 0,
+                column_text: None,
             })
         }
         _ => None,

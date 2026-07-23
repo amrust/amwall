@@ -38,7 +38,9 @@ use windows::Win32::UI::Controls::{
     InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
     LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_IMAGE, LVIF_PARAM, LVIF_STATE, LVIF_TEXT,
     LVIS_STATEIMAGEMASK, LVITEMW,
-    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOUNTPERPAGE, LVM_GETITEM, LVM_GETITEMCOUNT,
+    HDM_GETITEMCOUNT,
+    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEM,
+    LVM_GETITEMCOUNT, LVM_GETITEMTEXTW,
     LVM_GETNEXTITEM, LVM_GETTOPINDEX, LVM_INSERTCOLUMNW,
     LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
     LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_COLUMNCLICK, LVN_ITEMCHANGED, LVN_KEYDOWN, LVSIL_SMALL,
@@ -77,7 +79,8 @@ use super::ids::{
     IDM_BLOCKLIST_EXTRA_ALLOW, IDM_BLOCKLIST_EXTRA_BLOCK, IDM_BLOCKLIST_EXTRA_DISABLE,
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
     IDM_ALLOW, IDM_BLOCK, IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK,
-    IDM_BLOCKLIST_UPDATE_DISABLE, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_COPY, IDM_EXIT,
+    IDM_BLOCKLIST_UPDATE_DISABLE, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_CONTEXT_RULE_FIRST,
+    IDM_CONTEXT_RULE_LAST, IDM_COPY, IDM_COPY_VALUE, IDM_EXIT,
     IDM_EXPLORE, IDM_EXPORT, IDM_FIND, IDM_FONT, IDM_IMPORT,
     IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_OPENRULESEDITOR, IDM_PROPERTIES, IDM_PURGE_TIMERS,
     IDM_REMOVE_FROM_PROFILE,
@@ -2660,10 +2663,12 @@ enum AppFlag {
     Undeletable,
 }
 
-/// Toggle a per-app flag on the right-clicked app (context_target).
+/// Toggle a per-app flag across the selected app(s) (Fable #28 — bulk).
 /// Neither flag affects the installed filters, so no reinstall is needed
 /// -- just persist and repopulate so the check mark reflects the change.
-/// Fable sweep finding #28.
+/// The new value is computed ONCE from the first selected app so a mixed
+/// selection all moves the same way (upstream _app_command_disable,
+/// messages.c:2489); falls back to the single right-clicked row.
 fn on_toggle_app_flag(hwnd: HWND, flag: AppFlag) {
     let Some(state) = (unsafe { state_ref(hwnd) }) else {
         return;
@@ -2672,14 +2677,29 @@ fn on_toggle_app_flag(hwnd: HWND, flag: AppFlag) {
         Some(t) => t,
         None => return,
     };
+    let paths = collect_selection_paths(state, target.listview_id, &target);
+    if paths.is_empty() {
+        return;
+    }
     {
         let mut profile = state.app.profile.borrow_mut();
-        let Some(app) = profile.apps.iter_mut().find(|a| a.path == target.binary_path) else {
+        // New value from the first selected app that exists in the profile.
+        let new_val = paths.iter().find_map(|p| {
+            profile.apps.iter().find(|a| &a.path == p).map(|a| match flag {
+                AppFlag::Silent => !a.is_silent,
+                AppFlag::Undeletable => !a.is_undeletable,
+            })
+        });
+        let Some(new_val) = new_val else {
             return;
         };
-        match flag {
-            AppFlag::Silent => app.is_silent = !app.is_silent,
-            AppFlag::Undeletable => app.is_undeletable = !app.is_undeletable,
+        for p in &paths {
+            if let Some(app) = profile.apps.iter_mut().find(|a| &a.path == p) {
+                match flag {
+                    AppFlag::Silent => app.is_silent = new_val,
+                    AppFlag::Undeletable => app.is_undeletable = new_val,
+                }
+            }
         }
     }
     save_profile_to_disk(state);
@@ -3343,6 +3363,13 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         return;
     }
     let id = id as u16;
+    // Apps "Rules" submenu — a contiguous range of per-rule commands
+    // (Fable #28). Range-checked before the match, mirroring upstream's
+    // IDX_RULES_SPECIAL guard (main.c:3094).
+    if (IDM_CONTEXT_RULE_FIRST..=IDM_CONTEXT_RULE_LAST).contains(&id) {
+        on_context_assign_rule(hwnd, id);
+        return;
+    }
     match id {
         IDM_EXIT => on_exit(hwnd),
         IDM_RELEASES => open_releases_page(hwnd),
@@ -3405,6 +3432,7 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         IDM_REMOVE_FROM_PROFILE => on_context_remove(hwnd),
         IDM_EXPLORE => on_context_explore(hwnd),
         IDM_COPY => on_context_copy(hwnd),
+        IDM_COPY_VALUE => on_context_copy_value(hwnd),
         IDM_PROPERTIES => on_context_properties(hwnd),
         IDM_TIMER_15MIN => on_set_app_timer(hwnd, 15 * 60),
         IDM_TIMER_30MIN => on_set_app_timer(hwnd, 30 * 60),
@@ -3507,16 +3535,26 @@ fn on_apps_context_menu(hwnd: HWND, listview_id: i32, activate: &NMITEMACTIVATE)
             &uwp,
         )
     };
-    let target = match target {
+    let mut target = match target {
         Some(t) => t,
         // Right-click on empty area / out-of-range row — nothing
         // to act on. Could show a different "create new" menu but
         // that's M5.4 polish.
         None => return,
     };
+    // Capture the clicked column + its text so "Copy value" (Fable #28)
+    // can label itself and copy that column across the selection.
+    target.column = activate.iSubItem;
+    let lv = apps_listview_hwnd(state, listview_id);
+    target.column_text = listview_item_text(lv, activate.iItem, activate.iSubItem);
+    // Build the "Rules" submenu entries for this app (togglable rules).
+    let rule_items = {
+        let profile = state.app.profile.borrow();
+        build_rule_menu_items(&profile, &target.binary_path.to_string_lossy())
+    };
     *state.context_target.borrow_mut() = Some(target.clone());
 
-    let cmd = super::apps_context_menu::show(hwnd, &target);
+    let cmd = super::apps_context_menu::show(hwnd, &target, &rule_items);
     if let Some(id) = cmd {
         // TPM_RETURNCMD bypasses the WM_COMMAND queue, so dispatch
         // ourselves through the same handler.
@@ -4675,9 +4713,182 @@ fn collect_selection_paths(
     out
 }
 
-/// Remove the right-clicked app's entry from the profile. Only the
-/// Apps Profile tab and Services tab can hit this — UWP entries
-/// can't be in_profile yet, so the menu item is hidden for them.
+/// Resolve one of the three Apps-tab listview ids to its HWND.
+fn apps_listview_hwnd(state: &WndState, listview_id: i32) -> HWND {
+    match listview_id {
+        x if x == IDC_APPS_PROFILE => state.listviews[0].get(),
+        x if x == IDC_APPS_SERVICE => state.listviews[1].get(),
+        x if x == IDC_APPS_UWP => state.listviews[2].get(),
+        _ => HWND(0),
+    }
+}
+
+// ---- Apps "Rules" submenu support (Fable #28) ----
+//
+// The submenu lists togglable rules; a click assigns/unassigns the
+// selected app(s) to that rule. Both the menu build and the dispatch
+// must decode the same combined index space, so both go through
+// `togglable_rules` — the single source of order + filtering.
+
+/// A rule referenced by the Apps "Rules" submenu — either a system or a
+/// custom rule, by its index within that vector.
+#[derive(Clone, Copy)]
+enum RuleRef {
+    System(usize),
+    Custom(usize),
+}
+
+/// A "global" rule is enabled with no app list — it applies to every
+/// app, so it must not appear as a per-app toggle (assigning an app
+/// would silently narrow it). Mirrors upstream's helper.c:1211-1220.
+fn is_global_rule(r: &crate::profile::Rule) -> bool {
+    r.is_enabled && r.apps.as_deref().is_none_or(|a| a.trim().is_empty())
+}
+
+/// The combined, filtered list of togglable rules in menu order:
+/// system rules first, then custom rules, globals excluded. The index
+/// into this Vec is the submenu command offset from IDM_CONTEXT_RULE_FIRST.
+fn togglable_rules(profile: &crate::profile::Profile) -> Vec<RuleRef> {
+    let mut out = Vec::new();
+    for (i, r) in profile.system_rules.iter().enumerate() {
+        if !is_global_rule(r) {
+            out.push(RuleRef::System(i));
+        }
+    }
+    for (i, r) in profile.custom_rules.iter().enumerate() {
+        if !is_global_rule(r) {
+            out.push(RuleRef::Custom(i));
+        }
+    }
+    out
+}
+
+/// Whether a rule's `apps` list (`|`-separated) already references
+/// `token`. Case-insensitive to match Windows path semantics.
+fn rule_apps_contains(apps: Option<&str>, token: &str) -> bool {
+    apps.is_some_and(|a| {
+        a.split('|')
+            .map(str::trim)
+            .any(|t| t.eq_ignore_ascii_case(token))
+    })
+}
+
+/// Add or remove `token` in a rule's `apps` string, normalizing back to
+/// `None` when the list empties. Mirrors upstream `_app_setruletoapp`
+/// (helper.c:1298).
+fn set_rule_app(rule: &mut crate::profile::Rule, token: &str, add: bool) {
+    let mut apps: Vec<String> = rule
+        .apps
+        .as_deref()
+        .map(|a| {
+            a.split('|')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let pos = apps.iter().position(|s| s.eq_ignore_ascii_case(token));
+    if add {
+        if pos.is_none() {
+            apps.push(token.to_string());
+        }
+    } else if let Some(p) = pos {
+        apps.remove(p);
+    }
+    rule.apps = if apps.is_empty() {
+        None
+    } else {
+        Some(apps.join("|"))
+    };
+}
+
+/// Build the "Rules" submenu entries for `app_token`: one per togglable
+/// rule, in the same order `togglable_rules` yields, with a `*` suffix
+/// on system (built-in) rules and a check when the rule already applies
+/// to the app.
+fn build_rule_menu_items(
+    profile: &crate::profile::Profile,
+    app_token: &str,
+) -> Vec<super::apps_context_menu::RuleMenuItem> {
+    togglable_rules(profile)
+        .iter()
+        .map(|rref| {
+            let (rule, is_system) = match rref {
+                RuleRef::System(i) => (&profile.system_rules[*i], true),
+                RuleRef::Custom(i) => (&profile.custom_rules[*i], false),
+            };
+            let checked = rule_apps_contains(rule.apps.as_deref(), app_token);
+            let mut label = t!("context.apply_rule", name = &rule.name).to_string();
+            if is_system {
+                // SZ_RULE_INTERNAL_MENU marker (main.h:101).
+                label.push_str(" *");
+            }
+            super::apps_context_menu::RuleMenuItem { label, checked }
+        })
+        .collect()
+}
+
+/// Assign / unassign the selected app(s) to the rule the submenu id
+/// decodes to (Fable #28). Add-vs-remove is decided ONCE from the first
+/// selected app's current membership so a mixed selection all moves the
+/// same way (upstream _app_command_idtorules, messages.c:1852); adding
+/// the first app auto-enables the rule, removing the last disables it.
+fn on_context_assign_rule(hwnd: HWND, id: u16) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let target = match state.context_target.borrow().clone() {
+        Some(t) => t,
+        None => return,
+    };
+    let paths = collect_selection_paths(state, target.listview_id, &target);
+    let tokens: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return;
+    }
+    let k = (id - IDM_CONTEXT_RULE_FIRST) as usize;
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        // Copy out the RuleRef so the immutable borrow ends before the
+        // mutable one below (togglable_rules returns an owned Vec).
+        let rref = togglable_rules(&profile).get(k).copied();
+        let Some(rref) = rref else {
+            return;
+        };
+        let rule: &mut crate::profile::Rule = match rref {
+            RuleRef::System(i) => &mut profile.system_rules[i],
+            RuleRef::Custom(i) => &mut profile.custom_rules[i],
+        };
+        let add = !rule_apps_contains(rule.apps.as_deref(), &tokens[0]);
+        for tk in &tokens {
+            set_rule_app(rule, tk, add);
+        }
+        let has_apps = rule.apps.as_deref().is_some_and(|a| !a.trim().is_empty());
+        if add && has_apps {
+            rule.is_enabled = true;
+        } else if !add && !has_apps {
+            rule.is_enabled = false;
+        }
+    }
+    save_profile_to_disk(state);
+    populate_user_rules(state);
+    populate_internal_rules(state, IDC_RULES_SYSTEM);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+    reinstall_filters_if_active(hwnd, state);
+    set_status_text(state.status.get(), 0, &t!("status.rule_updated"));
+}
+
+/// Remove the selected app entries from the profile (Fable #28 — bulk).
+/// Apps flagged "Prevent removal" (is_undeletable) are skipped, matching
+/// the flag's documented purpose and upstream graying Delete on them.
+/// Falls back to the single right-clicked row when nothing is selected.
 fn on_context_remove(hwnd: HWND) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
@@ -4687,9 +4898,21 @@ fn on_context_remove(hwnd: HWND) {
         Some(t) => t,
         None => return,
     };
+    let paths = collect_selection_paths(state, target.listview_id, &target);
+    if paths.is_empty() {
+        return;
+    }
+    let removed;
     {
         let mut profile = state.app.profile.borrow_mut();
-        profile.apps.retain(|a| a.path != target.binary_path);
+        let before = profile.apps.len();
+        profile.apps.retain(|a| {
+            if a.is_undeletable {
+                return true;
+            }
+            !paths.iter().any(|p| p == &a.path)
+        });
+        removed = before - profile.apps.len();
     }
     save_profile_to_disk(state);
     populate_apps_tab(state);
@@ -4698,11 +4921,12 @@ fn on_context_remove(hwnd: HWND) {
     on_tab_change(hwnd);
     force_active_apps_listview_jiggle(hwnd, state);
     reinstall_filters_if_active(hwnd, state);
-    set_status_text(
-        state.status.get(),
-        0,
-        &format!("Removed: {}", target.display_name),
-    );
+    let msg = if removed == 1 {
+        format!("Removed: {}", target.display_name)
+    } else {
+        format!("Removed {removed} app(s).")
+    };
+    set_status_text(state.status.get(), 0, &msg);
 }
 
 /// Open the binary's containing folder in Explorer with the file
@@ -4739,17 +4963,61 @@ fn on_context_explore(hwnd: HWND) {
     }
 }
 
-/// Copy the right-clicked row's display name to the clipboard.
+/// Copy all columns of every selected row to the clipboard, one row per
+/// line, columns joined by ", " (Fable #28 — was display-name only).
+/// Mirrors upstream _app_command_copy / IDM_COPY (messages.c:2091).
 fn on_context_copy(hwnd: HWND) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
         None => return,
     };
-    let text = match state.context_target.borrow().clone() {
-        Some(t) => t.display_name,
+    let target = match state.context_target.borrow().clone() {
+        Some(t) => t,
         None => return,
     };
-    set_clipboard_text(hwnd, &text);
+    let lv = apps_listview_hwnd(state, target.listview_id);
+    if lv.0 == 0 {
+        // No listview (shouldn't happen) — fall back to the name.
+        set_clipboard_text(hwnd, &target.display_name);
+        return;
+    }
+    let ncols = listview_column_count(lv).max(1);
+    let rows = selected_rows(lv, target.row);
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|&row| {
+            (0..ncols)
+                .map(|c| listview_item_text(lv, row, c).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .collect();
+    set_clipboard_text(hwnd, &lines.join("\r\n"));
+}
+
+/// Copy just the right-clicked column's value across the selected rows,
+/// one per line (Fable #28 — IDM_COPY_VALUE, messages.c:2091). The
+/// column index rides on the captured ContextTarget.
+fn on_context_copy_value(hwnd: HWND) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let target = match state.context_target.borrow().clone() {
+        Some(t) => t,
+        None => return,
+    };
+    let lv = apps_listview_hwnd(state, target.listview_id);
+    if lv.0 == 0 {
+        return;
+    }
+    let col = target.column.max(0);
+    let rows = selected_rows(lv, target.row);
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|&row| listview_item_text(lv, row, col).unwrap_or_default())
+        .collect();
+    set_clipboard_text(hwnd, &lines.join("\r\n"));
 }
 
 /// Properties: open the App properties modal for the right-clicked
@@ -7242,6 +7510,75 @@ fn listview_item_param(lv: HWND, idx: i32) -> Option<isize> {
         )
     };
     if res.0 == 0 { None } else { Some(item.lParam.0) }
+}
+
+/// Read the text of a listview cell `(row, subitem)` via LVM_GETITEMTEXTW.
+/// Used by the context-menu Copy / Copy-value commands (Fable #28).
+fn listview_item_text(lv: HWND, row: i32, subitem: i32) -> Option<String> {
+    if lv.0 == 0 || row < 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; 512];
+    let mut item = LVITEMW {
+        iSubItem: subitem,
+        pszText: windows::core::PWSTR(buf.as_mut_ptr()),
+        cchTextMax: buf.len() as i32,
+        ..Default::default()
+    };
+    let len = unsafe {
+        SendMessageW(
+            lv,
+            LVM_GETITEMTEXTW,
+            WPARAM(row as usize),
+            LPARAM(&mut item as *mut _ as isize),
+        )
+    }
+    .0;
+    if len <= 0 {
+        return Some(String::new());
+    }
+    Some(String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]))
+}
+
+/// Number of columns in a report-view listview (via its header control).
+fn listview_column_count(lv: HWND) -> i32 {
+    if lv.0 == 0 {
+        return 0;
+    }
+    let hdr = unsafe { SendMessageW(lv, LVM_GETHEADER, WPARAM(0), LPARAM(0)) }.0;
+    if hdr == 0 {
+        return 0;
+    }
+    unsafe { SendMessageW(HWND(hdr), HDM_GETITEMCOUNT, WPARAM(0), LPARAM(0)) }.0 as i32
+}
+
+/// Selected row indices in `lv`; falls back to `[fallback_row]` when
+/// nothing is selected so a bare right-click still acts on that row.
+fn selected_rows(lv: HWND, fallback_row: i32) -> Vec<i32> {
+    if lv.0 == 0 {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    let mut next: i32 = -1;
+    loop {
+        next = unsafe {
+            SendMessageW(
+                lv,
+                LVM_GETNEXTITEM,
+                WPARAM(next as isize as usize),
+                LPARAM(LVNI_SELECTED as isize),
+            )
+        }
+        .0 as i32;
+        if next < 0 {
+            break;
+        }
+        rows.push(next);
+    }
+    if rows.is_empty() && fallback_row >= 0 {
+        rows.push(fallback_row);
+    }
+    rows
 }
 
 fn add_column(
