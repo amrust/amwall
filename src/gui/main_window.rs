@@ -90,7 +90,8 @@ use super::ids::{
     IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SELECT_ALL,
     IDM_SETTINGS, IDM_SHOW_IN_LIST,
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SIZE_EXTRALARGE, IDM_SIZE_LARGE,
-    IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TIMER_15MIN, IDM_TIMER_1HR,
+    IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TAB_NEXT, IDM_TAB_PREV,
+    IDM_TIMER_15MIN, IDM_TIMER_1HR,
     IDM_TIMER_30MIN, IDM_TIMER_4HR, IDM_TOGGLE_SILENT, IDM_TOGGLE_UNDELETABLE, IDM_TRAY_ENABLELOG_CHK,
     IDM_TRAY_ENABLENOTIFICATIONS_CHK, IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK,
     IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGCLEAR_ERR, IDM_TRAY_LOGSHOW,
@@ -98,7 +99,7 @@ use super::ids::{
     IDM_TRAY_NOTIFICATIONONTRAY_CHK, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_UNCHECK,
     IDM_USECERTIFICATES_CHK,
     IDM_USEDARKTHEME_CHK, IDM_USEHASHES_CHK, IDM_VIEW_DETAILS, IDM_VIEW_ICON, IDM_VIEW_TILE,
-    IDM_WEBSITE, TAB_LISTVIEW_IDS,
+    IDM_WEBSITE, IDM_ZOOM, TAB_LISTVIEW_IDS,
 };
 use rust_i18n::t;
 
@@ -3398,6 +3399,27 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         on_context_assign_rule(hwnd, id);
         return;
     }
+    // Keyboard-accelerator context commands act on the active tab's
+    // listview (Fable #33). The apps right-click path re-dispatches with
+    // notif==0 and a live context_target, so gate on notif==1 (the
+    // accelerator marker) to avoid intercepting that.
+    if notif == 1
+        && matches!(
+            id,
+            IDM_DELETE
+                | IDM_SELECT_ALL
+                | IDM_ZOOM
+                | IDM_TAB_NEXT
+                | IDM_TAB_PREV
+                | IDM_PROPERTIES
+                | IDM_COPY
+                | IDM_COPY_VALUE
+                | IDM_EXPLORE
+        )
+    {
+        accel_dispatch(hwnd, id);
+        return;
+    }
     match id {
         IDM_EXIT => on_exit(hwnd),
         IDM_RELEASES => open_releases_page(hwnd),
@@ -4304,6 +4326,136 @@ fn on_log_context_menu(hwnd: HWND, activate: &NMITEMACTIVATE) {
         IDM_SELECT_ALL => select_all_rows(lv),
         IDM_COPY => copy_selected(hwnd, lv, None),
         IDM_COPY_VALUE => copy_selected(hwnd, lv, Some(activate.iSubItem)),
+        _ => {}
+    }
+}
+
+// ===================================================================
+// Keyboard-accelerator dispatch for context commands (Fable #33).
+// ===================================================================
+
+/// First selected row of a listview, or -1.
+fn first_selected_row(lv: HWND) -> i32 {
+    if lv.0 == 0 {
+        return -1;
+    }
+    unsafe {
+        SendMessageW(
+            lv,
+            LVM_GETNEXTITEM,
+            WPARAM(usize::MAX),
+            LPARAM(LVNI_SELECTED as isize),
+        )
+    }
+    .0 as i32
+}
+
+/// Run an Apps-tab context command fired from a keyboard accelerator:
+/// synthesize a ContextTarget from the first selected row, stash it,
+/// dispatch through the existing context handler, then clear — the same
+/// set/dispatch/clear pattern on_apps_context_menu uses for the mouse.
+fn run_focused_apps_command(hwnd: HWND, state: &WndState, listview_id: i32, cmd: u16) {
+    let lv = apps_listview_hwnd(state, listview_id);
+    let row = first_selected_row(lv);
+    if row < 0 {
+        return;
+    }
+    let Some(src) = listview_item_param(lv, row).map(|p| p as usize) else {
+        return;
+    };
+    let target = {
+        let profile = state.app.profile.borrow();
+        let services = state.services.borrow();
+        let uwp = state.uwp_packages.borrow();
+        super::apps_context_menu::target_from_source(
+            listview_id,
+            row,
+            src,
+            &profile,
+            &services,
+            &uwp,
+        )
+    };
+    let Some(target) = target else {
+        return;
+    };
+    *state.context_target.borrow_mut() = Some(target);
+    match cmd {
+        IDM_PROPERTIES => on_context_properties(hwnd),
+        IDM_COPY | IDM_COPY_VALUE => on_context_copy(hwnd),
+        IDM_EXPLORE => on_context_explore(hwnd),
+        _ => {}
+    }
+    *state.context_target.borrow_mut() = None;
+}
+
+/// Dispatch a keyboard-accelerator context command to the active tab.
+/// Tab-switch and zoom are tab-independent; the rest act on the active
+/// tab's listview (upstream dispatches these by focus, main.c:3844+).
+fn accel_dispatch(hwnd: HWND, cmd: u16) {
+    use windows::Win32::UI::WindowsAndMessaging::{IsZoomed, SW_MAXIMIZE, SW_RESTORE, ShowWindow};
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let tab_ctl = state.tab.get();
+    if tab_ctl.0 == 0 {
+        return;
+    }
+    let sel = unsafe { SendMessageW(tab_ctl, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
+    if sel < 0 {
+        return;
+    }
+    // Tab-independent commands.
+    match cmd {
+        IDM_TAB_NEXT | IDM_TAB_PREV => {
+            let n = TAB_LISTVIEW_IDS.len() as isize;
+            let next = if cmd == IDM_TAB_NEXT {
+                (sel + 1) % n
+            } else {
+                (sel - 1 + n) % n
+            };
+            unsafe {
+                SendMessageW(tab_ctl, TCM_SETCURSEL, WPARAM(next as usize), LPARAM(0));
+            }
+            on_tab_change(hwnd);
+            return;
+        }
+        IDM_ZOOM => {
+            let zoomed = unsafe { IsZoomed(hwnd).as_bool() };
+            unsafe {
+                let _ = ShowWindow(hwnd, if zoomed { SW_RESTORE } else { SW_MAXIMIZE });
+            }
+            return;
+        }
+        _ => {}
+    }
+    let tab = sel as usize;
+    let listview_id = TAB_LISTVIEW_IDS.get(tab).copied().unwrap_or(0);
+    match tab {
+        0..=2 => match cmd {
+            IDM_SELECT_ALL => on_apps_select_all(hwnd, listview_id),
+            IDM_DELETE => on_apps_delete_selected(hwnd, listview_id),
+            IDM_PROPERTIES | IDM_COPY | IDM_COPY_VALUE | IDM_EXPLORE => {
+                run_focused_apps_command(hwnd, state, listview_id, cmd)
+            }
+            _ => {}
+        },
+        3..=5 => match cmd {
+            IDM_SELECT_ALL => on_rules_select_all(hwnd, listview_id),
+            IDM_COPY | IDM_COPY_VALUE => on_rules_copy(hwnd, listview_id, None),
+            IDM_PROPERTIES => on_edit_selected_rule(hwnd),
+            IDM_DELETE => on_delete_selected_rule(hwnd),
+            _ => {}
+        },
+        6 | 7 => {
+            let lv = state.listviews[tab].get();
+            match cmd {
+                IDM_SELECT_ALL => select_all_rows(lv),
+                IDM_COPY | IDM_COPY_VALUE => copy_selected(hwnd, lv, None),
+                _ => {}
+            }
+        }
         _ => {}
     }
 }

@@ -128,13 +128,24 @@ BEGIN
     "P",    251, VIRTKEY, CONTROL           // Settings
     "O",    252, VIRTKEY, CONTROL           // Add app
     "I",    253, VIRTKEY, CONTROL           // Import profile
-    "E",    254, VIRTKEY, CONTROL           // Export profile
+    "S",    254, VIRTKEY, CONTROL           // Export profile (moved off Ctrl+E) [Fable #33]
     "R",    323, VIRTKEY, CONTROL           // Create rule
     "Q",    255, VIRTKEY, CONTROL           // Quit (Exit)
     "F",    259, VIRTKEY, CONTROL           // Find (focus search box)   [Fable #33]
     VK_F1,  303, VIRTKEY                    // About                     [Fable #33]
     "T",    257, VIRTKEY, CONTROL, SHIFT    // Purge timers              [Fable #33]
     "X",    256, VIRTKEY, CONTROL, SHIFT    // Purge unused              [Fable #33]
+    // Listview context-command accelerators (Fable #33). Dispatched by
+    // the focused tab in on_command's accelerator shim; the search-box
+    // focus guard in the message loop keeps them from hijacking text edit.
+    VK_RETURN, 350, VIRTKEY                 // Properties / Edit / Show-in-list
+    VK_DELETE, 328, VIRTKEY                 // Delete (unified, tab-dispatched)
+    "C",    355, VIRTKEY, CONTROL           // Copy
+    "E",    354, VIRTKEY, CONTROL           // Explore (open folder)
+    "A",    332, VIRTKEY, CONTROL           // Select all
+    VK_TAB, 334, VIRTKEY, CONTROL           // Next tab
+    VK_TAB, 335, VIRTKEY, CONTROL, SHIFT    // Previous tab
+    VK_F11, 333, VIRTKEY                    // Zoom (maximize / restore)
 END
 
 // ---------------------------------------------------------------

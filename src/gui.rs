@@ -50,9 +50,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, LoadAcceleratorsW, MSG, PostQuitMessage, TranslateAcceleratorW,
-    TranslateMessage,
+    DispatchMessageW, GetDlgCtrlID, GetMessageW, LoadAcceleratorsW, MSG, PostQuitMessage,
+    TranslateAcceleratorW, TranslateMessage,
 };
 use windows::core::PCWSTR;
 
@@ -262,7 +263,15 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
     let mut msg = MSG::default();
     unsafe {
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
-            if !haccel.is_invalid()
+            // Skip accelerator translation while the search edit box has
+            // focus, so Del / Ctrl+A / Ctrl+C / Enter edit the search text
+            // normally instead of firing listview commands (Fable #33).
+            let focus_is_search = {
+                let f = GetFocus();
+                f.0 != 0 && GetDlgCtrlID(f) == crate::gui::ids::IDC_SEARCH
+            };
+            if !focus_is_search
+                && !haccel.is_invalid()
                 && TranslateAcceleratorW(hwnd, haccel, &msg) != 0
             {
                 continue;
