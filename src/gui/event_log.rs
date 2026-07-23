@@ -265,7 +265,26 @@ fn confined_log_path(configured: &str, elevated: bool, data_dir: &Path) -> PathB
 /// `open` / `rotate` / `truncate` all inherit the confinement.
 #[cfg(not(test))]
 fn effective_log_path(configured: &str) -> PathBuf {
-    confined_log_path(configured, super::is_elevated(), &crate::paths::data_dir())
+    let data_dir = crate::paths::data_dir();
+    let elevated = super::is_elevated();
+    let confined = confined_log_path(configured, elevated, &data_dir);
+    // `confined_log_path`'s containment test is purely LEXICAL, so it
+    // can't see a directory junction / symlink planted inside data_dir
+    // that points out of the tree (e.g. `%APPDATA%\amwall\x` ->
+    // C:\Windows\System32). When elevated, verify the REAL path (deepest
+    // existing ancestor canonicalized) still lands inside data_dir, and
+    // fall closed to the default log path otherwise -- mirroring the
+    // canonicalize-first check in paths::is_admin_only_location. Fable
+    // sweep finding #8 (the residual left by v1.1.16 finding D).
+    if elevated && !crate::paths::real_path_contained(&data_dir, &confined) {
+        eprintln!(
+            "amwall: log: {} resolves outside {} (junction/symlink) while elevated; using the default log path",
+            confined.display(),
+            data_dir.display()
+        );
+        return crate::paths::default_log_path();
+    }
+    confined
 }
 
 /// Test build: skip the elevation-based confinement. The append/rotate

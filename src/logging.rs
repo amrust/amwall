@@ -70,6 +70,19 @@ pub fn log_dir() -> PathBuf {
 /// file (the existing `attach_to_parent_console` handles that).
 pub fn init_debug_log() {
     let dir = log_dir();
+    // When elevated, a same-user attacker could pre-plant a directory
+    // junction at data_dir/logs pointing out of the tree, so the elevated
+    // create/truncate + prune would operate under (e.g.) System32. Verify
+    // the logs dir's REAL path (junctions/symlinks resolved) stays inside
+    // data_dir and skip debug logging otherwise -- best-effort logging
+    // degrades cleanly. Fable sweep finding #14 (companion to the
+    // event-log confinement, finding #8 / audit finding D).
+    if crate::gui::is_elevated()
+        && !crate::paths::real_path_contained(&crate::paths::data_dir(), &dir)
+    {
+        eprintln!("amwall: debug log dir resolves outside data_dir while elevated; skipping");
+        return;
+    }
     if create_dir_all(&dir).is_err() {
         return;
     }

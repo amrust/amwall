@@ -163,25 +163,65 @@ pub fn path_is_contained(base: &Path, candidate: &Path) -> bool {
     }
 }
 
+/// The Windows directory (e.g. `C:\Windows`) from the OS, NOT from the
+/// overridable `%SystemRoot%` / `%windir%` environment.
+/// `GetSystemWindowsDirectoryW` is preferred over `GetWindowsDirectoryW`
+/// (which can return a per-user directory under Terminal Services).
+#[cfg(windows)]
+fn system_windows_dir() -> Option<PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    let mut buf = [0u16; 260];
+    // Returns the length in chars (excluding the NUL) on success, the
+    // required size if the buffer was too small, or 0 on failure.
+    let len = unsafe { GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+    if len == 0 || len > buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+/// Resolve a KNOWNFOLDERID to a path via the shell (reads HKLM, not the
+/// process environment). The returned `PWSTR` is owned by the shell and
+/// freed with `CoTaskMemFree`.
+#[cfg(windows)]
+fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    unsafe {
+        let pwstr = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, HANDLE::default()).ok()?;
+        if pwstr.is_null() {
+            return None;
+        }
+        let s = pwstr.to_string().ok();
+        CoTaskMemFree(Some(pwstr.0 as *const std::ffi::c_void));
+        s.map(PathBuf::from)
+    }
+}
+
 /// The admin-only-writable system roots (Windows / Program Files),
-/// canonicalized, built from the environment so a non-`C:` system
-/// drive still resolves. A Medium-integrity user cannot plant a file
-/// under these, so an elevated amwall may safely execute a program
-/// found here.
+/// canonicalized, resolved from AUTHORITATIVE OS APIs rather than the
+/// process environment. A same-user process can shadow `%ProgramFiles%`
+/// / `%SystemRoot%` in its own environment, so trusting those for a
+/// privilege boundary (the skip-UAC target check) is unsound. A
+/// Medium-integrity user cannot plant a file under these, so an elevated
+/// amwall may safely execute a program found here. Fable sweep finding
+/// #15 (hardens audit finding E's guard).
+#[cfg(windows)]
 fn admin_only_roots() -> Vec<PathBuf> {
+    use windows::Win32::UI::Shell::{FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86};
     let mut roots = Vec::new();
-    for var in [
-        "SystemRoot",
-        "windir",
-        "ProgramFiles",
-        "ProgramFiles(x86)",
-        "ProgramW6432",
-    ] {
-        if let Some(v) = std::env::var_os(var) {
-            if let Ok(canon) = PathBuf::from(v).canonicalize() {
-                if !roots.contains(&canon) {
-                    roots.push(canon);
-                }
+    for p in [
+        system_windows_dir(),
+        known_folder(&FOLDERID_ProgramFiles),
+        known_folder(&FOLDERID_ProgramFilesX86),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(canon) = p.canonicalize() {
+            if !roots.contains(&canon) {
+                roots.push(canon);
             }
         }
     }
@@ -201,6 +241,42 @@ pub fn is_admin_only_location(path: &Path) -> bool {
     admin_only_roots()
         .iter()
         .any(|root| path_is_contained(root, &canon))
+}
+
+/// Like `path_is_contained`, but resolves directory junctions and
+/// symlinks: it canonicalizes the deepest EXISTING ancestor of
+/// `candidate` (the target file usually doesn't exist yet) and
+/// re-appends the not-yet-existing tail before comparing against a
+/// canonicalized `base`. This defeats a junction/symlink planted inside
+/// `base` that points out of the tree — which the purely lexical
+/// `path_is_contained` cannot see. Fails closed (`false`) if `base` or
+/// every ancestor of `candidate` fails to canonicalize. Touches the
+/// filesystem, unlike `path_is_contained`.
+pub fn real_path_contained(base: &Path, candidate: &Path) -> bool {
+    let Ok(canon_base) = base.canonicalize() else {
+        return false;
+    };
+    // Walk up from the candidate until an ancestor canonicalizes,
+    // stacking the not-yet-existing tail components to re-append.
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = candidate.to_path_buf();
+    loop {
+        if let Ok(canon) = cur.canonicalize() {
+            let mut real = canon;
+            for part in tail.iter().rev() {
+                real.push(part);
+            }
+            return path_is_contained(&canon_base, &real);
+        }
+        let name = match cur.file_name() {
+            Some(n) => n.to_owned(),
+            None => return false, // reached a root that won't canonicalize
+        };
+        if !cur.pop() {
+            return false;
+        }
+        tail.push(name);
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +327,30 @@ mod tests {
             base,
             Path::new(r"C:\data\amwall\..\Windows\x")
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_path_contained_resolves_ancestors_and_rejects_outside() {
+        // A not-yet-existing file whose deepest EXISTING ancestor is
+        // inside `base` is contained.
+        let base = std::env::temp_dir().join("amwall-rpc-test");
+        let _ = std::fs::create_dir_all(&base);
+        assert!(real_path_contained(
+            &base,
+            &base.join("sub").join("amwall.log")
+        ));
+        // A path whose real ancestor is outside `base` is not.
+        assert!(!real_path_contained(
+            &base,
+            Path::new(r"C:\Windows\System32\amwall-nope.log")
+        ));
+        // A base that can't be canonicalized fails closed.
+        assert!(!real_path_contained(
+            Path::new(r"C:\amwall-does-not-exist-xyz-987"),
+            &base.join("x.log")
+        ));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(windows)]
