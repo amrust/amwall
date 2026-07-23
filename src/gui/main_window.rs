@@ -2768,6 +2768,13 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
     // will fire on first-connect drops. Default is on.
     let notify = state.app.settings.borrow().enable_notifications;
     set_toolbar_button_checked(state, IDM_TRAY_ENABLENOTIFICATIONS_CHK, notify);
+    // Same for the "Log to file" / "Log UI" toggle buttons, so their
+    // pressed state reflects the saved settings at launch. Fable #26.
+    {
+        let s = state.app.settings.borrow();
+        set_toolbar_button_checked(state, IDM_TRAY_ENABLELOG_CHK, s.enable_log);
+        set_toolbar_button_checked(state, IDM_TRAY_ENABLEUILOG_CHK, s.enable_ui_log);
+    }
     // Title-bar icon reflects current filter state (color when
     // active, monochrome when off).
     update_titlebar_icon(hwnd, state.filters_active.get());
@@ -3184,7 +3191,9 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         | IDM_RULE_BLOCKINBOUND
         | IDM_RULE_ALLOWLOOPBACK
         | IDM_RULE_ALLOW6TO4
-        | IDM_RULE_ALLOWWINDOWSUPDATE => on_toggle(hwnd, id),
+        | IDM_RULE_ALLOWWINDOWSUPDATE
+        | IDM_TRAY_ENABLELOG_CHK
+        | IDM_TRAY_ENABLEUILOG_CHK => on_toggle(hwnd, id),
 
         IDM_TRAY_START => on_enable_filters(hwnd),
         IDM_TRAY_SHOW => super::tray::toggle_main_window(hwnd),
@@ -4614,6 +4623,12 @@ fn on_toggle(hwnd: HWND, id: u16) {
             IDM_USECERTIFICATES_CHK => &mut s.use_certificates,
             IDM_USEHASHES_CHK => &mut s.use_hashes,
             IDM_AUTOALLOW_MICROSOFT_CHK => &mut s.auto_allow_microsoft_signed,
+            // Toolbar "Log to file" / "Log UI" buttons. drain_events gates
+            // on these, so flipping the setting is all that's needed
+            // functionally; the toolbar pressed state is synced below.
+            // Fable sweep finding #26 (were dead -- hit the catchall).
+            IDM_TRAY_ENABLELOG_CHK => &mut s.enable_log,
+            IDM_TRAY_ENABLEUILOG_CHK => &mut s.enable_ui_log,
             _ => return,
         };
         *field = !*field;
@@ -4698,6 +4713,10 @@ fn on_toggle(hwnd: HWND, id: u16) {
             // immediately. update_hashes_if_enabled is a no-op
             // when use_hashes is off.
             save_profile_to_disk(state);
+        }
+        IDM_TRAY_ENABLELOG_CHK | IDM_TRAY_ENABLEUILOG_CHK => {
+            // Reflect the new state on the toolbar toggle button.
+            set_toolbar_button_checked(state, id, new_value);
         }
         _ => {}
     }
