@@ -33,7 +33,7 @@ use windows::core::PCWSTR;
 use super::ids::{
     IDC_APPS_PROFILE, IDC_APPS_SERVICE, IDC_APPS_UWP, IDM_ALLOW, IDM_BLOCK, IDM_COPY, IDM_EXPLORE,
     IDM_PROPERTIES, IDM_REMOVE_FROM_PROFILE, IDM_TIMER_15MIN, IDM_TIMER_1HR, IDM_TIMER_30MIN,
-    IDM_TIMER_4HR,
+    IDM_TIMER_4HR, IDM_TOGGLE_SILENT, IDM_TOGGLE_UNDELETABLE,
 };
 use super::wide;
 
@@ -64,6 +64,12 @@ pub struct ContextTarget {
     /// If `in_profile`, the current `is_enabled` flag; ignored
     /// otherwise. Drives which of Allow / Block carries the check.
     pub current_is_enabled: bool,
+    /// If `in_profile`, the current `is_silent` flag (Fable #28) — drives
+    /// the "Disable notifications" check mark.
+    pub current_is_silent: bool,
+    /// If `in_profile`, the current `is_undeletable` flag (Fable #28) —
+    /// drives the "Prevent removal" check mark.
+    pub current_is_undeletable: bool,
 }
 
 /// Show the context menu at the cursor and return the selected
@@ -128,6 +134,13 @@ pub fn show(hwnd: HWND, target: &ContextTarget) -> Option<u16> {
     if target.in_profile {
         append_separator(menu);
         append_string(menu, IDM_REMOVE_FROM_PROFILE, &rust_i18n::t!("context.remove_from_profile"), true);
+        // Per-app flag toggles (Fable #28): "Disable notifications"
+        // (is_silent -> no connect re-prompt) and "Prevent removal"
+        // (is_undeletable -> skipped by Purge / manual delete).
+        let silent_check = if target.current_is_silent { MF_CHECKED.0 } else { MF_UNCHECKED.0 };
+        append_string_with_state(menu, IDM_TOGGLE_SILENT, &rust_i18n::t!("context.disable_notifications"), MF_STRING.0 | silent_check, true);
+        let undel_check = if target.current_is_undeletable { MF_CHECKED.0 } else { MF_UNCHECKED.0 };
+        append_string_with_state(menu, IDM_TOGGLE_UNDELETABLE, &rust_i18n::t!("context.prevent_removal"), MF_STRING.0 | undel_check, true);
     }
 
     append_separator(menu);
@@ -256,6 +269,8 @@ pub fn target_from_source(
                 binary_path: app.path.clone(),
                 in_profile: true,
                 current_is_enabled: app.is_enabled,
+                current_is_silent: app.is_silent,
+                current_is_undeletable: app.is_undeletable,
             })
         }
         IDC_APPS_SERVICE => {
@@ -284,6 +299,8 @@ pub fn target_from_source(
                 binary_path: svc_path,
                 in_profile: existing.is_some(),
                 current_is_enabled: existing.map(|a| a.is_enabled).unwrap_or(false),
+                current_is_silent: existing.map(|a| a.is_silent).unwrap_or(false),
+                current_is_undeletable: existing.map(|a| a.is_undeletable).unwrap_or(false),
             })
         }
         IDC_APPS_UWP => {
@@ -313,6 +330,8 @@ pub fn target_from_source(
                 binary_path: sid,
                 in_profile: existing.is_some(),
                 current_is_enabled: existing.map(|a| a.is_enabled).unwrap_or(false),
+                current_is_silent: existing.map(|a| a.is_silent).unwrap_or(false),
+                current_is_undeletable: existing.map(|a| a.is_undeletable).unwrap_or(false),
             })
         }
         _ => None,

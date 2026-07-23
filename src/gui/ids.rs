@@ -179,3 +179,9 @@ pub const IDM_TIMER_15MIN: u16 = 356;
 pub const IDM_TIMER_30MIN: u16 = 357;
 pub const IDM_TIMER_1HR: u16 = 358;
 pub const IDM_TIMER_4HR: u16 = 359;
+
+// Per-app flag toggles on the apps context menu (Fable #28). "Disable
+// notifications" flips App.is_silent (no re-prompt); "Prevent removal"
+// flips App.is_undeletable (skipped by Purge / manual delete).
+pub const IDM_TOGGLE_SILENT: u16 = 362;
+pub const IDM_TOGGLE_UNDELETABLE: u16 = 363;
