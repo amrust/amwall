@@ -1515,6 +1515,7 @@ fn try_subscribe_events(state: &WndState) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("amwall: WFP engine open failed for events: {e:?}");
+            note_events_unavailable(state);
             return;
         }
     };
@@ -1533,10 +1534,20 @@ fn try_subscribe_events(state: &WndState) {
             eprintln!(
                 "amwall: net-event subscribe failed (admin may be required): {e}"
             );
+            note_events_unavailable(state);
             // Drop the engine — no subscription means no point
             // holding it open.
         }
     }
+}
+
+/// Surface a net-event subscribe failure in the status bar. Without an
+/// event feed the Packets log stays empty and no connection toasts fire,
+/// but the log / notification toggles still look active -- so a silent
+/// stderr-only failure leaves the user believing amwall is watching
+/// traffic when it isn't. Fable sweep finding #16.
+fn note_events_unavailable(state: &WndState) {
+    set_status_text(state.status.get(), 0, &t!("status.events_unavailable"));
 }
 
 /// Repopulate the `amwall_filter_ids` cache + toolbar
@@ -4962,6 +4973,27 @@ fn persist_filters_active(state: &WndState, value: bool) {
 /// machinery. cleanup_provider runs in O(filter count) syscalls
 /// and even on a 200-app profile (~1000 filters) finishes in
 /// well under a second.
+/// Alert the user (modally) that a filter reinstall failed, so the
+/// kernel may now hold stale rules that don't match the latest profile
+/// change -- a potential fail-open the caller would otherwise paint over
+/// with a success status. reinstall_filters_if_active has 12 fire-and-
+/// forget callers, so a modal box (not a caller-gated Result) is the
+/// reliable signal. Fable sweep finding #13.
+fn warn_filter_update_failed(hwnd: HWND, state: &WndState) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    set_status_text(state.status.get(), 0, &t!("status.install_failed"));
+    let title = wide("amwall");
+    let body = wide(&t!("message.filter_update_failed"));
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
 fn reinstall_filters_if_active(hwnd: HWND, state: &WndState) {
     if !state.filters_active.get() {
         return;
@@ -4970,11 +5002,13 @@ fn reinstall_filters_if_active(hwnd: HWND, state: &WndState) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("amwall: reinstall: WFP engine open failed: {e:?}");
+            warn_filter_update_failed(hwnd, state);
             return;
         }
     };
     if let Err(e) = engine.cleanup_provider(&crate::install::PROVIDER_KEY) {
         eprintln!("amwall: reinstall: cleanup_provider failed: {e:?}");
+        warn_filter_update_failed(hwnd, state);
         return;
     }
 
