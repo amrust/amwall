@@ -57,6 +57,18 @@ pub fn log_dir() -> PathBuf {
     crate::paths::data_dir().join("logs")
 }
 
+/// The session log file this process actually redirected stderr/stdout
+/// into (set by `init_debug_log`). This is amwall's real runtime error
+/// sink — the tray "Errors log" feature shows/clears THIS, not the
+/// dev-only `swaplog.txt` (review finding). `None` before init (e.g. CLI
+/// subcommands, which don't redirect) or if the redirect failed.
+static CURRENT_LOG_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Path of this process's session log, if `init_debug_log` opened one.
+pub fn current_log_path() -> Option<PathBuf> {
+    CURRENT_LOG_PATH.get().cloned()
+}
+
 /// Open a fresh timestamped log file, redirect this process's
 /// stdout + stderr to it, and prune older logs so we keep the
 /// most recent `MAX_LOG_FILES`. Best-effort: any I/O failure
@@ -100,6 +112,8 @@ pub fn init_debug_log() {
         Ok(f) => f,
         Err(_) => return,
     };
+    // Record the real session-log path for the tray "Errors log" feature.
+    let _ = CURRENT_LOG_PATH.set(path.clone());
 
     // Header so a log file picked up cold is self-describing.
     // Each piece is best-effort — a Windows version that doesn't

@@ -1301,7 +1301,7 @@ fn on_tray_message(hwnd: HWND, lparam: LPARAM) {
                     notification_on_tray: s.notification_on_tray,
                     enable_log: s.enable_log,
                     enable_ui_log: s.enable_ui_log,
-                    error_log_exists: crate::paths::error_log_path().is_file(),
+                    error_log_exists: error_log_target().is_file(),
                 }
             };
             super::tray::show_context_menu(hwnd, &tray_state);
@@ -4444,8 +4444,13 @@ fn accel_dispatch(hwnd: HWND, cmd: u16) {
         3..=5 => match cmd {
             IDM_SELECT_ALL => on_rules_select_all(hwnd, listview_id),
             IDM_COPY | IDM_COPY_VALUE => on_rules_copy(hwnd, listview_id, None),
-            IDM_PROPERTIES => on_edit_selected_rule(hwnd),
-            IDM_DELETE => on_delete_selected_rule(hwnd),
+            // Edit/Delete hardcode the Custom listview (listviews[5]) and
+            // read its selection, so they must fire ONLY when the Custom
+            // tab is active — otherwise Del/Enter on the System/Blocklist
+            // tabs would act on a stale Custom-tab selection (review
+            // finding). System/Blocklist rules aren't editable/deletable.
+            IDM_PROPERTIES if tab == 5 => on_edit_selected_rule(hwnd),
+            IDM_DELETE if tab == 5 => on_delete_selected_rule(hwnd),
             _ => {}
         },
         6 | 7 => {
@@ -4453,10 +4458,45 @@ fn accel_dispatch(hwnd: HWND, cmd: u16) {
             match cmd {
                 IDM_SELECT_ALL => select_all_rows(lv),
                 IDM_COPY | IDM_COPY_VALUE => copy_selected(hwnd, lv, None),
+                // Enter → Show-in-list, the menu's bold default (review
+                // finding — was dropped to the no-op arm).
+                IDM_PROPERTIES => accel_show_in_list(hwnd, state, tab),
                 _ => {}
             }
         }
         _ => {}
+    }
+}
+
+/// Enter on the Network/Log tab: resolve the first selected row to its
+/// app path and jump to it in the Apps list (Show-in-list) — the bold
+/// default of both context menus (review finding).
+fn accel_show_in_list(hwnd: HWND, state: &WndState, tab: usize) {
+    let lv = state.listviews[tab].get();
+    let row = first_selected_row(lv);
+    if row < 0 {
+        return;
+    }
+    let Some(src) = listview_item_param(lv, row).map(|p| p as usize) else {
+        return;
+    };
+    let path = if tab == 6 {
+        let pid = state.connections.borrow().get(src).map(|c| c.pid);
+        pid.and_then(super::connections::process_full_path)
+    } else {
+        let log = state.event_log.borrow();
+        match log.get(src) {
+            Some(crate::wfp::events::NetEvent::Drop(d))
+            | Some(crate::wfp::events::NetEvent::Allow(d)) => {
+                d.app_path.clone().map(std::path::PathBuf::from)
+            }
+            _ => None,
+        }
+    };
+    if let Some(p) = path {
+        if !p.as_os_str().is_empty() {
+            show_app_in_list(hwnd, state, &p);
+        }
     }
 }
 
@@ -5336,6 +5376,14 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
             let mut profile = state.app.profile.borrow_mut();
             for idx in source_indices {
                 if idx < profile.apps.len() {
+                    // Skip apps flagged "Prevent removal" (is_undeletable),
+                    // matching on_context_remove and upstream
+                    // (messages.c:2382) — the Del accelerator now routes
+                    // here, so this path must honor the flag too (review
+                    // finding).
+                    if profile.apps[idx].is_undeletable {
+                        continue;
+                    }
                     profile.apps.remove(idx);
                     removed += 1;
                 }
@@ -5358,7 +5406,8 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
                 .collect();
             let mut profile = state.app.profile.borrow_mut();
             let before = profile.apps.len();
-            profile.apps.retain(|a| !paths.contains(&a.path));
+            // Keep "Prevent removal" apps even when matched (review finding).
+            profile.apps.retain(|a| a.is_undeletable || !paths.contains(&a.path));
             removed = before - profile.apps.len();
         }
         x if x == IDC_APPS_UWP => {
@@ -5376,7 +5425,8 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
             if !sids.is_empty() {
                 let mut profile = state.app.profile.borrow_mut();
                 let before = profile.apps.len();
-                profile.apps.retain(|a| !sids.contains(&a.path));
+                // Keep "Prevent removal" apps even when matched (review finding).
+                profile.apps.retain(|a| a.is_undeletable || !sids.contains(&a.path));
                 removed = before - profile.apps.len();
             }
         }
@@ -5642,6 +5692,17 @@ fn is_global_rule(r: &crate::profile::Rule) -> bool {
 /// The combined, filtered list of togglable rules in menu order:
 /// system rules first, then custom rules, globals excluded. The index
 /// into this Vec is the submenu command offset from IDM_CONTEXT_RULE_FIRST.
+///
+/// KNOWN PARITY GAP (review finding): this takes the USER profile, whose
+/// `system_rules` is always empty (only the bundled internal profile has
+/// a `<rules_system>` section) — so in practice only user-added Custom
+/// rules appear. Upstream's submenu also lists the built-in preset rules
+/// (marked `*`). amwall can't yet do that: presets live read-only in the
+/// internal profile and have no per-app app-list override mechanism
+/// (internal_rules_state tracks only enabled/disabled), so offering them
+/// here would produce a no-op. They remain toggleable on the Rules tab.
+/// The RuleRef::System branch is kept for forward-compat if a migrated
+/// user profile ever carries `<rules_system>`.
 fn togglable_rules(profile: &crate::profile::Profile) -> Vec<RuleRef> {
     let mut out = Vec::new();
     for (i, r) in profile.system_rules.iter().enumerate() {
@@ -7571,10 +7632,18 @@ fn on_log_show(hwnd: HWND) {
     }
 }
 
-/// Tray Errors-log "Show log" (Fable #30). Opens the error log —
-/// `swaplog.txt`, amwall's stderr sink — with the OS default handler.
-/// The submenu is only shown when the file exists, so this is normally
-/// reachable only when there's something to show. Mirrors upstream's
+/// The file the tray "Errors log" feature acts on: amwall's real runtime
+/// session log (logs\amwall-<ts>.log) when this GUI process opened one,
+/// else the dev-capture `swaplog.txt` fallback. The earlier wiring
+/// pointed only at swaplog.txt, which the app never writes — so the
+/// submenu never appeared for installed users (review finding).
+fn error_log_target() -> std::path::PathBuf {
+    crate::logging::current_log_path().unwrap_or_else(crate::paths::error_log_path)
+}
+
+/// Tray Errors-log "Show log" (Fable #30). Opens amwall's session log
+/// (see error_log_target) with the OS default handler. The submenu is
+/// only shown when the file exists. Mirrors upstream's
 /// `_app_command_logerrshow` (main.c:3628).
 fn on_log_err_show(hwnd: HWND) {
     use windows::Win32::UI::Shell::ShellExecuteW;
@@ -7583,7 +7652,7 @@ fn on_log_err_show(hwnd: HWND) {
         Some(s) => s,
         None => return,
     };
-    let path = crate::paths::error_log_path();
+    let path = error_log_target();
     if !path.is_file() {
         set_status_text(state.status.get(), 0, "Error log not found.");
         return;
@@ -7604,11 +7673,13 @@ fn on_log_err_show(hwnd: HWND) {
     }
 }
 
-/// Tray Errors-log "Clear log" (Fable #30). Truncates `swaplog.txt` in
-/// place (best-effort — it may be held open by an external stderr
-/// redirect). Honors the confirm_log_clear preference, matching
-/// `on_log_clear`. Mirrors upstream's `_app_command_logerrclear`
-/// (main.c:3634).
+/// Tray Errors-log "Clear log" (Fable #30). Truncates the session log
+/// (see error_log_target) in place. Best-effort: this process holds the
+/// log open via SetStdHandle, so a truncate leaves the open handle's
+/// write offset unchanged — subsequent lines resume past a short zero
+/// region until the next launch reopens fresh; acceptable for a
+/// diagnostic log. Honors confirm_log_clear like `on_log_clear`. Mirrors
+/// upstream's `_app_command_logerrclear` (main.c:3634).
 fn on_log_err_clear(hwnd: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{
         IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
@@ -7617,7 +7688,7 @@ fn on_log_err_clear(hwnd: HWND) {
         Some(s) => s,
         None => return,
     };
-    let path = crate::paths::error_log_path();
+    let path = error_log_target();
     if !path.is_file() {
         return;
     }

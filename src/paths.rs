@@ -74,12 +74,14 @@ pub fn default_log_path() -> PathBuf {
     data_dir().join("amwall.log")
 }
 
-/// Error/diagnostic log (`swaplog.txt`) — the sink amwall's stderr is
-/// redirected into (portable: beside the exe; installed:
-/// `%APPDATA%\amwall\`). The tray "Errors log" submenu (Fable #30)
-/// shows/clears this and only appears when the file exists. Mirrors
-/// upstream's `_r_app_getlogpath` (the error-log path used by
-/// _app_command_logerrshow / logerrclear).
+/// Dev-capture `swaplog.txt` path — the file a VS Code build task / the
+/// run-elevated script redirect stderr into with `2> swaplog.txt`
+/// (portable: beside the exe; installed: `%APPDATA%\amwall\`). NOTE: a
+/// running GUI process does NOT write here — `logging::init_debug_log`
+/// SetStdHandle-redirects stderr to `logs\amwall-<ts>.log` instead. This
+/// is only the FALLBACK for the tray "Errors log" feature; the real
+/// runtime sink is `logging::current_log_path()`. See error_log_target
+/// in main_window.
 pub fn error_log_path() -> PathBuf {
     data_dir().join("swaplog.txt")
 }

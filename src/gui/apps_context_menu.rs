@@ -131,24 +131,29 @@ pub fn show(hwnd: HWND, target: &ContextTarget, rules: &[RuleMenuItem]) -> Optio
     // App.timer = now + N; the armed expire_timed_apps sweep rolls it back
     // to blocked when the timer elapses. Only when we have an identifier
     // to key the profile entry on. Fable sweep finding #23.
+    // `if let Ok` (not `?`): a `?` here would return None on a submenu
+    // allocation failure and skip the sole DestroyMenu(menu) below,
+    // leaking the parent HMENU (review finding). Matches the Rules /
+    // tray submenus.
     if has_id {
-        let submenu = unsafe { CreatePopupMenu() }.ok()?;
-        for (id, label) in [
-            (IDM_TIMER_15MIN, "15 minutes"),
-            (IDM_TIMER_30MIN, "30 minutes"),
-            (IDM_TIMER_1HR, "1 hour"),
-            (IDM_TIMER_4HR, "4 hours"),
-        ] {
-            let w = wide(label);
-            unsafe {
-                let _ = AppendMenuW(submenu, MF_STRING, id as usize, PCWSTR(w.as_ptr()));
+        if let Ok(submenu) = unsafe { CreatePopupMenu() } {
+            for (id, label) in [
+                (IDM_TIMER_15MIN, "15 minutes"),
+                (IDM_TIMER_30MIN, "30 minutes"),
+                (IDM_TIMER_1HR, "1 hour"),
+                (IDM_TIMER_4HR, "4 hours"),
+            ] {
+                let w = wide(label);
+                unsafe {
+                    let _ = AppendMenuW(submenu, MF_STRING, id as usize, PCWSTR(w.as_ptr()));
+                }
             }
-        }
-        // MF_POPUP nests `submenu` under this item; DestroyMenu(menu) at
-        // the end of the caller also destroys the attached submenu.
-        let w = wide(&rust_i18n::t!("context.allow_for"));
-        unsafe {
-            let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(w.as_ptr()));
+            // MF_POPUP nests `submenu` under this item; DestroyMenu(menu) at
+            // the end of the caller also destroys the attached submenu.
+            let w = wide(&rust_i18n::t!("context.allow_for"));
+            unsafe {
+                let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(w.as_ptr()));
+            }
         }
     }
 
