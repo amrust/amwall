@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_BYTE_ARRAY16, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0,
     FWP_CONDITION_VALUE0_0, FWP_DIRECTION, FWP_DIRECTION_INBOUND, FWP_DIRECTION_OUTBOUND,
-    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_MATCH_RANGE, FWP_RANGE0, FWP_RANGE_TYPE,
+    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ANY_SET, FWP_MATCH_FLAGS_NONE_SET, FWP_MATCH_RANGE, FWP_RANGE0,
+    FWP_RANGE_TYPE,
     FWP_SECURITY_DESCRIPTOR_TYPE, FWP_SID, FWP_UINT8, FWP_UINT16, FWP_UINT32,
     FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0,
     FWP_VALUE0_0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_ALE_PACKAGE_ID,
@@ -132,6 +133,14 @@ pub enum FilterCondition {
     /// FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK` so loopback
     /// traffic is excluded from the block.
     FlagsNoneSet(u32),
+    /// `FWPM_CONDITION_FLAGS` checked against `FWP_MATCH_FLAGS_ANY_SET`
+    /// — passes when **any** of the bits in the supplied mask are set
+    /// on the packet's flags. The loopback permit uses this with
+    /// `FWP_CONDITION_FLAG_IS_LOOPBACK |
+    /// FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK` so traffic the kernel
+    /// tags as (appcontainer) loopback is allowed. Mirrors upstream
+    /// `wfp.c:1819`.
+    FlagsAnySet(u32),
     /// UWP package SID — matches against `FWPM_CONDITION_ALE_PACKAGE_ID`
     /// with `FWP_SID`. Carries the raw SID byte sequence (variable-
     /// length, must already be a valid SID — produced by
@@ -258,6 +267,15 @@ pub(super) fn compile(
             FilterCondition::FlagsNoneSet(mask) => FWPM_FILTER_CONDITION0 {
                 fieldKey: FWPM_CONDITION_FLAGS,
                 matchType: FWP_MATCH_FLAGS_NONE_SET,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_UINT32,
+                    Anonymous: FWP_CONDITION_VALUE0_0 { uint32: *mask },
+                },
+            },
+
+            FilterCondition::FlagsAnySet(mask) => FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_FLAGS,
+                matchType: FWP_MATCH_FLAGS_ANY_SET,
                 conditionValue: FWP_CONDITION_VALUE0 {
                     r#type: FWP_UINT32,
                     Anonymous: FWP_CONDITION_VALUE0_0 { uint32: *mask },

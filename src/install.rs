@@ -19,7 +19,8 @@ use std::path::PathBuf;
 
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK, FWP_CONDITION_FLAG_IS_IPSEC_SECURED,
-    FWP_CONDITION_FLAG_IS_LOOPBACK, FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4_SILENT_DROP,
+    FWP_CONDITION_FLAG_IS_LOOPBACK, FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4,
+    FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6, FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4_SILENT_DROP,
     FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V6_SILENT_DROP, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
     FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
     FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_LAYER_INBOUND_TRANSPORT_V4_DISCARD,
@@ -717,46 +718,144 @@ fn install_global_rules(
     // wfp.c:2390-2493). A separate high-weight block-all here would
     // outrank per-app permits and block whitelisted apps.
 
-    // Allow loopback — Permit at all four ALE layers, gated by
-    // RemoteAddr in the loopback range. Weight 15 (above the
-    // block-all toggles).
+    // Allow loopback — mirrors upstream simplewall wfp.c:1806-1960.
+    // Two parts, both at FW_WEIGHT_HIGHEST_IMPORTANT:
+    //   1. A flag permit for traffic the kernel tags as loopback or
+    //      appcontainer-loopback (own-IP localhost, UWP loopback), at
+    //      all four ALE layers (wfp.c:1811-1877).
+    //   2. A CIDR allow-list of local/private/reserved/link-local/
+    //      multicast ranges (wfp.c:1730-1761), keyed on the REMOTE
+    //      address at the CONNECT layer and the LOCAL address at the
+    //      RECV_ACCEPT layer -- so inbound is matched on OUR address,
+    //      not the peer's.
+    // The old code installed only 127/8 + ::1 and keyed BOTH layers on
+    // the remote address (wrong for RECV_ACCEPT). Upstream's `[::]/0`
+    // entry is deliberately OMITTED: parsed with prefix 0 it is a /0
+    // match-all, so as a permit at HIGHEST_IMPORTANT it would allow ALL
+    // IPv6 and nullify the IPv6 blocklist / user blocks -- a
+    // firewall-correctness bug (Fable sweep finding #5).
     if cfg.allow_loopback {
-        let v4_loopback = FilterCondition::RemoteAddrV4 {
-            addr: Ipv4Addr::new(127, 0, 0, 0),
-            prefix: Some(8),
-        };
-        let v6_loopback = FilterCondition::RemoteAddrV6 {
-            addr: Ipv6Addr::LOCALHOST,
-            prefix: Some(128),
-        };
-        for layer in &[FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4] {
+        // 1. (appcontainer-)loopback flag permit.
+        let loop_flags = FilterCondition::FlagsAnySet(
+            FWP_CONDITION_FLAG_IS_LOOPBACK | FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK,
+        );
+        for layer in &[
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+        ] {
             let f = filter::add(
                 engine,
-                "amwall allow-loopback-v4",
-                "amwall: Settings -> Rules -> Allow loopback (v4)",
+                "amwall allow-loopback-flags",
+                "amwall: Allow loopback (kernel loopback flag)",
                 layer,
                 &SUBLAYER_KEY,
                 Some(&PROVIDER_KEY),
-                std::slice::from_ref(&v4_loopback),
+                std::slice::from_ref(&loop_flags),
                 FilterAction::Permit,
                 persistent,
-                // 0x0F (FW_WEIGHT_HIGHEST_IMPORTANT): loopback/global
-                // allows sit at the top so they win over rules and the
-                // block-all toggles. Was raw Some(15). Finding A.
                 filter::weight::HIGHEST_IMPORTANT,
             )?;
             ids.push(f.runtime_id());
             count += 1;
         }
-        for layer in &[FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6] {
+
+        // 2a. IPv4 loopback/local CIDR list.
+        const LOOPBACK_V4: &[(Ipv4Addr, u8)] = &[
+            (Ipv4Addr::new(0, 0, 0, 0), 8),
+            (Ipv4Addr::new(10, 0, 0, 0), 8),
+            (Ipv4Addr::new(100, 64, 0, 0), 10),
+            (Ipv4Addr::new(127, 0, 0, 0), 8),
+            (Ipv4Addr::new(169, 254, 0, 0), 16),
+            (Ipv4Addr::new(172, 16, 0, 0), 12),
+            (Ipv4Addr::new(192, 0, 0, 0), 24),
+            (Ipv4Addr::new(192, 0, 2, 0), 24),
+            (Ipv4Addr::new(192, 88, 99, 0), 24),
+            (Ipv4Addr::new(192, 168, 0, 0), 16),
+            (Ipv4Addr::new(198, 18, 0, 0), 15),
+            (Ipv4Addr::new(198, 51, 100, 0), 24),
+            (Ipv4Addr::new(203, 0, 113, 0), 24),
+            (Ipv4Addr::new(224, 0, 0, 0), 4),
+            (Ipv4Addr::new(240, 0, 0, 0), 4),
+            (Ipv4Addr::new(255, 255, 255, 255), 32),
+        ];
+        for &(addr, prefix) in LOOPBACK_V4 {
+            let remote = FilterCondition::RemoteAddrV4 { addr, prefix: Some(prefix) };
+            let f = filter::add(
+                engine,
+                "amwall allow-loopback-v4",
+                "amwall: Allow loopback (v4 remote)",
+                &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+                &SUBLAYER_KEY,
+                Some(&PROVIDER_KEY),
+                std::slice::from_ref(&remote),
+                FilterAction::Permit,
+                persistent,
+                filter::weight::HIGHEST_IMPORTANT,
+            )?;
+            ids.push(f.runtime_id());
+            count += 1;
+
+            let local = FilterCondition::LocalAddrV4 { addr, prefix: Some(prefix) };
+            let f = filter::add(
+                engine,
+                "amwall allow-loopback-v4",
+                "amwall: Allow loopback (v4 local)",
+                &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                &SUBLAYER_KEY,
+                Some(&PROVIDER_KEY),
+                std::slice::from_ref(&local),
+                FilterAction::Permit,
+                persistent,
+                filter::weight::HIGHEST_IMPORTANT,
+            )?;
+            ids.push(f.runtime_id());
+            count += 1;
+        }
+
+        // 2b. IPv6 loopback/local CIDR list ([::]/0 omitted, see above).
+        const LOOPBACK_V6: &[(Ipv6Addr, u8)] = &[
+            (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), 128),
+            (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), 128),
+            (Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0), 96),
+            (Ipv6Addr::new(0, 0, 0, 0, 0xffff, 0, 0, 0), 96),
+            (Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96),
+            (Ipv6Addr::new(0x100, 0, 0, 0, 0, 0, 0, 0), 64),
+            (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32),
+            (Ipv6Addr::new(0x2001, 0x20, 0, 0, 0, 0, 0, 0), 28),
+            (Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
+            (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16),
+            (Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
+            (Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+            (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
+        ];
+        for &(addr, prefix) in LOOPBACK_V6 {
+            let remote = FilterCondition::RemoteAddrV6 { addr, prefix: Some(prefix) };
             let f = filter::add(
                 engine,
                 "amwall allow-loopback-v6",
-                "amwall: Settings -> Rules -> Allow loopback (v6)",
-                layer,
+                "amwall: Allow loopback (v6 remote)",
+                &FWPM_LAYER_ALE_AUTH_CONNECT_V6,
                 &SUBLAYER_KEY,
                 Some(&PROVIDER_KEY),
-                std::slice::from_ref(&v6_loopback),
+                std::slice::from_ref(&remote),
+                FilterAction::Permit,
+                persistent,
+                filter::weight::HIGHEST_IMPORTANT,
+            )?;
+            ids.push(f.runtime_id());
+            count += 1;
+
+            let local = FilterCondition::LocalAddrV6 { addr, prefix: Some(prefix) };
+            let f = filter::add(
+                engine,
+                "amwall allow-loopback-v6",
+                "amwall: Allow loopback (v6 local)",
+                &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+                &SUBLAYER_KEY,
+                Some(&PROVIDER_KEY),
+                std::slice::from_ref(&local),
                 FilterAction::Permit,
                 persistent,
                 filter::weight::HIGHEST_IMPORTANT,
@@ -1193,6 +1292,43 @@ fn install_default_deny(
         )?;
         ids.push(f.runtime_id());
         count += 1;
+    }
+
+    // TCP-templates terminating callouts (upstream #689 workaround).
+    // When outbound is blocked, a plain block filter at the CONNECT
+    // layer can still let a TCP connection slip through via connection-
+    // template reuse; upstream adds a built-in terminating callout at
+    // both CONNECT layers to swallow those too (wfp.c:2393-2425, Win8+).
+    // The callout GUIDs are OS built-ins present on every amwall-
+    // supported Windows (10+), so no version gate is needed here.
+    if block_outbound {
+        for (layer, callout) in &[
+            (
+                FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+                FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4,
+            ),
+            (
+                FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+                FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6,
+            ),
+        ] {
+            let f = filter::add(
+                engine,
+                "amwall block-connection-tcp-templates",
+                "amwall: TCP-templates terminating callout (outbound block, #689)",
+                layer,
+                &SUBLAYER_KEY,
+                Some(&PROVIDER_KEY),
+                &[], // match-all; the callout decides
+                FilterAction::CalloutTerminating {
+                    callout_key: *callout,
+                },
+                persistent,
+                filter::weight::LOWEST,
+            )?;
+            ids.push(f.runtime_id());
+            count += 1;
+        }
     }
     Ok(count)
 }
