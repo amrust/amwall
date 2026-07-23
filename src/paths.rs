@@ -74,6 +74,16 @@ pub fn default_log_path() -> PathBuf {
     data_dir().join("amwall.log")
 }
 
+/// Error/diagnostic log (`swaplog.txt`) — the sink amwall's stderr is
+/// redirected into (portable: beside the exe; installed:
+/// `%APPDATA%\amwall\`). The tray "Errors log" submenu (Fable #30)
+/// shows/clears this and only appears when the file exists. Mirrors
+/// upstream's `_r_app_getlogpath` (the error-log path used by
+/// _app_command_logerrshow / logerrclear).
+pub fn error_log_path() -> PathBuf {
+    data_dir().join("swaplog.txt")
+}
+
 /// Directory containing the exe, or `None` if `current_exe`
 /// fails (rare — sandboxes that block `GetModuleFileNameW`).
 pub fn exe_dir() -> Option<PathBuf> {

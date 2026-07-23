@@ -28,16 +28,70 @@ use windows::Win32::UI::Shell::{
     NIM_MODIFY, NOTIFY_ICON_INFOTIP_FLAGS, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IsIconic, IsWindowVisible,
-    LoadIconW, MF_SEPARATOR, MF_STRING, RegisterWindowMessageW, SW_HIDE, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, WM_USER,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, HMENU, IsIconic, IsWindowVisible,
+    LoadIconW, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    RegisterWindowMessageW, SW_HIDE, SW_RESTORE, SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WM_USER,
 };
 use windows::core::PCWSTR;
 
 use rust_i18n::t;
 
-use super::ids::{IDM_EXIT, IDM_SETTINGS, IDM_TRAY_SHOW, IDM_TRAY_START};
+use super::ids::{
+    IDM_ABOUT, IDM_EXIT, IDM_SETTINGS, IDM_TRAY_ENABLELOG_CHK, IDM_TRAY_ENABLENOTIFICATIONS_CHK,
+    IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK, IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR,
+    IDM_TRAY_LOGCLEAR_ERR, IDM_TRAY_LOGSHOW, IDM_TRAY_LOGSHOW_ERR,
+    IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK, IDM_TRAY_NOTIFICATIONONTRAY_CHK, IDM_TRAY_SHOW,
+    IDM_TRAY_START, IDM_WEBSITE,
+};
 use super::wide;
+
+/// The live state the tray menu needs to render its check marks and
+/// gray-out gating (Fable #30). Built at the call site from `WndState`
+/// + `Settings` so `tray` stays free of the main-window types.
+pub struct TrayMenuState {
+    pub filters_active: bool,
+    pub enable_notifications: bool,
+    pub notification_sound: bool,
+    pub notification_fullscreen_silent: bool,
+    pub notification_on_tray: bool,
+    pub enable_log: bool,
+    pub enable_ui_log: bool,
+    /// Whether the error log (`swaplog.txt`) exists — the Errors-log
+    /// submenu is only shown when it does (mirrors upstream's
+    /// `_r_fs_isexists(_r_app_getlogpath())` at messages.c:893).
+    pub error_log_exists: bool,
+}
+
+/// Append a plain / checkable / grayable string item.
+fn append_item(menu: HMENU, id: u16, label: &str, checked: bool, grayed: bool) {
+    let mut flags = MF_STRING.0;
+    if checked {
+        flags |= MF_CHECKED.0;
+    }
+    if grayed {
+        flags |= MF_GRAYED.0;
+    }
+    let w = wide(label);
+    unsafe {
+        let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(flags), id as usize, PCWSTR(w.as_ptr()));
+    }
+}
+
+fn append_sep(menu: HMENU) {
+    unsafe {
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    }
+}
+
+/// Nest `sub` under a titled popup item. `sub` becomes owned by `menu`,
+/// so the single `DestroyMenu(menu)` at teardown frees it too.
+fn append_submenu(menu: HMENU, sub: HMENU, title: &str) {
+    let w = wide(title);
+    unsafe {
+        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, PCWSTR(w.as_ptr()));
+    }
+}
 
 /// Callback message the shell will send to our HWND for any tray-
 /// icon mouse / keyboard event. lparam's LOWORD carries the
@@ -195,57 +249,110 @@ pub fn toggle_main_window(hwnd: HWND) {
     }
 }
 
-/// Show the right-click context menu near the cursor. Commands
-/// route back as ordinary WM_COMMAND messages (no TPM_RETURNCMD)
-/// so the existing on_command handlers pick them up — same path
-/// the toolbar buttons take.
-pub fn show_context_menu(hwnd: HWND, filters_active: bool) {
+/// Show the right-click context menu near the cursor. Commands route
+/// back as ordinary WM_COMMAND messages (no TPM_RETURNCMD) so the
+/// existing on_command handlers pick them up — same path the toolbar
+/// buttons take. Rebuilt to upstream's full item set (Fable #30):
+/// Show / Enable-Disable filters / Notifications submenu / Packets-log
+/// submenu / Errors-log submenu (when present) / Settings / Website /
+/// About / Exit. Check marks + gray gating mirror
+/// `_app_message_traycontextmenu` (messages.c:852-935). The menu is
+/// transient (rebuilt per right-click), so all MF_CHECKED / MF_GRAYED
+/// state is baked in here at build time, not via set_menu_check.
+pub fn show_context_menu(hwnd: HWND, st: &TrayMenuState) {
     let menu = match unsafe { CreatePopupMenu() } {
         Ok(m) => m,
         Err(_) => return,
     };
 
-    let show_text = t!("tray.show");
-    let show_label = wide(&show_text);
-    let toggle_text = if filters_active {
+    // Show / Hide the main window.
+    append_item(menu, IDM_TRAY_SHOW, &t!("tray.show"), false, false);
+    append_sep(menu);
+
+    // Enable / Disable filters (label flips with filter state).
+    let toggle = if st.filters_active {
         t!("tray.disable_filters")
     } else {
         t!("tray.enable_filters")
     };
-    let toggle_label = wide(&toggle_text);
-    let settings_text = t!("tray.settings");
-    let settings_label = wide(&settings_text);
-    let exit_text = t!("tray.exit");
-    let exit_label = wide(&exit_text);
+    append_item(menu, IDM_TRAY_START, &toggle, false, false);
+    append_sep(menu);
 
-    unsafe {
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            IDM_TRAY_SHOW as usize,
-            PCWSTR(show_label.as_ptr()),
+    // Notifications submenu. sound/on_tray gray when notifications are
+    // off; fullscreen-silent grays when notifications OR sound are off
+    // (messages.c:916-925).
+    if let Ok(notif) = unsafe { CreatePopupMenu() } {
+        let notif_off = !st.enable_notifications;
+        append_item(
+            notif,
+            IDM_TRAY_ENABLENOTIFICATIONS_CHK,
+            &t!("rc_notifications.enable"),
+            st.enable_notifications,
+            false,
         );
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            IDM_TRAY_START as usize,
-            PCWSTR(toggle_label.as_ptr()),
+        append_sep(notif);
+        append_item(
+            notif,
+            IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK,
+            &t!("rc_notifications.sound"),
+            st.notification_sound,
+            notif_off,
         );
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            IDM_SETTINGS as usize,
-            PCWSTR(settings_label.as_ptr()),
+        append_item(
+            notif,
+            IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK,
+            &t!("rc_notifications.fullscreen"),
+            st.notification_fullscreen_silent,
+            notif_off || !st.notification_sound,
         );
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            IDM_EXIT as usize,
-            PCWSTR(exit_label.as_ptr()),
+        append_item(
+            notif,
+            IDM_TRAY_NOTIFICATIONONTRAY_CHK,
+            &t!("rc_notifications.on_tray"),
+            st.notification_on_tray,
+            notif_off,
         );
+        append_submenu(menu, notif, &t!("tray.notifications_title"));
     }
+
+    // Packets-log submenu.
+    if let Ok(logm) = unsafe { CreatePopupMenu() } {
+        append_item(
+            logm,
+            IDM_TRAY_ENABLELOG_CHK,
+            &t!("rc_logging.enable"),
+            st.enable_log,
+            false,
+        );
+        append_item(
+            logm,
+            IDM_TRAY_ENABLEUILOG_CHK,
+            &t!("tray.enable_ui_log"),
+            st.enable_ui_log,
+            false,
+        );
+        append_sep(logm);
+        append_item(logm, IDM_TRAY_LOGSHOW, &t!("tray.log_show"), false, false);
+        append_item(logm, IDM_TRAY_LOGCLEAR, &t!("tray.log_clear"), false, false);
+        append_submenu(menu, logm, &t!("tray.logging_title"));
+    }
+
+    // Errors-log submenu — only when the error log actually exists.
+    if st.error_log_exists {
+        if let Ok(errm) = unsafe { CreatePopupMenu() } {
+            append_item(errm, IDM_TRAY_LOGSHOW_ERR, &t!("tray.log_show"), false, false);
+            append_item(errm, IDM_TRAY_LOGCLEAR_ERR, &t!("tray.log_clear"), false, false);
+            append_submenu(menu, errm, &t!("tray.error_log_title"));
+        }
+    }
+
+    append_sep(menu);
+    append_item(menu, IDM_SETTINGS, &t!("tray.settings"), false, false);
+    append_sep(menu);
+    append_item(menu, IDM_WEBSITE, &t!("tray.website"), false, false);
+    append_item(menu, IDM_ABOUT, &t!("tray.about"), false, false);
+    append_sep(menu);
+    append_item(menu, IDM_EXIT, &t!("tray.exit"), false, false);
 
     let mut pt = POINT::default();
     unsafe {

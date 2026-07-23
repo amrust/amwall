@@ -86,8 +86,10 @@ use super::ids::{
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SIZE_EXTRALARGE, IDM_SIZE_LARGE,
     IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TIMER_15MIN, IDM_TIMER_1HR,
     IDM_TIMER_30MIN, IDM_TIMER_4HR, IDM_TOGGLE_SILENT, IDM_TOGGLE_UNDELETABLE, IDM_TRAY_ENABLELOG_CHK,
-    IDM_TRAY_ENABLENOTIFICATIONS_CHK, IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR,
-    IDM_TRAY_LOGSHOW, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_USECERTIFICATES_CHK,
+    IDM_TRAY_ENABLENOTIFICATIONS_CHK, IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK,
+    IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGCLEAR_ERR, IDM_TRAY_LOGSHOW,
+    IDM_TRAY_LOGSHOW_ERR, IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK,
+    IDM_TRAY_NOTIFICATIONONTRAY_CHK, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_USECERTIFICATES_CHK,
     IDM_USEDARKTHEME_CHK, IDM_USEHASHES_CHK, IDM_VIEW_DETAILS, IDM_VIEW_ICON, IDM_VIEW_TILE,
     IDM_WEBSITE, TAB_LISTVIEW_IDS,
 };
@@ -1257,7 +1259,20 @@ fn on_tray_message(hwnd: HWND, lparam: LPARAM) {
             super::tray::toggle_main_window(hwnd);
         }
         WM_RBUTTONUP | WM_CONTEXTMENU => {
-            super::tray::show_context_menu(hwnd, state.filters_active.get());
+            let tray_state = {
+                let s = state.app.settings.borrow();
+                super::tray::TrayMenuState {
+                    filters_active: state.filters_active.get(),
+                    enable_notifications: s.enable_notifications,
+                    notification_sound: s.notification_sound,
+                    notification_fullscreen_silent: s.notification_fullscreen_silent,
+                    notification_on_tray: s.notification_on_tray,
+                    enable_log: s.enable_log,
+                    enable_ui_log: s.enable_ui_log,
+                    error_log_exists: crate::paths::error_log_path().is_file(),
+                }
+            };
+            super::tray::show_context_menu(hwnd, &tray_state);
         }
         _ => {}
     }
@@ -3343,6 +3358,9 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         IDM_FIND => on_focus_search(hwnd),
         IDM_LOGCLEAR | IDM_TRAY_LOGCLEAR => on_log_clear(hwnd),
         IDM_TRAY_LOGSHOW => on_log_show(hwnd),
+        // Errors-log (swaplog.txt) show / clear from the tray (Fable #30).
+        IDM_TRAY_LOGSHOW_ERR => on_log_err_show(hwnd),
+        IDM_TRAY_LOGCLEAR_ERR => on_log_err_clear(hwnd),
 
         // Toggleable View / Settings menu items. Each handler
         // flips the matching field in `state.app.settings`,
@@ -3364,7 +3382,11 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         | IDM_RULE_ALLOW6TO4
         | IDM_RULE_ALLOWWINDOWSUPDATE
         | IDM_TRAY_ENABLELOG_CHK
-        | IDM_TRAY_ENABLEUILOG_CHK => on_toggle(hwnd, id),
+        | IDM_TRAY_ENABLEUILOG_CHK
+        // Tray Notifications submenu sub-toggles (Fable #30).
+        | IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK
+        | IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK
+        | IDM_TRAY_NOTIFICATIONONTRAY_CHK => on_toggle(hwnd, id),
 
         IDM_TRAY_START => on_enable_filters(hwnd),
         IDM_TRAY_SHOW => super::tray::toggle_main_window(hwnd),
@@ -4872,6 +4894,14 @@ fn on_toggle(hwnd: HWND, id: u16) {
             // Fable sweep finding #26 (were dead -- hit the catchall).
             IDM_TRAY_ENABLELOG_CHK => &mut s.enable_log,
             IDM_TRAY_ENABLEUILOG_CHK => &mut s.enable_ui_log,
+            // Tray Notifications submenu sub-toggles (Fable #30). No
+            // visual side-effect arm needed: the tray menu is rebuilt
+            // per right-click, so the new check state is read at build
+            // time (set_menu_check targets the persistent menu bar and
+            // is a harmless no-op for these tray-only ids).
+            IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK => &mut s.notification_sound,
+            IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK => &mut s.notification_fullscreen_silent,
+            IDM_TRAY_NOTIFICATIONONTRAY_CHK => &mut s.notification_on_tray,
             _ => return,
         };
         *field = !*field;
@@ -6376,6 +6406,80 @@ fn on_log_show(hwnd: HWND) {
             0,
             "Failed to launch log viewer (check Settings → Logging).",
         );
+    }
+}
+
+/// Tray Errors-log "Show log" (Fable #30). Opens the error log —
+/// `swaplog.txt`, amwall's stderr sink — with the OS default handler.
+/// The submenu is only shown when the file exists, so this is normally
+/// reachable only when there's something to show. Mirrors upstream's
+/// `_app_command_logerrshow` (main.c:3628).
+fn on_log_err_show(hwnd: HWND) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let path = crate::paths::error_log_path();
+    if !path.is_file() {
+        set_status_text(state.status.get(), 0, "Error log not found.");
+        return;
+    }
+    let path_w = wide(&path.display().to_string());
+    let result = unsafe {
+        ShellExecuteW(
+            hwnd,
+            w!("open"),
+            PCWSTR(path_w.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if (result.0 as isize) <= 32 {
+        set_status_text(state.status.get(), 0, "Failed to open the error log.");
+    }
+}
+
+/// Tray Errors-log "Clear log" (Fable #30). Truncates `swaplog.txt` in
+/// place (best-effort — it may be held open by an external stderr
+/// redirect). Honors the confirm_log_clear preference, matching
+/// `on_log_clear`. Mirrors upstream's `_app_command_logerrclear`
+/// (main.c:3634).
+fn on_log_err_clear(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
+    };
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let path = crate::paths::error_log_path();
+    if !path.is_file() {
+        return;
+    }
+    if state.app.settings.borrow().confirm_log_clear {
+        let body = wide(&t!("message.clear_log_body"));
+        let title = wide(&t!("dialog.clear_log"));
+        let answer = unsafe {
+            MessageBoxW(
+                hwnd,
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+            )
+        };
+        if answer != IDYES {
+            return;
+        }
+    }
+    match std::fs::write(&path, b"") {
+        Ok(()) => set_status_text(state.status.get(), 0, &t!("status.log_cleared")),
+        Err(e) => {
+            eprintln!("amwall: failed to clear error log {}: {e}", path.display());
+            set_status_text(state.status.get(), 0, "Failed to clear the error log.");
+        }
     }
 }
 
