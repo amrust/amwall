@@ -25,16 +25,25 @@
 use std::cell::RefCell;
 use std::mem::size_of;
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
+use windows::Win32::UI::Controls::Dialogs::{
+    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW,
+};
 use windows::Win32::UI::Controls::{
-    BST_CHECKED, BST_UNCHECKED, NMHDR, PROPSHEETHEADERW_V2, PROPSHEETPAGEW, PSH_NOAPPLYNOW,
+    BST_CHECKED, BST_UNCHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NEWFONT,
+    CDRF_NOTIFYITEMDRAW, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCOLUMNW,
+    LVIF_STATE, LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMSTATE, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_REDRAWITEMS, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, NM_CUSTOMDRAW, NM_DBLCLK,
+    NMHDR, NMITEMACTIVATE, NMLVCUSTOMDRAW, PROPSHEETHEADERW_V2, PROPSHEETPAGEW, PSH_NOAPPLYNOW,
     PSH_NOCONTEXTHELP, PSH_PROPSHEETPAGE, PSP_DEFAULT, PSP_USETITLE, PropertySheetW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, DLGPROC, DWLP_MSGRESULT, GWLP_USERDATA, GetWindowLongPtrW,
-    SendDlgItemMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_INITDIALOG, WM_NOTIFY,
+    BM_GETCHECK, BM_SETCHECK, DLGPROC, DWLP_MSGRESULT, GWLP_USERDATA, GetDlgItem,
+    GetWindowLongPtrW, SendDlgItemMessageW, SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX,
+    WM_INITDIALOG, WM_NOTIFY,
 };
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, PWSTR};
 
 use rust_i18n::t;
 
@@ -130,6 +139,7 @@ const IDC_GRP_LANGUAGE: i32 = 727;
 const IDC_LBL_SELECT_LANGUAGE: i32 = 728;
 const IDC_GRP_CONFIRMATIONS: i32 = 735;
 const IDC_GRP_TRAYICON: i32 = 736;
+const IDC_COLORS: i32 = 740;
 const IDC_GRP_HIGHLIGHTING: i32 = 741;
 const IDC_LBL_HIGHLIGHT_HINT: i32 = 742;
 const IDC_GRP_CONNECTIONS: i32 = 900;
@@ -539,6 +549,80 @@ unsafe extern "system" fn interface_proc(
     }
 }
 
+// ---- Highlighting page: the 7 row-color categories (Fable #31) ----
+//
+// Order matches upstream's _app_addcolor calls (main.c:2116-2122) and
+// the row order in the IDC_COLORS listview: row index == category index.
+const HIGHLIGHT_LABELS: [&str; 7] = [
+    "rc_highlight.invalid",
+    "rc_highlight.special",
+    "rc_highlight.signed",
+    "rc_highlight.pico",
+    "rc_highlight.system",
+    "rc_highlight.connection",
+    "rc_highlight.undelete",
+];
+
+/// The current (result) color for category `idx`, packed COLORREF.
+fn highlight_color(s: &Settings, idx: usize) -> u32 {
+    match idx {
+        0 => s.color_invalid,
+        1 => s.color_special,
+        2 => s.color_signed,
+        3 => s.color_pico,
+        4 => s.color_system,
+        5 => s.color_connection,
+        6 => s.color_undelete,
+        _ => 0,
+    }
+}
+
+fn set_highlight_color(s: &mut Settings, idx: usize, c: u32) {
+    match idx {
+        0 => s.color_invalid = c,
+        1 => s.color_special = c,
+        2 => s.color_signed = c,
+        3 => s.color_pico = c,
+        4 => s.color_system = c,
+        5 => s.color_connection = c,
+        6 => s.color_undelete = c,
+        _ => {}
+    }
+}
+
+fn highlight_enabled(s: &Settings, idx: usize) -> bool {
+    match idx {
+        0 => s.highlight_invalid,
+        1 => s.highlight_special,
+        2 => s.highlight_signed,
+        3 => s.highlight_pico,
+        4 => s.highlight_system,
+        5 => s.highlight_connection,
+        6 => s.highlight_undelete,
+        _ => false,
+    }
+}
+
+fn set_highlight_enabled(s: &mut Settings, idx: usize, on: bool) {
+    match idx {
+        0 => s.highlight_invalid = on,
+        1 => s.highlight_special = on,
+        2 => s.highlight_signed = on,
+        3 => s.highlight_pico = on,
+        4 => s.highlight_system = on,
+        5 => s.highlight_connection = on,
+        6 => s.highlight_undelete = on,
+        _ => {}
+    }
+}
+
+/// The Highlighting page. A checkbox-listview (IDC_COLORS) lists the 7
+/// categories; the checkbox toggles the category's enable flag and a
+/// double-click opens ChooseColorW to recolor it. Each row paints in
+/// its own color via NM_CUSTOMDRAW so the user sees a live swatch.
+/// Enables are read back on PSN_APPLY; colors are written live into
+/// `result` by the picker (discarded wholesale on Cancel). Mirrors
+/// upstream main.c:672-718 / 1276-1361 / messages.c:1081-1088.
 unsafe extern "system" fn highlighting_proc(
     hwnd: HWND,
     msg: u32,
@@ -547,19 +631,180 @@ unsafe extern "system" fn highlighting_proc(
 ) -> isize {
     match msg {
         WM_INITDIALOG => {
-            // Color editing UI lands in M5.9 polish; the page renders
-            // for layout parity with upstream but the listview stays
-            // empty for now. Still install_state so PSN_APPLY (no-op
-            // here) finds the pointer.
-            let _ = unsafe { install_state(hwnd, lparam) };
-
-            set_text(hwnd, IDC_GRP_HIGHLIGHTING, "rc_highlight.group");
-            set_text(hwnd, IDC_LBL_HIGHLIGHT_HINT, "rc_highlight.hint");
+            if let Some(state) = unsafe { install_state(hwnd, lparam) } {
+                set_text(hwnd, IDC_GRP_HIGHLIGHTING, "rc_highlight.group");
+                set_text(hwnd, IDC_LBL_HIGHLIGHT_HINT, "rc_highlight.hint");
+                let lv = unsafe { GetDlgItem(hwnd, IDC_COLORS) };
+                if lv.0 != 0 {
+                    unsafe {
+                        SendMessageW(
+                            lv,
+                            LVM_SETEXTENDEDLISTVIEWSTYLE,
+                            WPARAM(0),
+                            LPARAM(
+                                (LVS_EX_CHECKBOXES
+                                    | LVS_EX_DOUBLEBUFFER
+                                    | LVS_EX_FULLROWSELECT)
+                                    as isize,
+                            ),
+                        );
+                    }
+                    // Single full-width, header-less column.
+                    let mut colbuf = wide("");
+                    let col = LVCOLUMNW {
+                        mask: LVCF_TEXT | LVCF_WIDTH,
+                        fmt: LVCFMT_LEFT,
+                        cx: 320,
+                        pszText: PWSTR(colbuf.as_mut_ptr()),
+                        ..Default::default()
+                    };
+                    unsafe {
+                        SendMessageW(
+                            lv,
+                            LVM_INSERTCOLUMNW,
+                            WPARAM(0),
+                            LPARAM(&col as *const _ as isize),
+                        );
+                    }
+                    let s = &state.initial;
+                    for (idx, key) in HIGHLIGHT_LABELS.iter().enumerate() {
+                        let mut text = wide(&t!(*key));
+                        let state_image = if highlight_enabled(s, idx) { 2u32 } else { 1u32 };
+                        let item = LVITEMW {
+                            mask: LVIF_TEXT | LVIF_STATE,
+                            iItem: idx as i32,
+                            iSubItem: 0,
+                            pszText: PWSTR(text.as_mut_ptr()),
+                            stateMask: LVIS_STATEIMAGEMASK,
+                            state: LIST_VIEW_ITEM_STATE_FLAGS(state_image << 12),
+                            ..Default::default()
+                        };
+                        unsafe {
+                            SendMessageW(
+                                lv,
+                                LVM_INSERTITEMW,
+                                WPARAM(0),
+                                LPARAM(&item as *const _ as isize),
+                            );
+                        }
+                    }
+                }
+            }
             1
         }
         WM_NOTIFY if is_psn_apply(lparam) => {
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                let lv = unsafe { GetDlgItem(hwnd, IDC_COLORS) };
+                if lv.0 != 0 {
+                    let mut s = state.result.borrow_mut();
+                    for idx in 0..HIGHLIGHT_LABELS.len() {
+                        let st = unsafe {
+                            SendMessageW(
+                                lv,
+                                LVM_GETITEMSTATE,
+                                WPARAM(idx),
+                                LPARAM(LVIS_STATEIMAGEMASK.0 as isize),
+                            )
+                        }
+                        .0 as u32;
+                        set_highlight_enabled(&mut s, idx, ((st >> 12) & 0xF) == 2);
+                    }
+                }
+            }
             unsafe { accept_apply(hwnd) };
             1
+        }
+        WM_NOTIFY => {
+            let nmhdr = unsafe { &*(lparam.0 as *const NMHDR) };
+            if nmhdr.idFrom != IDC_COLORS as usize {
+                return 0;
+            }
+            match nmhdr.code {
+                // Paint each row in its category's current color so the
+                // listview doubles as a live swatch (messages.c:1081-1088).
+                NM_CUSTOMDRAW => {
+                    let nmlv = unsafe { &mut *(lparam.0 as *mut NMLVCUSTOMDRAW) };
+                    let cdrf = match nmlv.nmcd.dwDrawStage {
+                        x if x == CDDS_PREPAINT => CDRF_NOTIFYITEMDRAW,
+                        x if x == CDDS_ITEMPREPAINT => {
+                            let row = nmlv.nmcd.dwItemSpec;
+                            if let Some(state) = unsafe { state_ref(hwnd) } {
+                                if row < HIGHLIGHT_LABELS.len() {
+                                    let c = highlight_color(&state.result.borrow(), row);
+                                    nmlv.clrTextBk = COLORREF(c);
+                                    CDRF_NEWFONT
+                                } else {
+                                    CDRF_DODEFAULT
+                                }
+                            } else {
+                                CDRF_DODEFAULT
+                            }
+                        }
+                        _ => CDRF_DODEFAULT,
+                    };
+                    unsafe {
+                        SetWindowLongPtrW(
+                            hwnd,
+                            WINDOW_LONG_PTR_INDEX(DWLP_MSGRESULT as i32),
+                            cdrf as isize,
+                        );
+                    }
+                    1
+                }
+                // Double-click a row → pick a new color for that category.
+                NM_DBLCLK => {
+                    let nmia = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
+                    let row = nmia.iItem;
+                    if row < 0 || row as usize >= HIGHLIGHT_LABELS.len() {
+                        return 0;
+                    }
+                    let row = row as usize;
+                    let Some(state) = (unsafe { state_ref(hwnd) }) else {
+                        return 0;
+                    };
+                    // Read the current color WITHOUT holding the borrow
+                    // across the modal ChooseColorW (which pumps messages
+                    // and would re-enter our NM_CUSTOMDRAW borrow()).
+                    let current = highlight_color(&state.result.borrow(), row);
+                    // Custom-color palette seeded with the 7 defaults so
+                    // the user can restore any category's stock color.
+                    let defaults = Settings::default();
+                    let mut custom: [COLORREF; 16] = [COLORREF(0); 16];
+                    for (i, slot) in custom
+                        .iter_mut()
+                        .take(HIGHLIGHT_LABELS.len())
+                        .enumerate()
+                    {
+                        *slot = COLORREF(highlight_color(&defaults, i));
+                    }
+                    let mut cc = CHOOSECOLORW {
+                        lStructSize: size_of::<CHOOSECOLORW>() as u32,
+                        hwndOwner: hwnd,
+                        rgbResult: COLORREF(current),
+                        lpCustColors: custom.as_mut_ptr(),
+                        Flags: CC_RGBINIT | CC_FULLOPEN,
+                        ..Default::default()
+                    };
+                    let picked = unsafe { ChooseColorW(&mut cc) }.as_bool();
+                    if picked {
+                        let new = cc.rgbResult.0 & 0x00FF_FFFF;
+                        set_highlight_color(&mut state.result.borrow_mut(), row, new);
+                        let lv = unsafe { GetDlgItem(hwnd, IDC_COLORS) };
+                        if lv.0 != 0 {
+                            unsafe {
+                                SendMessageW(
+                                    lv,
+                                    LVM_REDRAWITEMS,
+                                    WPARAM(row),
+                                    LPARAM(row as isize),
+                                );
+                            }
+                        }
+                    }
+                    1
+                }
+                _ => 0,
+            }
         }
         _ => 0,
     }

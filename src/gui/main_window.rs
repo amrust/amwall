@@ -837,11 +837,11 @@ unsafe extern "system" fn wnd_proc(
             }
             // NM_CUSTOMDRAW on the Apps tabs — pick a row
             // background color per upstream simplewall's
-            // highlighting scheme (Invalid / System / Signed
-            // / etc.). Only Invalid + System wired here; the
-            // others need extra checks (signed = WinVerifyTrust,
-            // pico = process-type detection) that aren't in
-            // scope yet.
+            // highlighting scheme. pick_app_row_color drives all
+            // categories from the (Fable #31) Highlighting settings
+            // page: Invalid / Connection / Signed / Undelete / System
+            // are live; Pico is reserved (not path-detectable) and
+            // Special applies only to Rules/Net/Log rows (not colorized).
             if nmhdr.code == NM_CUSTOMDRAW
                 && (nmhdr.idFrom == IDC_APPS_PROFILE as usize
                     || nmhdr.idFrom == IDC_APPS_SERVICE as usize
@@ -3661,53 +3661,67 @@ fn find_listview(slot: usize) -> Option<HWND> {
     Some(state.listviews[slot].get())
 }
 
-/// Pick a row color following upstream's `_app_getappcolor` priority:
-///   - Invalid: file doesn't exist on disk → pinkish red.
-///     Imported simplewall profiles often carry references to
-///     apps the user has uninstalled.
-///   - Connection: an active TCP / UDP endpoint right now → pink.
-///     Surfaces "what's chatting at this moment".
-///   - Signed: passes `WinVerifyTrust` → pale green. Marks
-///     properly-signed binaries — hint that they're more
-///     trustworthy than unsigned third-party ones.
-///   - Pico: WSL / Linux subsystem process → blue. Detection
-///     would need per-process inspection (path-only
-///     classification doesn't work — every Pico process is
-///     spawned from `wsl.exe` / `wslhost.exe`), so the
-///     code path's there but always returns `false`. Reserved
-///     so the priority order matches upstream.
-///   - System: path under `C:\Windows\` → pastel blue. OS-bundled
-///     binaries vs user-installed apps.
+/// Pick a row color following upstream's `_app_getappcolor` priority
+/// ladder (profile.c:714-795), first match wins. Every category is now
+/// gated on its per-category enable flag and reads its color from
+/// `Settings` (Fable #31 — was hard-coded and un-gated). Order:
+///   1. Invalid   — file doesn't exist on disk (uninstalled app).
+///   2. Connection — an active TCP/UDP endpoint right now.
+///   3. Signed    — passes `WinVerifyTrust` (cached).
+///   4. Pico      — WSL/Linux subsystem process. Detection isn't
+///      path-driven (every Pico process spawns from `wsl.exe`), so this
+///      step is reserved — `is_pico` always returns false today.
+///   5. Undelete  — a "Prevent removal" (is_undeletable) app.
+///   6. System    — OS-bundled binary under `C:\Windows\`.
 ///
-/// First match wins; default returns `None` for the listview's
-/// default background.
+/// The `Special` (User rules) category is intentionally NOT applied
+/// here: upstream gates it on `!is_profilelist`, i.e. it colors only
+/// Network / Log / Rules rows, which amwall does not yet colorize (no
+/// NM_CUSTOMDRAW is wired for those tabs). First match wins; `None`
+/// leaves the listview's default background.
 fn pick_app_row_color(
     path: &std::path::Path,
     state: &WndState,
 ) -> Option<windows::Win32::Foundation::COLORREF> {
     use windows::Win32::Foundation::COLORREF;
+    let s = state.app.settings.borrow();
     // 1. Invalid (path doesn't exist on disk).
-    if !path.as_os_str().is_empty() && !path.is_file() {
-        return Some(COLORREF(rgb_packed(255, 125, 148)));
+    if s.highlight_invalid && !path.as_os_str().is_empty() && !path.is_file() {
+        return Some(COLORREF(s.color_invalid));
     }
     // 2. Active connection — refreshed by populate_apps_tab.
-    if state.connected_paths.borrow().contains(path) {
-        return Some(COLORREF(rgb_packed(255, 168, 242)));
+    if s.highlight_connection && state.connected_paths.borrow().contains(path) {
+        return Some(COLORREF(s.color_connection));
     }
     // 3. Signed (cached — first paint slow, subsequent fast).
-    if path_is_signed_cached(state, path) {
-        return Some(COLORREF(rgb_packed(175, 228, 163)));
+    if s.highlight_signed && path_is_signed_cached(state, path) {
+        return Some(COLORREF(s.color_signed));
     }
-    // 4. Pico — reserved; detection isn't path-driven so it
-    //    always returns false today.
-    if is_pico(path) {
-        return Some(COLORREF(rgb_packed(51, 153, 255)));
+    // 4. Pico — reserved; detection isn't path-driven (always false).
+    if s.highlight_pico && is_pico(path) {
+        return Some(COLORREF(s.color_pico));
     }
-    // 5. System (Windows-bundled binaries).
-    if let Some(s) = path.to_str() {
-        let lower = s.to_lowercase();
-        if lower.starts_with(r"c:\windows\") {
-            return Some(COLORREF(rgb_packed(220, 232, 250)));
+    // 5. Undelete — app flagged "Prevent removal". Looked up by exact
+    //    path (profile-tab rows key on app.path; service/UWP rows don't
+    //    match a path-keyed entry, so they stay uncolored — parity with
+    //    upstream, which gates Undelete on ptr_app->is_undeletable).
+    if s.highlight_undelete
+        && state
+            .app
+            .profile
+            .borrow()
+            .apps
+            .iter()
+            .any(|a| a.is_undeletable && a.path == path)
+    {
+        return Some(COLORREF(s.color_undelete));
+    }
+    // 6. System (Windows-bundled binaries).
+    if s.highlight_system {
+        if let Some(txt) = path.to_str() {
+            if txt.to_lowercase().starts_with(r"c:\windows\") {
+                return Some(COLORREF(s.color_system));
+            }
         }
     }
     None
@@ -3934,12 +3948,6 @@ fn verify_signature(
 /// without surfacing the (always-empty) blue.
 fn is_pico(_path: &std::path::Path) -> bool {
     false
-}
-
-/// Pack RGB to a Win32 COLORREF (0x00BBGGRR). Standard helper —
-/// inlined here to avoid pulling another module.
-fn rgb_packed(r: u8, g: u8, b: u8) -> u32 {
-    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
 /// User clicked a column header on the Apps Profile listview.
@@ -5582,6 +5590,11 @@ fn on_open_settings(hwnd: HWND) {
     }
 
     apply_initial_settings(hwnd, state);
+    // Highlighting colors / enables may have changed — force the active
+    // Apps listview to repaint so new row colors apply immediately
+    // instead of only after the next populate (Fable #31). The jiggle
+    // is what reliably pierces LVS_EX_DOUBLEBUFFER's cached surface.
+    force_active_apps_listview_jiggle(hwnd, state);
 }
 
 fn restart_self() {

@@ -213,6 +213,27 @@ pub struct Settings {
     /// connect prompt is skipped.
     pub auto_allow_microsoft_signed: bool,
 
+    // ---- Settings → Highlighting (row colors, Fable #31) ----
+    // Per-category enable flags + packed COLORREF colors, mirroring
+    // upstream's [colors] INI section (IsHighlight* / Color* keys,
+    // main.c:2116-2122). All enables default TRUE like upstream. The
+    // colorizer (main_window::pick_app_row_color) gates each category on
+    // its enable flag and reads the color from here.
+    pub highlight_invalid: bool,
+    pub highlight_special: bool,
+    pub highlight_signed: bool,
+    pub highlight_pico: bool,
+    pub highlight_system: bool,
+    pub highlight_connection: bool,
+    pub highlight_undelete: bool,
+    pub color_invalid: u32,
+    pub color_special: u32,
+    pub color_signed: u32,
+    pub color_pico: u32,
+    pub color_system: u32,
+    pub color_connection: u32,
+    pub color_undelete: u32,
+
     // ---- Settings → Blocklist (tri-state radio groups) ----
     pub blocklist_spy: BlocklistMode,
     pub blocklist_update: BlocklistMode,
@@ -254,6 +275,14 @@ pub struct Settings {
     /// the user picked Import or Start fresh). Prevents the
     /// wizard from re-showing on every launch.
     pub first_run_done: bool,
+}
+
+/// Pack an (r, g, b) triple into a Win32 COLORREF (0x00BBGGRR). Matches
+/// GDI's byte order, so a stored value drops straight into `clrTextBk`
+/// and is interchangeable with `ChooseColorW`'s `rgbResult` — no
+/// byte-swap anywhere. (Fable #31.)
+pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
+    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
 impl Default for Settings {
@@ -309,6 +338,22 @@ impl Default for Settings {
             // reason most users install simplewall in the first place);
             // Update = Disable (most users want Windows Update to
             // work); Extra = Disable (Microsoft Apps blocks).
+            // Highlighting (Fable #31): all categories on by default,
+            // colors = upstream's LV_COLOR_* defaults (main.h:163-169).
+            highlight_invalid: true,
+            highlight_special: true,
+            highlight_signed: true,
+            highlight_pico: true,
+            highlight_system: true,
+            highlight_connection: true,
+            highlight_undelete: true,
+            color_invalid: rgb(255, 125, 148),
+            color_special: rgb(255, 255, 170),
+            color_signed: rgb(175, 228, 163),
+            color_pico: rgb(51, 153, 255),
+            color_system: rgb(151, 196, 251),
+            color_connection: rgb(255, 168, 242),
+            color_undelete: rgb(211, 211, 211),
             blocklist_spy: BlocklistMode::Block,
             blocklist_update: BlocklistMode::Disable,
             blocklist_extra: BlocklistMode::Disable,
@@ -463,6 +508,20 @@ impl Settings {
             "auto_allow_microsoft_signed",
             self.auto_allow_microsoft_signed,
         );
+        kv(&mut buf, "highlight_invalid", self.highlight_invalid);
+        kv(&mut buf, "highlight_special", self.highlight_special);
+        kv(&mut buf, "highlight_signed", self.highlight_signed);
+        kv(&mut buf, "highlight_pico", self.highlight_pico);
+        kv(&mut buf, "highlight_system", self.highlight_system);
+        kv(&mut buf, "highlight_connection", self.highlight_connection);
+        kv(&mut buf, "highlight_undelete", self.highlight_undelete);
+        kv_u32(&mut buf, "color_invalid", self.color_invalid);
+        kv_u32(&mut buf, "color_special", self.color_special);
+        kv_u32(&mut buf, "color_signed", self.color_signed);
+        kv_u32(&mut buf, "color_pico", self.color_pico);
+        kv_u32(&mut buf, "color_system", self.color_system);
+        kv_u32(&mut buf, "color_connection", self.color_connection);
+        kv_u32(&mut buf, "color_undelete", self.color_undelete);
         kv_str(&mut buf, "blocklist_spy", self.blocklist_spy.as_str());
         kv_str(&mut buf, "blocklist_update", self.blocklist_update.as_str());
         kv_str(&mut buf, "blocklist_extra", self.blocklist_extra.as_str());
@@ -581,6 +640,50 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
             }
             return;
         }
+        // Highlighting colors (Fable #31): packed COLORREF u32, stored
+        // decimal. Parse permissively — a bad value keeps the default.
+        "color_invalid" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.color_invalid = n;
+            }
+            return;
+        }
+        "color_special" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.color_special = n;
+            }
+            return;
+        }
+        "color_signed" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.color_signed = n;
+            }
+            return;
+        }
+        "color_pico" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.color_pico = n;
+            }
+            return;
+        }
+        "color_system" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.color_system = n;
+            }
+            return;
+        }
+        "color_connection" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.color_connection = n;
+            }
+            return;
+        }
+        "color_undelete" => {
+            if let Ok(n) = value.parse::<u32>() {
+                s.color_undelete = n;
+            }
+            return;
+        }
         _ => {}
     }
     let b = match parse_bool(value) {
@@ -617,6 +720,13 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
         "use_hashes" => s.use_hashes = b,
         "use_network_resolution" => s.use_network_resolution = b,
         "auto_allow_microsoft_signed" => s.auto_allow_microsoft_signed = b,
+        "highlight_invalid" => s.highlight_invalid = b,
+        "highlight_special" => s.highlight_special = b,
+        "highlight_signed" => s.highlight_signed = b,
+        "highlight_pico" => s.highlight_pico = b,
+        "highlight_system" => s.highlight_system = b,
+        "highlight_connection" => s.highlight_connection = b,
+        "highlight_undelete" => s.highlight_undelete = b,
         "enable_notifications" => s.enable_notifications = b,
         "notification_sound" => s.notification_sound = b,
         "notification_fullscreen_silent" => s.notification_fullscreen_silent = b,
@@ -778,6 +888,37 @@ mod tests {
         assert_eq!(loaded.notification_x, -1024);
         assert_eq!(loaded.notification_y, -50);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn highlight_defaults_match_upstream_and_round_trip() {
+        // Defaults: all categories on, upstream LV_COLOR_* colors
+        // (main.h:163-169) packed as COLORREF 0x00BBGGRR. The v1.1.17
+        // System color was a parity bug (220,232,250); it is now
+        // (151,196,251).
+        let d = Settings::default();
+        assert!(d.highlight_invalid && d.highlight_system && d.highlight_undelete);
+        assert_eq!(d.color_system, rgb(151, 196, 251));
+        assert_eq!(d.color_invalid, rgb(255, 125, 148));
+        assert_eq!(d.color_undelete, rgb(211, 211, 211));
+
+        let dir = std::env::temp_dir().join("amwall-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("settings_highlight.txt");
+        let _ = std::fs::remove_file(&path);
+        let s = Settings {
+            highlight_signed: false,
+            color_signed: rgb(1, 2, 3),
+            color_pico: 0x00AABBCC,
+            ..Settings::default()
+        };
+        s.save(&path).expect("save should succeed");
+        let loaded = Settings::load(&path);
+        assert!(!loaded.highlight_signed);
+        assert_eq!(loaded.color_signed, rgb(1, 2, 3));
+        assert_eq!(loaded.color_pico, 0x00AABBCC);
+        assert_eq!(loaded, s);
         let _ = std::fs::remove_file(&path);
     }
 

@@ -227,6 +227,23 @@ properties = "Properties\tEnter"
 remove_from_profile = "Remove from profile\tDel"
 explore = "Explore (open folder)\tCtrl+E"
 copy = "Copy name\tCtrl+C"
+# --- Additional listview context commands (Fable #27/#28/#33) ---
+add = "Add..."
+edit = "Edit...\tEnter"
+delete = "Delete\tDel"
+check = "Check"
+uncheck = "Uncheck"
+select_all = "Select all\tCtrl+A"
+copy_row = "Copy\tCtrl+C"
+copy_value = "Copy \"%{value}\""
+show_in_list = "Show in list\tEnter"
+create_rule = "Create rule..."
+close_connection = "Close connection"
+clear_log = "Clear log\tCtrl+X"
+rules_submenu = "Rules"
+apply_rule = "Apply \"%{name}\" for this app"
+rules_empty = "Empty."
+disable_timer = "Disable timer"
 
 # --- Tray menu ---
 [tray]
@@ -235,6 +252,16 @@ enable_filters = "Enable filters"
 disable_filters = "Disable filters"
 settings = "Settings..."
 exit = "Exit amwall"
+# Submenu titles + extra items for the full tray menu (Fable #30).
+# Toggle labels are reused from [rc_notifications] / [rc_logging].
+notifications_title = "Notifications"
+logging_title = "Packets log"
+error_log_title = "Errors log"
+enable_ui_log = "Enable packets logging interface (session only)"
+log_show = "Show log"
+log_clear = "Clear log"
+website = "Website"
+about = "About"
 
 # --- First-run wizard ---
 [wizard]
@@ -322,6 +349,15 @@ tray_single_click = "Single click on tray icon to open"
 [rc_highlight]
 group = "Highlighting"
 hint = "Double-click an item to change it."
+# The 7 row-color categories (Fable #31), verbatim from upstream
+# simplewall resource.rc (IDS_HIGHLIGHT_*), in _app_addcolor order.
+invalid = "Invalid (file not found or filter problem)"
+special = "User rules"
+signed = "Signed app"
+pico = "Pico app"
+system = "System app"
+connection = "Have network connections"
+undelete = "Disable removal"
 
 # --- Settings page: Rules ---
 [rc_rules]

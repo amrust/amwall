@@ -145,6 +145,14 @@ pub const IDM_EMERGENCY_RESET: u16 = 304;
 // notifications" set.
 pub const IDM_TRAY_START: u16 = 305;
 pub const IDM_TRAY_ENABLENOTIFICATIONS_CHK: u16 = 306;
+// Notification sub-toggles (Fable #30 tray rebuild). 307-309 sit in the
+// gap between upstream's IDM_TRAY_ENABLENOTIFICATIONS_CHK (306) and
+// IDM_TRAY_ENABLELOG_CHK (310) — the exact slots upstream uses
+// (resource.h:266-282), free in amwall. Toggle notification_sound /
+// notification_fullscreen_silent / notification_on_tray from the tray.
+pub const IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK: u16 = 307;
+pub const IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK: u16 = 308;
+pub const IDM_TRAY_NOTIFICATIONONTRAY_CHK: u16 = 309;
 pub const IDM_TRAY_ENABLELOG_CHK: u16 = 310;
 pub const IDM_TRAY_ENABLEUILOG_CHK: u16 = 311;
 pub const IDM_TRAY_LOGSHOW: u16 = 312;
@@ -157,6 +165,25 @@ pub const IDM_TRAY_SHOW: u16 = 314;
 
 // Listview-context-menu IDM upstream uses for "Create rule".
 pub const IDM_OPENRULESEDITOR: u16 = 323;
+
+// ---- shared listview-command block (Fable #27/#28/#33) ----
+//
+// Upstream packs the listview commands into a contiguous 320-335 block
+// (resource.h:285-302) dispatched against whichever listview has focus.
+// amwall reuses the same numeric values (all free here except 323) so
+// the code reviews 1:1 against the C. Each context menu re-dispatches
+// these locally within its own tab-aware handler, so the same id can
+// serve the Apps / Rules / Network / Log menus without collision; the
+// keyboard-accelerator path resolves the focused tab in on_command.
+pub const IDM_COPY_VALUE: u16 = 325; // copy the single clicked column
+pub const IDM_CHECK: u16 = 326; // "Enable selected" (bulk enable)
+pub const IDM_UNCHECK: u16 = 327; // "Disable selected" (bulk disable)
+pub const IDM_DELETE: u16 = 328; // unified delete (Del accelerator, tab-dispatched)
+pub const IDM_DISABLETIMER: u16 = 329; // clear a per-app timer
+pub const IDM_SELECT_ALL: u16 = 332; // select every row (Ctrl+A)
+pub const IDM_ZOOM: u16 = 333; // maximize/restore the window (F11)
+pub const IDM_TAB_NEXT: u16 = 334; // Ctrl+Tab
+pub const IDM_TAB_PREV: u16 = 335; // Ctrl+Shift+Tab
 
 // ---- listview right-click context menu (M5.4c) ----
 //
@@ -185,3 +212,26 @@ pub const IDM_TIMER_4HR: u16 = 359;
 // flips App.is_undeletable (skipped by Purge / manual delete).
 pub const IDM_TOGGLE_SILENT: u16 = 362;
 pub const IDM_TOGGLE_UNDELETABLE: u16 = 363;
+
+// ---- amwall-extension listview / tray commands (Fable #27/#30) ----
+//
+// 364+ is unallocated by both upstream and amwall. Upstream overloads
+// IDM_PROPERTIES/IDM_DELETE for the Network/Log "Show in list" / "Close
+// connection" verbs (dispatched by focused tab); amwall gives them
+// dedicated ids for a cleaner, tab-local dispatch. The errors-log pair
+// can't take upstream's 314/315 (314 is amwall's IDM_TRAY_SHOW), so
+// they live here too.
+pub const IDM_SHOW_IN_LIST: u16 = 364; // Network/Log "Show in list" — jump to the app row
+pub const IDM_CLOSE_CONNECTION: u16 = 365; // Network "Close connection" (IPv4 established TCP only)
+pub const IDM_TRAY_LOGSHOW_ERR: u16 = 366; // errors-log (swaplog.txt) "Show log"
+pub const IDM_TRAY_LOGCLEAR_ERR: u16 = 367; // errors-log (swaplog.txt) "Clear log"
+
+// ---- Apps "Rules" submenu, per-rule commands (Fable #28) ----
+//
+// The apps context menu's "Rules" submenu lists togglable rules, one
+// command id per rule. Upstream bases this range at IDX_RULES_SPECIAL
+// (1400, main.h) and range-checks it before the WM_COMMAND switch.
+// amwall mirrors the base; the span caps how many rules the submenu can
+// address (matches upstream's practical cap).
+pub const IDM_CONTEXT_RULE_FIRST: u16 = 1400;
+pub const IDM_CONTEXT_RULE_LAST: u16 = 1655;
