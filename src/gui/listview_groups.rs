@@ -30,9 +30,9 @@ use crate::profile::{App, Rule};
 //
 // Apps tabs (slots 0..=2) — modelled after upstream's
 // IDS_GROUP_ALLOWED / TIMER / SPECIAL / BLOCKED / BLOCKED (silent).
-// `Special` is a placeholder for now (amwall doesn't yet flag
-// system-managed apps); items never resolve to it but we reserve
-// the id so the visual layout matches upstream.
+// `Special` = "Apps with user rules": an app referenced by a custom
+// rule. Assigned via `app_group_id_with(app, has_user_rule)` (Fable
+// sweep finding #32 — it used to be an unreachable placeholder).
 //
 // Win32 ListView orders groups by `iGroupId` ascending — so
 // Blocked=0 sorts to the top of the listview, with the noisy
@@ -54,8 +54,21 @@ pub const GROUP_RULE_DISABLED: i32 = 1;
 /// caller's discretion — this helper only inspects the App's own
 /// flags.
 pub fn app_group_id(app: &App) -> i32 {
+    app_group_id_with(app, false)
+}
+
+/// Like [`app_group_id`], but files an app under `GROUP_APP_SPECIAL`
+/// ("Apps with user rules") when `has_user_rule` is true — an app a custom
+/// rule references. Nothing ever resolved to SPECIAL before, so its header
+/// was permanently empty. Timer still wins (it's time-sensitive);
+/// otherwise a rule-referenced app groups as Special regardless of its
+/// enabled/blocked state. Fable sweep finding #32.
+pub fn app_group_id_with(app: &App, has_user_rule: bool) -> i32 {
     if app.timer > 0 {
         return GROUP_APP_TIMER;
+    }
+    if has_user_rule {
+        return GROUP_APP_SPECIAL;
     }
     if app.is_enabled {
         return GROUP_APP_ALLOWED;
@@ -204,6 +217,25 @@ mod tests {
     fn disabled_loud_is_blocked() {
         let app = sample_app(false, false, 0);
         assert_eq!(app_group_id(&app), GROUP_APP_BLOCKED);
+    }
+
+    #[test]
+    fn has_user_rule_is_special_but_timer_wins() {
+        // An app referenced by a user rule lands in SPECIAL...
+        assert_eq!(
+            app_group_id_with(&sample_app(true, false, 0), true),
+            GROUP_APP_SPECIAL
+        );
+        // ...unless it also has a timer, which is time-sensitive and wins.
+        assert_eq!(
+            app_group_id_with(&sample_app(true, false, 1_700_000_000), true),
+            GROUP_APP_TIMER
+        );
+        // No rule -> unchanged from app_group_id.
+        assert_eq!(
+            app_group_id_with(&sample_app(false, false, 0), false),
+            GROUP_APP_BLOCKED
+        );
     }
 
     #[test]

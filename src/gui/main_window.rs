@@ -7277,6 +7277,18 @@ fn populate_apps_tab(state: &WndState) {
     let filenames_only = state.app.settings.borrow().show_filenames_only;
     let filter = state.search_text.borrow().clone();
 
+    // Apps referenced by a custom (user) rule file under the "Apps with
+    // user rules" (SPECIAL) group. Build the referenced-path set once,
+    // case-insensitively (Windows path semantics). Fable sweep #32.
+    let referenced_by_rule: std::collections::HashSet<String> = profile
+        .custom_rules
+        .iter()
+        .filter_map(|r| r.apps.as_deref())
+        .flat_map(|apps| apps.split('|'))
+        .map(|tok| tok.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+
     // Sort the iteration order per the user's last column-click
     // (default: Added desc, so most recent activity surfaces at
     // the top of each group). The `iGroupId` we stamp per item
@@ -7356,7 +7368,10 @@ fn populate_apps_tab(state: &WndState) {
             pszText: PWSTR(name_buf.as_mut_ptr()),
             stateMask: LVIS_STATEIMAGEMASK,
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image_index << 12),
-            iGroupId: super::listview_groups::app_group_id(app),
+            iGroupId: super::listview_groups::app_group_id_with(
+                app,
+                referenced_by_rule.contains(&app.path.to_string_lossy().to_ascii_lowercase()),
+            ),
             iImage: icon_idx.max(0),
             lParam: LPARAM(orig_idx as isize),
             ..Default::default()
