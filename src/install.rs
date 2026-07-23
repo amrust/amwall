@@ -766,9 +766,15 @@ fn install_global_rules(
         }
     }
 
-    // Allow Windows Update — Permit on the svchost.exe AppPath at
-    // all four ALE layers. Coarse but matches upstream's strategy
-    // (svchost hosts wuauserv + Background Intelligent Transfer).
+    // Allow Windows Update — Permit on the svchost.exe AppPath at all
+    // four ALE layers, at weight::APP so blocklist and user Block rules
+    // (higher bands: RULE_BLOCKLIST 0x0D, RULE_USER_BLOCK 0x0C) still
+    // override it. This is an amwall convenience toggle; upstream does
+    // NOT permit svchost wholesale -- it relocates the update services
+    // into a distinct wusvc.exe image added at FW_WEIGHT_APP
+    // (helper.c:2206). Permitting all of svchost is coarse, so keeping
+    // it at APP (not HIGHEST_IMPORTANT) is what stops it from defeating
+    // the bundled telemetry blocklist.
     if cfg.allow_windows_update {
         let svchost = std::path::PathBuf::from(r"C:\Windows\System32\svchost.exe");
         if svchost.is_file() {
@@ -789,7 +795,7 @@ fn install_global_rules(
                     std::slice::from_ref(&cond),
                     FilterAction::Permit,
                     persistent,
-                    filter::weight::HIGHEST_IMPORTANT,
+                    filter::weight::APP,
                 )?;
                 ids.push(f.runtime_id());
                 count += 1;
@@ -1332,62 +1338,68 @@ fn install_one_rule(
     }
 
     let mut count = 0u32;
-    for remote in &remotes {
-        for local in &locals {
-            let layer_pairs = pick_layer_pairs(
-                rule.direction,
-                rule.address_family,
-                remote.as_ref(),
-                local.as_ref(),
-            );
-            for &(direction, family) in &layer_pairs {
-                let Some(layer) = layer_guid(direction, family) else {
-                    continue; // unsupported layer combination
-                };
+    // Pair remote and local clauses POSITIONALLY (a zip), holding the
+    // last element of the shorter list -- upstream advances both lists
+    // in lockstep in a single loop (wfp.c:1479, 1562-1569), NOT as a
+    // cross product. A cross product invents clause pairs the user never
+    // wrote (e.g. the bundled DHCP rule `rule="67-68;546-547"
+    // rule_local="67-68;546-547"` would yield 4 filters, including the
+    // never-intended 67-68/546-547 and 546-547/67-68 pairs, vs 2).
+    // Both lists are guaranteed non-empty by parse_rule_string.
+    let pair_count = remotes.len().max(locals.len());
+    for i in 0..pair_count {
+        let remote = &remotes[i.min(remotes.len() - 1)];
+        let local = &locals[i.min(locals.len() - 1)];
+        let layer_pairs = pick_layer_pairs(
+            rule.direction,
+            rule.address_family,
+            remote.as_ref(),
+            local.as_ref(),
+        );
+        for &(direction, family) in &layer_pairs {
+            let Some(layer) = layer_guid(direction, family) else {
+                continue; // unsupported layer combination
+            };
 
-                for app in &apps {
-                    let mut conds: Vec<FilterCondition> = Vec::new();
-                    if let Some(p) = rule.protocol {
-                        conds.push(FilterCondition::Protocol(IpProto::Other(p)));
-                    }
-                    if let Some(r) = remote {
-                        conds.extend(rules::compile(
-                            rules::Side::Remote,
-                            std::slice::from_ref(r),
-                        ));
-                    }
-                    if let Some(l) = local {
-                        conds.extend(rules::compile(
-                            rules::Side::Local,
-                            std::slice::from_ref(l),
-                        ));
-                    }
-                    if let Some(app_cond) = app {
-                        conds.push(app_cond.clone());
-                    }
-                    // No conditions == match-all-traffic — too
-                    // dangerous to install silently. Skip; surfaces
-                    // in `rules_skipped` (one count per rule, not
-                    // one per would-be filter).
-                    if conds.is_empty() {
-                        continue;
-                    }
-
-                    let f = filter::add(
-                        engine,
-                        &rule.name,
-                        rule.comment.as_deref().unwrap_or(""),
-                        layer,
-                        &SUBLAYER_KEY,
-                        Some(&PROVIDER_KEY),
-                        &conds,
-                        action,
-                        persistent,
-                        band, // per-rule category band (see caller)
-                    )?;
-                    ids.push(f.runtime_id());
-                    count += 1;
+            for app in &apps {
+                let mut conds: Vec<FilterCondition> = Vec::new();
+                if let Some(p) = rule.protocol {
+                    conds.push(FilterCondition::Protocol(IpProto::Other(p)));
                 }
+                if let Some(r) = remote {
+                    conds.extend(rules::compile(rules::Side::Remote, std::slice::from_ref(r)));
+                }
+                if let Some(l) = local {
+                    conds.extend(rules::compile(rules::Side::Local, std::slice::from_ref(l)));
+                }
+                if let Some(app_cond) = app {
+                    conds.push(app_cond.clone());
+                }
+                // A rule that compiles to zero conditions is match-all.
+                // Upstream installs it (wfp.c has no count==0 guard), so a
+                // migrated "block everything" USER_BLOCK rule must land as
+                // a real filter -- skipping it fails OPEN. We still skip a
+                // match-all PERMIT: that would permit all traffic at the
+                // rule's band (fail open the other way), the one genuinely
+                // dangerous case the sweep flagged.
+                if conds.is_empty() && !matches!(action, FilterAction::Block) {
+                    continue;
+                }
+
+                let f = filter::add(
+                    engine,
+                    &rule.name,
+                    rule.comment.as_deref().unwrap_or(""),
+                    layer,
+                    &SUBLAYER_KEY,
+                    Some(&PROVIDER_KEY),
+                    &conds,
+                    action,
+                    persistent,
+                    band, // per-rule category band (see caller)
+                )?;
+                ids.push(f.runtime_id());
+                count += 1;
             }
         }
     }
@@ -1608,7 +1620,14 @@ fn parse_rule_string(
                 rule_name: rule_name.to_string(),
                 source,
             })?;
-            Ok(clauses.into_iter().map(Some).collect())
+            // An empty/whitespace attribute yields no clauses; treat it
+            // as "no constraint" (one None) so callers always get a
+            // non-empty list to pair against.
+            if clauses.is_empty() {
+                Ok(vec![None])
+            } else {
+                Ok(clauses.into_iter().map(Some).collect())
+            }
         }
     }
 }
