@@ -320,6 +320,11 @@ struct WndState {
     /// before the popup menu shows and consumed by the IDM_*
     /// handlers. None after the menu dismisses (or never opened).
     context_target: std::cell::RefCell<Option<super::apps_context_menu::ContextTarget>>,
+    /// Runtime-only (not persisted) map of app path -> last connect-prompt
+    /// unix time, so a blocked-but-not-silenced app is re-prompted once
+    /// `notification_timeout` minutes have elapsed rather than being
+    /// silenced forever by a single dismiss. Fable sweep finding #24.
+    last_notify: std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, i64>>,
     /// Cached per-path icon indices into the system small-icon
     /// imagelist (same global imagelist Explorer uses). Filled
     /// lazily on first row-render and reused across repaints,
@@ -396,6 +401,7 @@ impl WndState {
             services: std::cell::RefCell::new(Vec::new()),
             uwp_packages: std::cell::RefCell::new(Vec::new()),
             context_target: std::cell::RefCell::new(None),
+            last_notify: std::cell::RefCell::new(std::collections::HashMap::new()),
             apps_sort: Cell::new(AppsSortState::default()),
             connected_paths: std::cell::RefCell::new(std::collections::HashSet::new()),
             signed_cache: std::sync::Arc::new(std::sync::Mutex::new(
@@ -2160,6 +2166,17 @@ fn auto_catalog_drops(
     let mut new_apps: Vec<(std::path::PathBuf, String)> = Vec::new();
     let mut seen: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
+    // Apps already in the profile, blocked-but-not-silenced, that are due
+    // for a re-prompt (Fable #24). Kept separate from `new_apps` so they
+    // don't get re-added to profile.apps.
+    let mut reprompt: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // Re-prompt window in seconds (notification_timeout is minutes; 0
+    // disables re-prompting -- one dismiss silences the app for the session).
+    let reprompt_after = state.app.settings.borrow().notification_timeout as i64 * 60;
 
     {
         let profile = state.app.profile.borrow();
@@ -2209,7 +2226,25 @@ fn auto_catalog_drops(
             if !seen.insert(path.clone()) {
                 continue;
             }
-            if profile.apps.iter().any(|a| a.path == path) {
+            if let Some(existing) = profile.apps.iter().find(|a| a.path == path) {
+                // Already cataloged. Re-prompt only if it's still blocked
+                // but not explicitly silenced (X / dismiss leaves is_silent
+                // false; Block sets it true), and notification_timeout has
+                // elapsed since the last prompt -- otherwise a single
+                // dismiss silenced the app forever. Fable sweep finding #24.
+                if existing.is_silent || existing.is_enabled || reprompt_after <= 0 {
+                    continue;
+                }
+                let last = state.last_notify.borrow().get(&path).copied().unwrap_or(0);
+                if now_secs.saturating_sub(last) < reprompt_after {
+                    continue;
+                }
+                let remote = match (details.remote_addr, details.remote_port) {
+                    (Some(addr), Some(port)) => format!("-> {addr}:{port}"),
+                    (Some(addr), None) => format!("-> {addr}"),
+                    _ => String::new(),
+                };
+                reprompt.push((path, remote));
                 continue;
             }
             // ASCII arrow — Segoe UI in dialog mode renders the
@@ -2224,7 +2259,7 @@ fn auto_catalog_drops(
         }
     }
 
-    if new_apps.is_empty() {
+    if new_apps.is_empty() && reprompt.is_empty() {
         return new_apps;
     }
 
@@ -2273,6 +2308,10 @@ fn auto_catalog_drops(
         }
     }
 
+    // Existing blocked-not-silent apps due for a re-prompt were queued
+    // above; they're already in profile.apps so they skipped the add loop.
+    for_prompt.extend(reprompt);
+
     if auto_allowed_count > 0 {
         // Push the new permits to the kernel so the next
         // connection attempt from these apps actually succeeds.
@@ -2287,6 +2326,16 @@ fn auto_catalog_drops(
             t!("status.auto_allowed_many", count = auto_allowed_count)
         };
         set_status_text(state.status.get(), 0, &label);
+    }
+
+    // Record the prompt time for every app we're about to prompt for, so
+    // it isn't re-prompted again until notification_timeout elapses.
+    // Fable sweep finding #24.
+    if !for_prompt.is_empty() {
+        let mut ln = state.last_notify.borrow_mut();
+        for (path, _) in &for_prompt {
+            ln.insert(path.clone(), now_secs);
+        }
     }
 
     for_prompt
