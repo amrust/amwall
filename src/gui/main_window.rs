@@ -40,7 +40,7 @@ use windows::Win32::UI::Controls::{
     LVIS_STATEIMAGEMASK, LVITEMW,
     HDM_GETITEMCOUNT,
     LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEM,
-    LVM_GETITEMCOUNT, LVM_GETITEMTEXTW,
+    LVM_GETITEMCOUNT, LVM_GETITEMSTATE, LVM_GETITEMTEXTW,
     LVM_GETNEXTITEM, LVM_GETTOPINDEX, LVM_INSERTCOLUMNW,
     LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
     LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_COLUMNCLICK, LVN_ITEMCHANGED, LVN_KEYDOWN, LVSIL_SMALL,
@@ -79,20 +79,22 @@ use super::ids::{
     IDM_BLOCKLIST_EXTRA_ALLOW, IDM_BLOCKLIST_EXTRA_BLOCK, IDM_BLOCKLIST_EXTRA_DISABLE,
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
     IDM_ALLOW, IDM_BLOCK, IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK,
-    IDM_BLOCKLIST_UPDATE_DISABLE, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_CONTEXT_RULE_FIRST,
-    IDM_CONTEXT_RULE_LAST, IDM_COPY, IDM_COPY_VALUE, IDM_EXIT,
+    IDM_BLOCKLIST_UPDATE_DISABLE, IDM_CHECK, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK,
+    IDM_CONTEXT_RULE_FIRST, IDM_CONTEXT_RULE_LAST, IDM_COPY, IDM_COPY_VALUE, IDM_DELETE, IDM_EXIT,
     IDM_EXPLORE, IDM_EXPORT, IDM_FIND, IDM_FONT, IDM_IMPORT,
     IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_OPENRULESEDITOR, IDM_PROPERTIES, IDM_PURGE_TIMERS,
     IDM_REMOVE_FROM_PROFILE,
     IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK,
-    IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SETTINGS,
+    IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SELECT_ALL,
+    IDM_SETTINGS,
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SIZE_EXTRALARGE, IDM_SIZE_LARGE,
     IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TIMER_15MIN, IDM_TIMER_1HR,
     IDM_TIMER_30MIN, IDM_TIMER_4HR, IDM_TOGGLE_SILENT, IDM_TOGGLE_UNDELETABLE, IDM_TRAY_ENABLELOG_CHK,
     IDM_TRAY_ENABLENOTIFICATIONS_CHK, IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK,
     IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGCLEAR_ERR, IDM_TRAY_LOGSHOW,
     IDM_TRAY_LOGSHOW_ERR, IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK,
-    IDM_TRAY_NOTIFICATIONONTRAY_CHK, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_USECERTIFICATES_CHK,
+    IDM_TRAY_NOTIFICATIONONTRAY_CHK, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_UNCHECK,
+    IDM_USECERTIFICATES_CHK,
     IDM_USEDARKTHEME_CHK, IDM_USEHASHES_CHK, IDM_VIEW_DETAILS, IDM_VIEW_ICON, IDM_VIEW_TILE,
     IDM_WEBSITE, TAB_LISTVIEW_IDS,
 };
@@ -839,6 +841,16 @@ unsafe extern "system" fn wnd_proc(
             {
                 let activate = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
                 on_apps_context_menu(hwnd, nmhdr.idFrom as i32, activate);
+            }
+            // NM_RCLICK on a Rules tab (Blocklist / System / Custom)
+            // shows the Rules context menu (Fable #27).
+            if nmhdr.code == NM_RCLICK
+                && (nmhdr.idFrom == IDC_RULES_BLOCKLIST as usize
+                    || nmhdr.idFrom == IDC_RULES_SYSTEM as usize
+                    || nmhdr.idFrom == IDC_RULES_CUSTOM as usize)
+            {
+                let activate = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
+                on_rules_context_menu(hwnd, nmhdr.idFrom as i32, activate);
             }
             // NM_CUSTOMDRAW on the Apps tabs — pick a row
             // background color per upstream simplewall's
@@ -3564,6 +3576,348 @@ fn on_apps_context_menu(hwnd: HWND, listview_id: i32, activate: &NMITEMACTIVATE)
     // Always clear after the menu — even if no item was picked, the
     // captured target shouldn't persist into the next interaction.
     *state.context_target.borrow_mut() = None;
+}
+
+// ===================================================================
+// Rules-tab right-click context menu (Fable #27).
+// ===================================================================
+
+/// Resolve one of the three Rules-tab listview ids to its HWND
+/// (TAB_LISTVIEW_IDS slots 3=Blocklist, 4=System, 5=Custom).
+fn rules_listview_hwnd(state: &WndState, listview_id: i32) -> HWND {
+    match listview_id {
+        x if x == IDC_RULES_BLOCKLIST => state.listviews[3].get(),
+        x if x == IDC_RULES_SYSTEM => state.listviews[4].get(),
+        x if x == IDC_RULES_CUSTOM => state.listviews[5].get(),
+        _ => HWND(0),
+    }
+}
+
+/// A Rules-tab row resolved to the rule it drives. `CustomUser` mutates
+/// `profile.custom_rules[idx].is_enabled` directly; `Override` records a
+/// state override keyed by rule name (system / blocklist / preset-custom
+/// rules are read-only, so their enabled state lives in
+/// internal_rules_state).
+enum RuleTarget {
+    CustomUser(usize),
+    Override {
+        kind: crate::internal_rules_state::RuleKind,
+        name: String,
+        default: bool,
+    },
+}
+
+/// Map a Rules-tab (listview_id, row) to the rule it represents,
+/// mirroring the per-tab filter-walk in `on_listview_checkbox_toggle`
+/// (the source of truth for row→rule under search filtering). Read-only
+/// and returns owned data, so a bulk handler can resolve every selected
+/// row BEFORE mutating — the per-row repopulate the checkbox handler
+/// does would otherwise shift indices mid-loop.
+fn resolve_rule_row(state: &WndState, listview_id: i32, row: i32) -> Option<RuleTarget> {
+    use crate::internal_rules_state::RuleKind;
+    if row < 0 {
+        return None;
+    }
+    let filter = state.search_text.borrow().clone();
+    match listview_id {
+        x if x == IDC_RULES_CUSTOM => {
+            let preset_count = state.user_rules_preset_count.get();
+            let row_usize = row as usize;
+            if row_usize < preset_count {
+                // Preset row → override keyed by name (default from bundle).
+                let rule = state
+                    .app
+                    .internal_profile
+                    .custom_rules
+                    .iter()
+                    .filter(|r| search_match(&r.name, &filter))
+                    .nth(row_usize)?;
+                Some(RuleTarget::Override {
+                    kind: RuleKind::Custom,
+                    name: rule.name.clone(),
+                    default: rule.is_enabled,
+                })
+            } else {
+                // User-added row → real index into profile.custom_rules.
+                let user_row = row_usize - preset_count;
+                let profile = state.app.profile.borrow();
+                let real_idx = profile
+                    .custom_rules
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| search_match(&r.name, &filter))
+                    .map(|(i, _)| i)
+                    .nth(user_row)?;
+                Some(RuleTarget::CustomUser(real_idx))
+            }
+        }
+        x if x == IDC_RULES_SYSTEM => {
+            let rule = state
+                .app
+                .internal_profile
+                .system_rules
+                .iter()
+                .filter(|r| search_match(&r.name, &filter))
+                .nth(row as usize)?;
+            Some(RuleTarget::Override {
+                kind: RuleKind::System,
+                name: rule.name.clone(),
+                default: rule.is_enabled,
+            })
+        }
+        x if x == IDC_RULES_BLOCKLIST => {
+            let rule = state
+                .app
+                .internal_profile
+                .blocklist_rules
+                .iter()
+                .filter(|r| search_match(&r.name, &filter))
+                .nth(row as usize)?;
+            Some(RuleTarget::Override {
+                kind: RuleKind::Blocklist,
+                name: rule.name.clone(),
+                default: rule.is_enabled,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// True if `row` currently carries LVIS_SELECTED.
+fn is_row_selected(lv: HWND, row: i32) -> bool {
+    if lv.0 == 0 || row < 0 {
+        return false;
+    }
+    let st = unsafe {
+        SendMessageW(
+            lv,
+            LVM_GETITEMSTATE,
+            WPARAM(row as usize),
+            LPARAM(LVIS_SELECTED.0 as isize),
+        )
+    }
+    .0 as u32;
+    (st & LVIS_SELECTED.0) != 0
+}
+
+/// Clear the selection and select+focus just `row` (Explorer-style, for
+/// a right-click on a not-yet-selected row).
+fn select_only_row(lv: HWND, row: i32) {
+    if lv.0 == 0 || row < 0 {
+        return;
+    }
+    let clear = LVITEMW {
+        state: LIST_VIEW_ITEM_STATE_FLAGS(0),
+        stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0),
+        ..Default::default()
+    };
+    let sel = LVITEMW {
+        state: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0),
+        stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0),
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(
+            lv,
+            LVM_SETITEMSTATE,
+            WPARAM(usize::MAX),
+            LPARAM(&clear as *const _ as isize),
+        );
+        SendMessageW(
+            lv,
+            LVM_SETITEMSTATE,
+            WPARAM(row as usize),
+            LPARAM(&sel as *const _ as isize),
+        );
+    }
+}
+
+/// Show the Rules-tab context menu and dispatch the chosen command
+/// through a dedicated, tab-aware match (NOT on_command — the shared
+/// ids would otherwise hit the Apps handlers). Mirrors upstream
+/// _app_message_contextmenu's rules branch (messages.c:622-675).
+fn on_rules_context_menu(hwnd: HWND, listview_id: i32, activate: &NMITEMACTIVATE) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let lv = rules_listview_hwnd(state, listview_id);
+    if lv.0 == 0 {
+        return;
+    }
+    let row = activate.iItem;
+    if row < 0 {
+        return;
+    }
+    // A right-click doesn't auto-select in a listview. Ensure the clicked
+    // row is selected so selection-based Edit/Delete act on it; if it was
+    // already part of a multi-selection, leave that intact for bulk
+    // Check/Uncheck.
+    if !is_row_selected(lv, row) {
+        select_only_row(lv, row);
+    }
+
+    let is_custom = listview_id == IDC_RULES_CUSTOM;
+    // Only user-added Custom rows are editable/deletable; presets and all
+    // system/blocklist rows are read-only.
+    let is_deletable = is_custom
+        && matches!(
+            listview_item_param(lv, row).map(classify_user_rule_row),
+            Some(UserRuleRow::User(_))
+        );
+    let column_text = listview_item_text(lv, row, activate.iSubItem);
+
+    let target = super::rules_context_menu::RulesContextTarget {
+        listview_id,
+        row,
+        column: activate.iSubItem,
+        is_custom,
+        is_deletable,
+        column_text,
+    };
+    let Some(id) = super::rules_context_menu::show(hwnd, &target) else {
+        return;
+    };
+    match id {
+        IDM_OPENRULESEDITOR => on_create_rule(hwnd),
+        IDM_PROPERTIES => on_edit_selected_rule(hwnd),
+        IDM_DELETE => on_delete_selected_rule(hwnd),
+        IDM_CHECK => on_rules_bulk_enable(hwnd, listview_id, true),
+        IDM_UNCHECK => on_rules_bulk_enable(hwnd, listview_id, false),
+        IDM_SELECT_ALL => on_rules_select_all(hwnd, listview_id),
+        IDM_COPY => on_rules_copy(hwnd, listview_id, None),
+        IDM_COPY_VALUE => on_rules_copy(hwnd, listview_id, Some(activate.iSubItem)),
+        _ => {}
+    }
+}
+
+/// Enable / disable every selected rule (Fable #27 — Check / Uncheck).
+/// Resolves all selected rows to rule identities first, then applies and
+/// persists once (a single reinstall), reusing the exact row→rule
+/// mapping via `resolve_rule_row`.
+fn on_rules_bulk_enable(hwnd: HWND, listview_id: i32, enable: bool) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let lv = rules_listview_hwnd(state, listview_id);
+    if lv.0 == 0 {
+        return;
+    }
+    let rows = selected_rows(lv, -1);
+    if rows.is_empty() {
+        return;
+    }
+    let targets: Vec<RuleTarget> = rows
+        .iter()
+        .filter_map(|&r| resolve_rule_row(state, listview_id, r))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let mut profile_dirty = false;
+    let mut overrides_dirty = false;
+    for t in &targets {
+        match t {
+            RuleTarget::CustomUser(idx) => {
+                let mut profile = state.app.profile.borrow_mut();
+                if let Some(rule) = profile.custom_rules.get_mut(*idx) {
+                    if rule.is_enabled != enable {
+                        rule.is_enabled = enable;
+                        profile_dirty = true;
+                    }
+                }
+            }
+            RuleTarget::Override {
+                kind,
+                name,
+                default,
+            } => {
+                let mut overrides = state.app.internal_rules_state.borrow_mut();
+                overrides.set(*kind, name, enable, *default);
+                overrides_dirty = true;
+            }
+        }
+    }
+    if profile_dirty {
+        save_profile_to_disk(state);
+    }
+    if overrides_dirty {
+        let path = state.app.internal_rules_state_path.borrow().clone();
+        let overrides = state.app.internal_rules_state.borrow();
+        if let Err(e) = overrides.save(&path) {
+            eprintln!(
+                "amwall: failed to persist internal_rules_state to {}: {e}",
+                path.display(),
+            );
+        }
+    }
+    populate_user_rules(state);
+    populate_internal_rules(state, IDC_RULES_SYSTEM);
+    populate_internal_rules(state, IDC_RULES_BLOCKLIST);
+    on_tab_change(hwnd);
+    reinstall_filters_if_active(hwnd, state);
+}
+
+/// Select every row on the given Rules listview (Ctrl+A / menu).
+fn on_rules_select_all(hwnd: HWND, listview_id: i32) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let lv = rules_listview_hwnd(state, listview_id);
+    if lv.0 == 0 {
+        return;
+    }
+    let item = LVITEMW {
+        state: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0),
+        stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0),
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(
+            lv,
+            LVM_SETITEMSTATE,
+            WPARAM(usize::MAX),
+            LPARAM(&item as *const _ as isize),
+        );
+    }
+}
+
+/// Copy selected Rules rows to the clipboard. `column = None` joins all
+/// columns per row with ", "; `Some(c)` copies just that column. One row
+/// per line (Fable #27, mirrors upstream _app_command_copy).
+fn on_rules_copy(hwnd: HWND, listview_id: i32, column: Option<i32>) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let lv = rules_listview_hwnd(state, listview_id);
+    if lv.0 == 0 {
+        return;
+    }
+    let rows = selected_rows(lv, -1);
+    if rows.is_empty() {
+        return;
+    }
+    let lines: Vec<String> = match column {
+        Some(c) => rows
+            .iter()
+            .map(|&r| listview_item_text(lv, r, c).unwrap_or_default())
+            .collect(),
+        None => {
+            let ncols = listview_column_count(lv).max(1);
+            rows.iter()
+                .map(|&r| {
+                    (0..ncols)
+                        .map(|c| listview_item_text(lv, r, c).unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .collect()
+        }
+    };
+    set_clipboard_text(hwnd, &lines.join("\r\n"));
 }
 
 /// NM_CUSTOMDRAW handler for the Apps Profile / Services / UWP

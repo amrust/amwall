@@ -16,6 +16,7 @@ pub mod app;
 pub mod app_icons;
 pub mod app_properties;
 pub mod apps_context_menu;
+pub mod rules_context_menu;
 pub mod connect_dialog;
 pub mod connections;
 pub mod dialogs;
