@@ -23,6 +23,7 @@ windows = { version = "0.54", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_WindowsFilteringPlatform",
     "Win32_Networking_WinHttp",

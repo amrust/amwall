@@ -2587,6 +2587,19 @@ fn on_connect_allow(hwnd: HWND, wparam: WPARAM) {
 /// trimming the front to keep the buffer at most `EVENT_LOG_CAP`
 /// entries. If the Log tab is currently visible, repopulate the
 /// listview so the new rows show up live.
+/// Play the system "MailBeep" event sound for a connect prompt when
+/// Settings -> notification sound is enabled. Best-effort and async so it
+/// never blocks the event drain. Mirrors upstream simplewall's connect-
+/// prompt cue. Fable sweep finding #29 (the toggle was a dead no-op).
+fn play_notification_sound() {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC};
+    let alias = wide("MailBeep");
+    unsafe {
+        let _ = PlaySoundW(PCWSTR(alias.as_ptr()), HMODULE::default(), SND_ALIAS | SND_ASYNC);
+    }
+}
+
 fn drain_events(hwnd: HWND, state: &WndState) {
     let settings = state.app.settings.borrow();
     let notify = settings.enable_notifications;
@@ -2655,6 +2668,12 @@ fn drain_events(hwnd: HWND, state: &WndState) {
     let suppress_centered = state.app.settings.borrow().notification_fullscreen_silent
         && is_user_in_fullscreen();
     if filters_active && notify && !new_apps.is_empty() && !suppress_centered {
+        // Audible cue when Settings -> notification sound is on (and not
+        // suppressed by fullscreen-silent). The toggle was previously a
+        // dead no-op -- nothing ever played a sound. Fable sweep #29.
+        if state.app.settings.borrow().notification_sound {
+            play_notification_sound();
+        }
         process_connect_prompts(hwnd, state, &new_apps);
     }
 
@@ -3869,6 +3888,64 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
                     if app.is_enabled != new_enabled {
                         app.is_enabled = new_enabled;
                         profile_dirty = true;
+                    }
+                }
+            } else {
+                // Service / UWP rows were previously inert. Resolve the
+                // clicked row to its identifier (service short-name, or
+                // UWP package SID) and upsert it into profile.apps -- the
+                // same identity + install path the context-menu Allow /
+                // Block uses (install.rs AppKind::Service / AppKind::Uwp).
+                // Fable sweep finding #22.
+                let lv = if listview_id == IDC_APPS_SERVICE {
+                    state.listviews[1].get()
+                } else {
+                    state.listviews[2].get()
+                };
+                let ident = listview_item_param(lv, row)
+                    .map(|p| p as usize)
+                    .and_then(|idx| {
+                        if listview_id == IDC_APPS_SERVICE {
+                            state.services.try_borrow().ok().and_then(|svcs| {
+                                svcs.get(idx)
+                                    .map(|s| std::path::PathBuf::from(&s.service_name))
+                            })
+                        } else {
+                            state.uwp_packages.try_borrow().ok().and_then(|pkgs| {
+                                pkgs.get(idx)
+                                    .and_then(|p| p.package_sid.clone())
+                                    .map(std::path::PathBuf::from)
+                            })
+                        }
+                    });
+                if let Some(path) = ident {
+                    if !path.as_os_str().is_empty() {
+                        if let Ok(mut profile) = state.app.profile.try_borrow_mut() {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            if let Some(existing) =
+                                profile.apps.iter_mut().find(|a| a.path == path)
+                            {
+                                if existing.is_enabled != new_enabled {
+                                    existing.is_enabled = new_enabled;
+                                    profile_dirty = true;
+                                }
+                            } else {
+                                profile.apps.push(crate::profile::App {
+                                    path,
+                                    is_enabled: new_enabled,
+                                    is_silent: false,
+                                    is_undeletable: false,
+                                    timestamp: now,
+                                    timer: 0,
+                                    hash: None,
+                                    comment: None,
+                                });
+                                profile_dirty = true;
+                            }
+                        }
                     }
                 }
             }
