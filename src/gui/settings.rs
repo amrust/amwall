@@ -280,12 +280,16 @@ impl Default for Settings {
             confirm_log_clear: true,
             confirm_allow: true,
             tray_single_click: false,
-            rule_block_outbound: false,
-            rule_block_inbound: false,
+            // Upstream simplewall defaults are all TRUE (messages.c:74-77,
+            // wfp.c:1806/1965/2066/2390). block_outbound/inbound now select
+            // the FW_WEIGHT_LOWEST catch-all's action (install_default_deny),
+            // so ON = default-deny.
+            rule_block_outbound: true,
+            rule_block_inbound: true,
             rule_allow_loopback: true,
-            rule_allow_6to4: false,
+            rule_allow_6to4: true,
             rule_allow_windows_update: false,
-            use_stealth_mode: false,
+            use_stealth_mode: true,
             // Default-on so amwall's filters survive a Windows
             // reboot or a process crash. Without this, BFE wipes
             // every non-persistent filter at boot and the user
@@ -353,6 +357,7 @@ impl Settings {
             }
         };
         let mut saw_filters_active_persisted = false;
+        let mut saw_rules_catchall_v2 = false;
         for (lineno, line) in content.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -370,6 +375,9 @@ impl Settings {
             if key == "filters_active_persisted" {
                 saw_filters_active_persisted = true;
             }
+            if key == "rules_catchall_v2" {
+                saw_rules_catchall_v2 = true;
+            }
             apply_kv(&mut s, key, value);
         }
         // v1.1.15 migration: if the file predates `filters_active_persisted`,
@@ -382,6 +390,21 @@ impl Settings {
                 "amwall: settings: migrating install_boottime_filters false → true (v1.1.15)"
             );
             s.install_boottime_filters = true;
+        }
+        // Catch-all-action migration: files written before this model had
+        // an unconditional default-deny catch-all, so rule_block_outbound
+        // / rule_block_inbound were inert (always saved false by the old
+        // default). Under the new model a saved false flips the catch-all
+        // to Permit — fail open. Force both on once so an upgraded install
+        // keeps the outbound/inbound coverage it actually had. (A user who
+        // genuinely wants allow-all can turn them off afterwards; the marker
+        // then persists their choice.)
+        if !saw_rules_catchall_v2 && (!s.rule_block_outbound || !s.rule_block_inbound) {
+            eprintln!(
+                "amwall: settings: migrating rule_block_outbound/inbound → true (catch-all-action model)"
+            );
+            s.rule_block_outbound = true;
+            s.rule_block_inbound = true;
         }
         s
     }
@@ -417,6 +440,11 @@ impl Settings {
         kv(&mut buf, "tray_single_click", self.tray_single_click);
         kv(&mut buf, "rule_block_outbound", self.rule_block_outbound);
         kv(&mut buf, "rule_block_inbound", self.rule_block_inbound);
+        // Schema marker: presence means this file was written with the
+        // catch-all-action model (block_outbound/inbound select the
+        // default-deny action). Absence triggers a one-time migration in
+        // load() so upgraded installs don't fail open.
+        kv(&mut buf, "rules_catchall_v2", true);
         kv(&mut buf, "rule_allow_loopback", self.rule_allow_loopback);
         kv(&mut buf, "rule_allow_6to4", self.rule_allow_6to4);
         kv(
@@ -684,6 +712,47 @@ mod tests {
 
         let loaded = Settings::load(&path);
         assert_eq!(loaded, s);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn catchall_migration_forces_block_on_for_pre_marker_files() {
+        // A file predating the catch-all-action model lacks the
+        // `rules_catchall_v2` marker and carries the old inert `false`
+        // block toggles. Load must force both on so the upgraded install
+        // keeps the default-deny coverage the old always-block catch-all
+        // provided (otherwise the catch-all flips to Permit — fail open).
+        let dir = std::env::temp_dir().join("amwall-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("settings_catchall_migrate.txt");
+        std::fs::write(&path, "rule_block_outbound=false\nrule_block_inbound=false\n")
+            .unwrap();
+
+        let loaded = Settings::load(&path);
+        assert!(loaded.rule_block_outbound, "outbound must migrate to true");
+        assert!(loaded.rule_block_inbound, "inbound must migrate to true");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn catchall_migration_preserves_explicit_off_when_marked() {
+        // Once the marker is present the file is on the new model, so a
+        // deliberate `false` (allow-all) is a real user choice and must be
+        // preserved rather than re-forced on every load.
+        let dir = std::env::temp_dir().join("amwall-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("settings_catchall_marked.txt");
+        std::fs::write(
+            &path,
+            "rules_catchall_v2=true\nrule_block_outbound=false\nrule_block_inbound=false\n",
+        )
+        .unwrap();
+
+        let loaded = Settings::load(&path);
+        assert!(!loaded.rule_block_outbound, "explicit off must be kept");
+        assert!(!loaded.rule_block_inbound, "explicit off must be kept");
 
         let _ = std::fs::remove_file(&path);
     }

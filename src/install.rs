@@ -334,26 +334,32 @@ pub struct BlocklistConfig {
     pub extra: BlocklistAction,
 }
 
-/// Global rules from Settings → Rules tab. Each toggle adds a
-/// matching filter to the install set when on. Implemented as a
-/// `Default::default()` (all-false) struct so non-GUI callers
-/// (CLI -install) can opt out of the whole bag at once.
-#[derive(Debug, Clone, Copy, Default)]
+/// Global rules from Settings → Rules tab. Each toggle contributes to
+/// the install set when on. `Default` matches upstream simplewall's
+/// out-of-the-box posture (block outbound + inbound, allow loopback,
+/// allow IPv6/6to4, stealth on — all `TRUE` in upstream; see
+/// `messages.c:74-77`, `wfp.c:1806/1965/2066/2390`). The CLI `-install`
+/// path uses this default; the GUI builds its config from saved
+/// Settings.
+#[derive(Debug, Clone, Copy)]
 pub struct GlobalRulesConfig {
-    /// Block every outbound connection at the ALE layer. Per-app
-    /// permits installed after this still win (they get a higher
-    /// weight); the toggle is "block-by-default for everything
-    /// else even without the default-deny."
+    /// When on, the outbound catch-all (FW_WEIGHT_LOWEST) is a Block;
+    /// when off, it's a Permit. Selects the default-deny *action* for
+    /// outbound rather than installing a high-weight block-all — so
+    /// per-app permits still win. See `install_default_deny`.
     pub block_outbound: bool,
-    /// Block every inbound connection at the ALE accept layer.
+    /// When on (or when `use_stealth_mode` is on), the inbound
+    /// catch-all is a Block; otherwise a Permit. See
+    /// `install_default_deny` / upstream `wfp.c:2458`.
     pub block_inbound: bool,
     /// Permit traffic to/from 127.0.0.0/8 (v4) and ::1/128 (v6).
     /// Above per-app permits in weight so loopback always works
     /// even when the app's outbound rule is Block.
     pub allow_loopback: bool,
-    /// Permit IPv6-in-IPv4 (protocol 41) tunneling. Currently a
-    /// no-op — needs IP_PACKET layer support which we don't have
-    /// yet. Toggle persists; install path documents the gap.
+    /// Permit IPv6 essentials: protocol-41 (6to4) plus ICMPv6
+    /// router/neighbor discovery (types 133-136) at the RECV_ACCEPT
+    /// layers, so SLAAC/NDP works under the inbound default-deny.
+    /// Installed by `install_global_rules`.
     pub allow_6to4: bool,
     /// Permit `%systemroot%\System32\svchost.exe` traffic — the
     /// service host that wuauserv (Windows Update) runs in.
@@ -368,6 +374,25 @@ pub struct GlobalRulesConfig {
     /// needs a kernel callout driver we don't ship — only the
     /// filter-engine-only ICMP block lands here.
     pub use_stealth_mode: bool,
+}
+
+impl Default for GlobalRulesConfig {
+    /// Upstream simplewall's out-of-the-box posture: block outbound &
+    /// inbound (the catch-all is deny), allow loopback, allow IPv6/6to4,
+    /// stealth on. `allow_windows_update` is an amwall-specific
+    /// convenience toggle with no upstream default, so it stays off.
+    /// Every value here is verified `TRUE` in upstream (`messages.c:74-77`,
+    /// `wfp.c:1806/1965/2066/2390`).
+    fn default() -> Self {
+        Self {
+            block_outbound: true,
+            block_inbound: true,
+            allow_loopback: true,
+            allow_6to4: true,
+            allow_windows_update: false,
+            use_stealth_mode: true,
+        }
+    }
 }
 
 impl BlocklistConfig {
@@ -631,9 +656,17 @@ pub fn install_with_internal(
     report.filters_added += app_filters.added;
     report.rules_skipped += app_filters.skipped;
 
-    // 5. Default-deny catch-all at FW_WEIGHT_LOWEST.
-    report.filters_added +=
-        install_default_deny(engine, persistent, &mut report.filter_ids.default_deny)?;
+    // 5. Default catch-all at FW_WEIGHT_LOWEST. Its action per
+    //    direction follows the Settings -> Rules Block toggles;
+    //    inbound also blocks whenever stealth mode is on, matching
+    //    upstream wfp.c:2458 (`UseStealthMode || BlockInboundConnections`).
+    report.filters_added += install_default_deny(
+        engine,
+        persistent,
+        global_rules.block_outbound,
+        global_rules.use_stealth_mode || global_rules.block_inbound,
+        &mut report.filter_ids.default_deny,
+    )?;
 
     // 6. Settings → Rules global toggles.
     report.filters_added += install_global_rules(
@@ -678,61 +711,11 @@ fn install_global_rules(
 
     let mut count = 0u32;
 
-    // Block all outbound — empty-condition Block at the connect
-    // ALE layers. Weight 14 lands above per-app permits (which
-    // use the default mid-weight) but below allow_loopback (15)
-    // so loopback still works when both flags are on.
-    if cfg.block_outbound {
-        for layer in &[FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6] {
-            let f = filter::add(
-                engine,
-                "amwall block-all-outbound",
-                "amwall: Settings -> Rules -> Block outbound for all",
-                layer,
-                &SUBLAYER_KEY,
-                Some(&PROVIDER_KEY),
-                &[],
-                FilterAction::Block,
-                persistent,
-                // 0x0E band (upstream FW_WEIGHT_HIGHEST): above per-app
-                // permits (APP) so "Block all" overrides them, below
-                // loopback (HIGHEST_IMPORTANT). Was raw Some(14) which,
-                // as an FWP_UINT64, ranked BELOW auto per-app permits.
-                // Security audit finding A.
-                filter::weight::HIGHEST,
-            )?;
-            ids.push(f.runtime_id());
-            count += 1;
-        }
-    }
-
-    // Block all inbound — same shape, accept-side ALE layers.
-    if cfg.block_inbound {
-        for layer in &[
-            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
-        ] {
-            let f = filter::add(
-                engine,
-                "amwall block-all-inbound",
-                "amwall: Settings -> Rules -> Block inbound for all",
-                layer,
-                &SUBLAYER_KEY,
-                Some(&PROVIDER_KEY),
-                &[],
-                FilterAction::Block,
-                persistent,
-                // 0x0E band (upstream FW_WEIGHT_HIGHEST): above per-app
-                // permits (APP) so "Block all" overrides them, below
-                // loopback (HIGHEST_IMPORTANT). Was raw Some(14) which,
-                // as an FWP_UINT64, ranked BELOW auto per-app permits.
-                // Security audit finding A.
-                filter::weight::HIGHEST,
-            )?;
-            ids.push(f.runtime_id());
-            count += 1;
-        }
-    }
+    // NOTE: the "Block outbound/inbound for all" toggles are NOT
+    // installed here. They select the ACTION of the FW_WEIGHT_LOWEST
+    // catch-all in `install_default_deny` (see call site + upstream
+    // wfp.c:2390-2493). A separate high-weight block-all here would
+    // outrank per-app permits and block whitelisted apps.
 
     // Allow loopback — Permit at all four ALE layers, gated by
     // RemoteAddr in the loopback range. Weight 15 (above the
@@ -1155,32 +1138,50 @@ struct PerAppCounts {
     skipped: u32,
 }
 
-/// Install the catch-all block at the lowest weight. Anything not
-/// permitted by a higher-weight per-app / system / blocklist Allow
-/// drops here. Mirrors upstream's `_app_install_filters` final
-/// pass at FW_WEIGHT_LOWEST.
+/// Install the catch-all at the lowest weight for all four ALE
+/// layers. Its **action** per direction is chosen by the caller:
+/// Block when the direction's "Block ... for all" toggle is on
+/// (default), Permit when off. Anything not decided by a higher-weight
+/// per-app / system / blocklist filter falls through here.
+///
+/// This mirrors upstream simplewall (`wfp.c:2390-2493`), where
+/// `BlockOutboundConnections` (outbound) and `UseStealthMode ||
+/// BlockInboundConnections` (inbound) select the ACTION of the single
+/// `FW_WEIGHT_LOWEST` catch-all — rather than installing a separate
+/// block-all *above* the per-app permits. A HIGHEST block-all (which
+/// amwall previously installed for these toggles) outranks per-app
+/// permits and blocks whitelisted apps; folding the decision into the
+/// catch-all action is what lets a per-app Permit still connect while
+/// the default is deny.
 fn install_default_deny(
     engine: &WfpEngine,
     persistent: bool,
+    block_outbound: bool,
+    block_inbound: bool,
     ids: &mut Vec<u64>,
 ) -> Result<u32, InstallError> {
     let layers = [
-        FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-        FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+        (FWPM_LAYER_ALE_AUTH_CONNECT_V4, block_outbound),
+        (FWPM_LAYER_ALE_AUTH_CONNECT_V6, block_outbound),
+        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, block_inbound),
+        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, block_inbound),
     ];
     let mut count = 0u32;
-    for layer in &layers {
+    for (layer, block) in &layers {
+        let action = if *block {
+            FilterAction::Block
+        } else {
+            FilterAction::Permit
+        };
         let f = filter::add(
             engine,
-            "amwall default-deny",
-            "amwall: catch-all block at lowest weight",
+            "amwall default-catch-all",
+            "amwall: catch-all at lowest weight (action per Block toggles)",
             layer,
             &SUBLAYER_KEY,
             Some(&PROVIDER_KEY),
             &[], // no conditions = match-all
-            FilterAction::Block,
+            action,
             persistent,
             filter::weight::LOWEST, // FW_WEIGHT_LOWEST: every higher band wins
         )?;
