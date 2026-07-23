@@ -72,6 +72,27 @@ jobs:
           cargo test --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Verify installer changelog is current
+        # The MSI embeds wix/Changelog.rtf as its "What's new" page
+        # (wix/main.wxs ChangelogDlg, ScrollableText SourceFile). That
+        # RTF is hand-maintained and separate from the annotated-tag
+        # release body, so it was forgotten twice running — v1.1.16 and
+        # v1.1.17 both shipped an installer showing the PRIOR version's
+        # changelog. Hard-fail the release build unless the RTF pins the
+        # Cargo.toml version as "(current)" at the top, so a stale
+        # installer changelog can never silently ship again.
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
+                      ForEach-Object { $_.Matches[0].Groups[1].Value })
+          $needle = "v$version (current)"
+          $rtf = Get-Content -Raw wix/Changelog.rtf
+          if ($rtf -notmatch [regex]::Escape($needle)) {
+            Write-Error "wix/Changelog.rtf does not pin '$needle'. Update the installer 'What's new' page for this release before tagging."
+            exit 1
+          }
+          Write-Host "Installer changelog pins $needle"
+
       - name: Ensure WiX Toolset 3.x is on PATH
         # windows-latest typically ships with WiX 3.11 preinstalled
         # under "C:\Program Files (x86)\WiX Toolset v3.11\bin", but

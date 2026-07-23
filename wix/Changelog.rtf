@@ -1,5 +1,48 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.16 (current)\par
+What's new in amwall v1.1.17 (current)\par
+\par
+  - Firewall-correctness, security, and GUI release. Fixes\par
+    30 issues found in a deep internal audit; the\par
+    firewall-filter changes were verified against the live\par
+    Windows Filtering Platform\par
+  - DNS and DHCP could be blocked on a fresh install. System\par
+    rules that name a Windows service (DNS/Dnscache, DHCP,\par
+    and others) were silently dropped, so the always-on\par
+    "block everything else" rule blocked core networking.\par
+    Those rules now install correctly\par
+  - Blocks now reliably beat allows, and the defaults match\par
+    upstream simplewall. The "Block outbound/inbound"\par
+    switches, a Windows-Update allowance, and the loopback\par
+    list were ranked in ways Windows did not honour; stealth\par
+    mode / IPv6 / block-by-default now start on like\par
+    upstream. Upgrading keeps your existing protection\par
+  - Localhost, private networks, and IPv6 work correctly\par
+    again (the full loopback address set), and filters are\par
+    now enforced from early boot instead of leaving a brief\par
+    gap each restart\par
+  - Emergency Reset no longer erases your app / rule lists\par
+    when it can't actually turn the firewall off (for\par
+    example when not run as administrator) -- it reports\par
+    the failure instead\par
+  - "Purge unused apps" no longer deletes protected or\par
+    Windows-service / Store-app entries, and asks first\par
+  - Safer when elevated: the log and debug files can no\par
+    longer be redirected out of amwall's own folder via a\par
+    folder-junction trick, and "Skip UAC" now reads the\par
+    real system folders instead of ones a program could fake\par
+  - Fixed memory / graphics-handle leaks (notification\par
+    popups, the toolbar, the icon loader) that could make\par
+    the window stop drawing over a long session\par
+  - New in the app: Store (UWP) apps can be allowed /\par
+    blocked from the app list; timed allows (15 min / 30\par
+    min / 1 hr / 4 hr); the connect prompt re-asks after a\par
+    while instead of once ever; the "Log to file" / "Log\par
+    UI" toolbar buttons and the notification sound work;\par
+    compressed simplewall profiles import for migration;\par
+    per-app "Disable notifications" / "Prevent removal"\par
+    toggles; and more keyboard shortcuts\par
+\par
+What's new in amwall v1.1.16\par
 \par
   - Security hardening release. Fixes several issues found\par
     in an internal audit; the firewall-precedence fix was\par
