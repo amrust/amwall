@@ -1792,6 +1792,13 @@ fn update_enable_filters_button(state: &WndState, active: bool) {
         IDM_TRAY_START
     };
     let img_idx = super::icons::index_for(&icons, lookup_id);
+    // icons::build() returns a throwaway HIMAGELIST (11 DIBs) we only
+    // needed for the index lookup; it's never attached to a control, so
+    // destroy it or one imagelist leaks on every filters enable/disable/
+    // state refresh (5 call sites). Fable sweep finding #18.
+    unsafe {
+        let _ = windows::Win32::UI::Controls::ImageList_Destroy(icons.himagelist);
+    }
 
     let label = if active { t!("toolbar.disable_filters") } else { t!("toolbar.enable_filters") };
     let mut wlabel = wide(&label);
@@ -2354,11 +2361,11 @@ fn on_update_available(hwnd: HWND, wparam: WPARAM) {
         IDYES, MB_ICONINFORMATION, MB_YESNO, MessageBoxW,
     };
 
-    let raw = wparam.0 as *mut super::update_check::UpdateInfo;
-    if raw.is_null() {
+    // take() the payload by token; a forged / stale wparam is a safe
+    // miss (no Box::from_raw on an attacker integer). Fable sweep #19.
+    let Some(info) = super::msg_slab::take::<super::update_check::UpdateInfo>(wparam.0) else {
         return;
-    }
-    let info = unsafe { Box::from_raw(raw) };
+    };
 
     // Prepend "v" so "Current version" and "Latest version" lines
     // both render with the same v-prefixed shape (GitHub's tag
@@ -2440,11 +2447,11 @@ fn on_update_uptodate(hwnd: HWND, wparam: WPARAM) {
         MB_ICONINFORMATION, MB_OK, MessageBoxW,
     };
 
-    let raw = wparam.0 as *mut super::update_check::UpdateInfo;
-    if raw.is_null() {
+    // take() the payload by token; a forged / stale wparam is a safe
+    // miss (no Box::from_raw on an attacker integer). Fable sweep #19.
+    let Some(info) = super::msg_slab::take::<super::update_check::UpdateInfo>(wparam.0) else {
         return;
-    }
-    let info = unsafe { Box::from_raw(raw) };
+    };
 
     // Same v-prefix shape match as on_update_available — keeps the
     // "Current" / "Latest" lines consistent in the dialog.
@@ -2502,12 +2509,11 @@ fn on_connect_block(hwnd: HWND, wparam: WPARAM) {
         Some(s) => s,
         None => return,
     };
-    let path_raw = wparam.0 as *mut std::path::PathBuf;
-    if path_raw.is_null() {
+    // take() the path by token; a forged / stale wparam is a safe miss
+    // (no Box::from_raw on an attacker integer). Fable sweep #19.
+    let Some(path) = super::msg_slab::take::<std::path::PathBuf>(wparam.0) else {
         return;
-    }
-    let path_box = unsafe { Box::from_raw(path_raw) };
-    let path: std::path::PathBuf = *path_box;
+    };
 
     {
         let mut profile = state.app.profile.borrow_mut();
@@ -2536,12 +2542,11 @@ fn on_connect_allow(hwnd: HWND, wparam: WPARAM) {
         Some(s) => s,
         None => return,
     };
-    let path_raw = wparam.0 as *mut std::path::PathBuf;
-    if path_raw.is_null() {
+    // take() the path by token; a forged / stale wparam is a safe miss
+    // (no Box::from_raw on an attacker integer). Fable sweep #19.
+    let Some(path) = super::msg_slab::take::<std::path::PathBuf>(wparam.0) else {
         return;
-    }
-    let path_box = unsafe { Box::from_raw(path_raw) };
-    let path: std::path::PathBuf = *path_box;
+    };
 
     {
         let mut profile = state.app.profile.borrow_mut();
@@ -4363,10 +4368,18 @@ fn collect_selection_paths(
             }
         }
         x if x == IDC_APPS_UWP => {
-            // No path-based mapping yet — fall back to single
-            // target which will be rejected upstream by the
-            // empty-path check.
-            out.push(fallback_target.binary_path.clone());
+            // Map each selected UWP row to its package SID (carried as a
+            // SID-shaped path, same as the single-row context target).
+            // App::kind() detects the S-1-15-2-... form as AppKind::Uwp,
+            // so these route through the FWPM_CONDITION_ALE_PACKAGE_ID
+            // install path. Rows whose SID didn't resolve are skipped.
+            // Fable sweep finding #21 (multi-select half).
+            let uwp = state.uwp_packages.borrow();
+            for idx in source_indices {
+                if let Some(sid) = uwp.get(idx).and_then(|p| p.package_sid.as_deref()) {
+                    out.push(std::path::PathBuf::from(sid));
+                }
+            }
         }
         _ => {}
     }

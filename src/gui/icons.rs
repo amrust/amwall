@@ -239,8 +239,18 @@ fn decode_to_hbitmap(png_bytes: &[u8], target: i32) -> Result<HBITMAP, String> {
     unsafe {
         let hdc = GetDC(HWND::default());
         let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)
-            .map_err(|e| format!("CreateDIBSection: {e}"))?;
+        // Release the common screen DC on BOTH paths: the old `?` on the
+        // CreateDIBSection error skipped the ReleaseDC below, permanently
+        // leaking a screen DC per failed icon (the common-DC pool is
+        // tiny). Fable sweep finding #20.
+        let result = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0);
+        let hbm = match result {
+            Ok(h) => h,
+            Err(e) => {
+                ReleaseDC(HWND::default(), hdc);
+                return Err(format!("CreateDIBSection: {e}"));
+            }
+        };
         if !bits_ptr.is_null() {
             std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits_ptr as *mut u8, bgra.len());
         }

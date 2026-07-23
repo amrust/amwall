@@ -29,7 +29,6 @@
 #![cfg(windows)]
 
 use std::cell::Cell;
-use std::ffi::c_void;
 use std::path::Path;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, RECT, WPARAM};
@@ -284,16 +283,16 @@ unsafe extern "system" fn dialog_proc(
             }
             match id {
                 IDC_PROMPT_ALLOW => {
-                    // Hand the parent a Box<PathBuf> so it can
-                    // find the right App slot. The parent's
-                    // handler reclaims it.
-                    let path_box = Box::new(state.path.clone());
-                    let path_raw = Box::into_raw(path_box) as *mut c_void as isize;
+                    // Hand the parent a TOKEN, not a raw heap pointer:
+                    // a WM_USER wparam is forgeable, and the parent used
+                    // to Box::from_raw it. The parent's handler take()s
+                    // the token to find the right App slot. Fable sweep #19.
+                    let token = super::msg_slab::stash(state.path.clone());
                     unsafe {
                         let _ = PostMessageW(
                             state.parent,
                             WM_USER_CONNECT_ALLOW,
-                            WPARAM(path_raw as usize),
+                            WPARAM(token),
                             LPARAM(0),
                         );
                         let _ = DestroyWindow(hwnd);
@@ -305,13 +304,12 @@ unsafe extern "system" fn dialog_proc(
                     // catalog step. Posting BLOCK tells the
                     // parent to also set is_silent=true so
                     // future drops for this exe don't re-prompt.
-                    let path_box = Box::new(state.path.clone());
-                    let path_raw = Box::into_raw(path_box) as *mut c_void as isize;
+                    let token = super::msg_slab::stash(state.path.clone());
                     unsafe {
                         let _ = PostMessageW(
                             state.parent,
                             WM_USER_CONNECT_BLOCK,
-                            WPARAM(path_raw as usize),
+                            WPARAM(token),
                             LPARAM(0),
                         );
                         let _ = DestroyWindow(hwnd);

@@ -84,15 +84,20 @@ pub fn show(hwnd: HWND, target: &ContextTarget) -> Option<u16> {
     append_separator(menu);
 
     // Allow / Block toggle. Check marks reflect the current is_enabled
-    // state when the entry is already in the profile. UWP gets
-    // grayed out — no path-only identifier model yet.
+    // state when the entry is already in the profile. Enabled whenever we
+    // have an identifier for the row — a file path, a service SID, or a
+    // UWP package SID (all carried in target.binary_path). UWP was
+    // previously grayed by a stale `!is_uwp` flag even though its SID
+    // backend (on_context_set_enabled -> install.rs AppKind::Uwp ->
+    // FWPM_CONDITION_ALE_PACKAGE_ID) is fully wired. Fable sweep finding #21.
+    let has_id = !target.binary_path.as_os_str().is_empty();
     let (allow_check, block_check) = match (target.in_profile, target.current_is_enabled) {
         (true, true) => (MF_CHECKED.0, MF_UNCHECKED.0),
         (true, false) => (MF_UNCHECKED.0, MF_CHECKED.0),
         _ => (MF_UNCHECKED.0, MF_UNCHECKED.0),
     };
-    append_string_with_state(menu, IDM_ALLOW, &rust_i18n::t!("context.allow"), MF_STRING.0 | allow_check, !is_uwp);
-    append_string_with_state(menu, IDM_BLOCK, &rust_i18n::t!("context.block"), MF_STRING.0 | block_check, !is_uwp);
+    append_string_with_state(menu, IDM_ALLOW, &rust_i18n::t!("context.allow"), MF_STRING.0 | allow_check, has_id);
+    append_string_with_state(menu, IDM_BLOCK, &rust_i18n::t!("context.block"), MF_STRING.0 | block_check, has_id);
 
     if target.in_profile {
         append_separator(menu);

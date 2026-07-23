@@ -35,8 +35,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_3DDKSHADOW, COLOR_WINDOW, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    DrawTextW, EndPaint, FrameRect, GetMonitorInfoW, GetSysColorBrush, HMONITOR,
+    BeginPaint, COLOR_3DDKSHADOW, COLOR_WINDOW, DeleteObject, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, DrawTextW, EndPaint, FrameRect, GetMonitorInfoW, GetSysColorBrush, HMONITOR,
     MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromRect,
     MonitorFromWindow, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
@@ -482,6 +482,13 @@ fn paint_toast(hwnd: HWND) {
 
     unsafe {
         SelectObject(hdc, prev_font);
+        // load_message_font() creates a fresh HFONT every paint; delete
+        // it now that it's deselected, or one GDI font leaks per WM_PAINT
+        // (continuously while a toast is dragged) until the process hits
+        // the 10k GDI-handle cap. Fable sweep finding #17.
+        if !font.is_invalid() {
+            let _ = DeleteObject(font);
+        }
         let _ = EndPaint(hwnd, &ps);
     }
 }

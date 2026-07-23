@@ -152,24 +152,18 @@ fn spawn_check(
             // Auto-check + already up to date = silently exit.
             return;
         };
-        let info = Box::new(UpdateInfo {
+        // Post a TOKEN, not a raw heap pointer: a WM_USER wparam is
+        // forgeable and the handler used to Box::from_raw it. Fable #19.
+        let token = super::msg_slab::stash(UpdateInfo {
             latest_tag: latest,
             releases_url,
         });
-        let raw = Box::into_raw(info) as *mut c_void as usize;
         unsafe {
-            // PostMessage may fail if the main window has been
-            // destroyed (user quit while we were fetching). Reclaim
-            // the box in that case so it doesn't leak.
-            if PostMessageW(
-                HWND(hwnd_raw as isize),
-                msg,
-                WPARAM(raw),
-                LPARAM(0),
-            )
-            .is_err()
-            {
-                let _ = Box::from_raw(raw as *mut UpdateInfo);
+            // PostMessage may fail if the main window has been destroyed
+            // (user quit while we were fetching). Reclaim the slab entry
+            // in that case so it doesn't leak.
+            if PostMessageW(HWND(hwnd_raw as isize), msg, WPARAM(token), LPARAM(0)).is_err() {
+                let _ = super::msg_slab::take::<UpdateInfo>(token);
             }
         }
     });
