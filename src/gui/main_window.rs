@@ -1645,8 +1645,12 @@ fn try_auto_enable_filters_at_startup(hwnd: HWND, state: &WndState) {
                 allow_6to4: s.rule_allow_6to4,
                 allow_windows_update: s.rule_allow_windows_update,
                 use_stealth_mode: s.use_stealth_mode,
+                install_boottime: s.install_boottime_filters,
             },
-            s.install_boottime_filters,
+            // Permanent GUI install -> always persistent (survives a
+            // reboot); the boot-time set is the separate field above. This
+            // de-conflates the old persistent==install_boottime. Fable #12.
+            true,
         )
     };
     let report = match crate::install::install_with_internal(
@@ -4891,8 +4895,11 @@ fn on_enable_filters(hwnd: HWND) {
                     allow_6to4: s.rule_allow_6to4,
                     allow_windows_update: s.rule_allow_windows_update,
                     use_stealth_mode: s.use_stealth_mode,
+                    install_boottime: s.install_boottime_filters,
                 },
-                s.install_boottime_filters,
+                // Permanent GUI install -> always persistent; boot-time
+                // enforcement is the separate field above. Fable #12.
+                true,
             )
         };
         let report = match crate::install::install_with_internal(
@@ -5027,8 +5034,12 @@ fn reinstall_filters_if_active(hwnd: HWND, state: &WndState) {
                 allow_6to4: s.rule_allow_6to4,
                 allow_windows_update: s.rule_allow_windows_update,
                 use_stealth_mode: s.use_stealth_mode,
+                install_boottime: s.install_boottime_filters,
             },
-            s.install_boottime_filters,
+            // Permanent GUI install -> always persistent (survives a
+            // reboot); the boot-time set is the separate field above. This
+            // de-conflates the old persistent==install_boottime. Fable #12.
+            true,
         )
     };
     let report = match crate::install::install_with_internal(

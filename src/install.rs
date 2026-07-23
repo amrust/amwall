@@ -23,9 +23,10 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6, FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4_SILENT_DROP,
     FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V6_SILENT_DROP, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
     FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_LAYER_INBOUND_TRANSPORT_V4_DISCARD,
-    FWPM_LAYER_INBOUND_TRANSPORT_V6_DISCARD, FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4,
-    FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_LAYER_INBOUND_ICMP_ERROR_V4,
+    FWPM_LAYER_INBOUND_ICMP_ERROR_V6, FWPM_LAYER_INBOUND_TRANSPORT_V4_DISCARD,
+    FWPM_LAYER_INBOUND_TRANSPORT_V6_DISCARD, FWPM_LAYER_IPFORWARD_V4, FWPM_LAYER_IPFORWARD_V6,
+    FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4, FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
 };
 use windows::core::GUID;
 
@@ -375,6 +376,15 @@ pub struct GlobalRulesConfig {
     /// needs a kernel callout driver we don't ship — only the
     /// filter-engine-only ICMP block lands here.
     pub use_stealth_mode: bool,
+    /// Install the boot-time filter set (FWPM_FILTER_FLAG_BOOTTIME) —
+    /// loopback permits enforced during early boot, before BFE loads the
+    /// persistent runtime set, closing the fail-open window. Only takes
+    /// effect for permanent (persistent) installs. Distinct from
+    /// `persistent`: whether filters survive a reboot at all is the
+    /// persistence decision (always on for a permanent install); this is
+    /// the additional EARLY-BOOT enforcement. The two used to be
+    /// conflated (install_boottime_filters was passed as `persistent`).
+    pub install_boottime: bool,
 }
 
 impl Default for GlobalRulesConfig {
@@ -392,6 +402,7 @@ impl Default for GlobalRulesConfig {
             allow_6to4: true,
             allow_windows_update: false,
             use_stealth_mode: true,
+            install_boottime: true,
         }
     }
 }
@@ -685,6 +696,15 @@ pub fn install_with_internal(
         global_rules,
         &mut report.filter_ids.stealth,
     )?;
+
+    // 8. Boot-time filter set — only for permanent installs (upstream
+    //    gates on `InstallBoottimeFilters && !is_filterstemporary`,
+    //    wfp.c:2145). Distinct from persistence: a permanent install
+    //    always persists; this adds early-boot enforcement on top.
+    if global_rules.install_boottime && persistent {
+        report.filters_added +=
+            install_boottime_permits(engine, &mut report.filter_ids.default_deny)?;
+    }
 
     // Atomically apply everything queued in this transaction. If
     // any of the steps above bailed via `?`, the Drop impl on `tx`
@@ -1329,6 +1349,51 @@ fn install_default_deny(
             ids.push(f.runtime_id());
             count += 1;
         }
+    }
+    Ok(count)
+}
+
+/// Install the dedicated boot-time filter set (FWPM_FILTER_FLAG_BOOTTIME):
+/// loopback / appcontainer-loopback permits enforced during EARLY BOOT —
+/// before the Base Filtering Engine service starts and re-applies the
+/// persistent runtime filters. This closes the fail-open window between
+/// the network stack coming up at boot and BFE loading the runtime set.
+/// Mirrors upstream simplewall wfp.c:2143-2269 (permits at
+/// HIGHEST_IMPORTANT on the forward, recv-accept, and ICMP-error layers).
+/// Only meaningful for permanent (persistent) installs, never `-temp`.
+///
+/// NOTE: the early-boot ENFORCEMENT can only be observed by rebooting;
+/// this installs the filters upstream uses, but the boot-window behavior
+/// isn't exercised by the gate triad or a live `netsh` snapshot.
+fn install_boottime_permits(engine: &WfpEngine, ids: &mut Vec<u64>) -> Result<u32, InstallError> {
+    let loop_flags = FilterCondition::FlagsAnySet(
+        FWP_CONDITION_FLAG_IS_LOOPBACK | FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK,
+    );
+    let layers = [
+        FWPM_LAYER_IPFORWARD_V4,
+        FWPM_LAYER_IPFORWARD_V6,
+        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+        FWPM_LAYER_INBOUND_ICMP_ERROR_V4,
+        FWPM_LAYER_INBOUND_ICMP_ERROR_V6,
+        FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4,
+        FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
+    ];
+    let mut count = 0u32;
+    for layer in &layers {
+        let f = filter::add_boottime(
+            engine,
+            "amwall boot-time loopback",
+            "amwall: boot-time loopback permit (early-boot enforcement)",
+            layer,
+            &SUBLAYER_KEY,
+            Some(&PROVIDER_KEY),
+            std::slice::from_ref(&loop_flags),
+            FilterAction::Permit,
+            filter::weight::HIGHEST_IMPORTANT,
+        )?;
+        ids.push(f.runtime_id());
+        count += 1;
     }
     Ok(count)
 }

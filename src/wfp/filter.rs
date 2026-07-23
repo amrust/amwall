@@ -10,7 +10,8 @@
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_ACTION_BLOCK, FWP_ACTION_CALLOUT_TERMINATING, FWP_ACTION_PERMIT, FWP_ACTION_TYPE,
     FWP_UINT8, FWP_VALUE0, FWP_VALUE0_0, FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0,
-    FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT, FWPM_FILTER_FLAG_PERSISTENT, FWPM_FILTER_FLAGS,
+    FWPM_FILTER_FLAG_BOOTTIME, FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT, FWPM_FILTER_FLAG_PERSISTENT,
+    FWPM_FILTER_FLAGS,
     FwpmFilterAdd0, FwpmFilterDeleteByKey0,
 };
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
@@ -185,6 +186,68 @@ pub fn add(
     persistent: bool,
     weight_band: u8,
 ) -> Result<Filter, WfpError> {
+    add_impl(
+        engine,
+        name,
+        description,
+        layer_key,
+        sublayer_key,
+        provider_key,
+        conditions,
+        action,
+        persistent,
+        weight_band,
+        FWPM_FILTER_FLAGS(0),
+    )
+}
+
+/// Like [`add`], but also sets `FWPM_FILTER_FLAG_BOOTTIME` so the filter
+/// is enforced during early boot — before the Base Filtering Engine
+/// service starts and re-applies the persistent runtime set. Boot-time
+/// filters are inherently persistent. Used only for the dedicated
+/// boot-time permit set (loopback / ICMP-error), mirroring upstream
+/// simplewall wfp.c:2159-2269.
+#[allow(clippy::too_many_arguments)]
+pub fn add_boottime(
+    engine: &WfpEngine,
+    name: &str,
+    description: &str,
+    layer_key: &GUID,
+    sublayer_key: &GUID,
+    provider_key: Option<&GUID>,
+    conditions: &[FilterCondition],
+    action: FilterAction,
+    weight_band: u8,
+) -> Result<Filter, WfpError> {
+    add_impl(
+        engine,
+        name,
+        description,
+        layer_key,
+        sublayer_key,
+        provider_key,
+        conditions,
+        action,
+        true,
+        weight_band,
+        FWPM_FILTER_FLAG_BOOTTIME,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_impl(
+    engine: &WfpEngine,
+    name: &str,
+    description: &str,
+    layer_key: &GUID,
+    sublayer_key: &GUID,
+    provider_key: Option<&GUID>,
+    conditions: &[FilterCondition],
+    action: FilterAction,
+    persistent: bool,
+    weight_band: u8,
+    extra_flags: FWPM_FILTER_FLAGS,
+) -> Result<Filter, WfpError> {
     let mut key = GUID::zeroed();
     let rpc_status = unsafe { UuidCreate(&mut key) };
     if rpc_status.0 != 0 {
@@ -217,7 +280,7 @@ pub fn add(
     // terminating-callout filter, CLEAR_ACTION_RIGHT, which upstream
     // sets so a lower-weight permit in another sublayer cannot override
     // the block (wfp.c:805-806). Security audit finding A.
-    let mut flags = FWPM_FILTER_FLAGS(0);
+    let mut flags = extra_flags;
     if persistent {
         flags |= FWPM_FILTER_FLAG_PERSISTENT;
     }
