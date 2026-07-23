@@ -218,6 +218,7 @@ blocked_notification = "Blocked: %{app}"
 # --- Context menu ---
 [context]
 allow = "Allow"
+allow_for = "Allow for..."
 block = "Block"
 copy_details = "&Copy details"
 properties = "Properties\tEnter"

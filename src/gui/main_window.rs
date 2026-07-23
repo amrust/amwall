@@ -84,7 +84,8 @@ use super::ids::{
     IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK,
     IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SETTINGS,
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SIZE_EXTRALARGE, IDM_SIZE_LARGE,
-    IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TRAY_ENABLELOG_CHK,
+    IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TIMER_15MIN, IDM_TIMER_1HR,
+    IDM_TIMER_30MIN, IDM_TIMER_4HR, IDM_TRAY_ENABLELOG_CHK,
     IDM_TRAY_ENABLENOTIFICATIONS_CHK, IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR,
     IDM_TRAY_LOGSHOW, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_USECERTIFICATES_CHK,
     IDM_USEDARKTHEME_CHK, IDM_USEHASHES_CHK, IDM_VIEW_DETAILS, IDM_VIEW_ICON, IDM_VIEW_TILE,
@@ -2587,6 +2588,56 @@ fn on_connect_allow(hwnd: HWND, wparam: WPARAM) {
 /// trimming the front to keep the buffer at most `EVENT_LOG_CAP`
 /// entries. If the Log tab is currently visible, repopulate the
 /// listview so the new rows show up live.
+/// "Allow for N": enable the right-clicked app now and stamp App.timer
+/// with the absolute expiry (now + duration). The armed expire_timed_apps
+/// sweep rolls it back to blocked when the timer elapses. The timer field
+/// was serialized / expired / purged but nothing ever SET it, so the whole
+/// timed-allow feature was unreachable. Fable sweep finding #23.
+fn on_set_app_timer(hwnd: HWND, duration_secs: i64) {
+    let Some(state) = (unsafe { state_ref(hwnd) }) else {
+        return;
+    };
+    let target = match state.context_target.borrow().clone() {
+        Some(t) => t,
+        None => return,
+    };
+    if target.binary_path.as_os_str().is_empty() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let expiry = now + duration_secs;
+    {
+        let mut profile = state.app.profile.borrow_mut();
+        if let Some(app) = profile.apps.iter_mut().find(|a| a.path == target.binary_path) {
+            app.is_enabled = true;
+            app.timer = expiry;
+        } else {
+            profile.apps.push(crate::profile::App {
+                path: target.binary_path.clone(),
+                is_enabled: true,
+                is_silent: false,
+                is_undeletable: false,
+                timestamp: now,
+                timer: expiry,
+                hash: None,
+                comment: None,
+            });
+        }
+    }
+    save_profile_to_disk(state);
+    populate_apps_tab(state);
+    on_tab_change(hwnd);
+    reinstall_filters_if_active(hwnd, state);
+    set_status_text(
+        state.status.get(),
+        0,
+        &format!("Allowed {} temporarily.", target.display_name),
+    );
+}
+
 /// Ctrl+F — move keyboard focus to the search box so the user can filter
 /// the active list without reaching for the mouse. IDM_FIND was a defined
 /// but unwired stub. Fable sweep finding #33.
@@ -3249,6 +3300,10 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         IDM_EXPLORE => on_context_explore(hwnd),
         IDM_COPY => on_context_copy(hwnd),
         IDM_PROPERTIES => on_context_properties(hwnd),
+        IDM_TIMER_15MIN => on_set_app_timer(hwnd, 15 * 60),
+        IDM_TIMER_30MIN => on_set_app_timer(hwnd, 30 * 60),
+        IDM_TIMER_1HR => on_set_app_timer(hwnd, 60 * 60),
+        IDM_TIMER_4HR => on_set_app_timer(hwnd, 4 * 60 * 60),
 
         // Blocklist top-menu mode toggles (M7). Each pair updates
         // `Settings.blocklist_*` and re-renders the radio check

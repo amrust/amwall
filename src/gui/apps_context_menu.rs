@@ -25,14 +25,15 @@ use std::path::PathBuf;
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_CHECKED, MF_GRAYED, MF_SEPARATOR,
-    MF_STRING, MF_UNCHECKED, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_CHECKED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
 };
 use windows::core::PCWSTR;
 
 use super::ids::{
     IDC_APPS_PROFILE, IDC_APPS_SERVICE, IDC_APPS_UWP, IDM_ALLOW, IDM_BLOCK, IDM_COPY, IDM_EXPLORE,
-    IDM_PROPERTIES, IDM_REMOVE_FROM_PROFILE,
+    IDM_PROPERTIES, IDM_REMOVE_FROM_PROFILE, IDM_TIMER_15MIN, IDM_TIMER_1HR, IDM_TIMER_30MIN,
+    IDM_TIMER_4HR,
 };
 use super::wide;
 
@@ -98,6 +99,31 @@ pub fn show(hwnd: HWND, target: &ContextTarget) -> Option<u16> {
     };
     append_string_with_state(menu, IDM_ALLOW, &rust_i18n::t!("context.allow"), MF_STRING.0 | allow_check, has_id);
     append_string_with_state(menu, IDM_BLOCK, &rust_i18n::t!("context.block"), MF_STRING.0 | block_check, has_id);
+
+    // "Allow for..." timed-allow submenu: enable the app now and set
+    // App.timer = now + N; the armed expire_timed_apps sweep rolls it back
+    // to blocked when the timer elapses. Only when we have an identifier
+    // to key the profile entry on. Fable sweep finding #23.
+    if has_id {
+        let submenu = unsafe { CreatePopupMenu() }.ok()?;
+        for (id, label) in [
+            (IDM_TIMER_15MIN, "15 minutes"),
+            (IDM_TIMER_30MIN, "30 minutes"),
+            (IDM_TIMER_1HR, "1 hour"),
+            (IDM_TIMER_4HR, "4 hours"),
+        ] {
+            let w = wide(label);
+            unsafe {
+                let _ = AppendMenuW(submenu, MF_STRING, id as usize, PCWSTR(w.as_ptr()));
+            }
+        }
+        // MF_POPUP nests `submenu` under this item; DestroyMenu(menu) at
+        // the end of the caller also destroys the attached submenu.
+        let w = wide(&rust_i18n::t!("context.allow_for"));
+        unsafe {
+            let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(w.as_ptr()));
+        }
+    }
 
     if target.in_profile {
         append_separator(menu);

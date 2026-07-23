@@ -171,3 +171,11 @@ pub const IDM_BLOCK: u16 = 352;
 pub const IDM_REMOVE_FROM_PROFILE: u16 = 353;
 pub const IDM_EXPLORE: u16 = 354;
 pub const IDM_COPY: u16 = 355;
+
+// Timed-allow durations (Fable #23). The apps context menu's "Allow
+// for..." submenu sets App.is_enabled=true + App.timer=now+N; the armed
+// expire_timed_apps sweep rolls it back when the timer elapses.
+pub const IDM_TIMER_15MIN: u16 = 356;
+pub const IDM_TIMER_30MIN: u16 = 357;
+pub const IDM_TIMER_1HR: u16 = 358;
+pub const IDM_TIMER_4HR: u16 = 359;
