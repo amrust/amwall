@@ -201,12 +201,15 @@ pub fn add(
     )
 }
 
-/// Like [`add`], but also sets `FWPM_FILTER_FLAG_BOOTTIME` so the filter
+/// Like [`add`], but sets ONLY `FWPM_FILTER_FLAG_BOOTTIME` so the filter
 /// is enforced during early boot — before the Base Filtering Engine
-/// service starts and re-applies the persistent runtime set. Boot-time
-/// filters are inherently persistent. Used only for the dedicated
-/// boot-time permit set (loopback / ICMP-error), mirroring upstream
-/// simplewall wfp.c:2159-2269.
+/// service starts and re-applies the persistent runtime set. BFE persists
+/// boot-time filters via the BOOTTIME flag itself, and it is MUTUALLY
+/// EXCLUSIVE with `FWPM_FILTER_FLAG_PERSISTENT` — setting both makes
+/// `FwpmFilterAdd0` fail with `FWP_E_INVALID_FLAGS` (0x8032001e). So this
+/// passes `persistent = false` (only BOOTTIME), matching upstream
+/// simplewall wfp.c:2159-2269, which sets `FWPM_FILTER_FLAG_BOOTTIME`
+/// alone. Used only for the dedicated boot-time permit set.
 #[allow(clippy::too_many_arguments)]
 pub fn add_boottime(
     engine: &WfpEngine,
@@ -228,7 +231,7 @@ pub fn add_boottime(
         provider_key,
         conditions,
         action,
-        true,
+        false, // NOT persistent: BOOTTIME is exclusive with PERSISTENT
         weight_band,
         FWPM_FILTER_FLAG_BOOTTIME,
     )
