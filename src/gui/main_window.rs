@@ -5806,21 +5806,80 @@ fn on_exit(hwnd: HWND) {
     }
 }
 
-/// Edit → Purge unused apps. Walks `profile.apps` and removes
-/// every entry whose binary no longer exists on disk (i.e. the
-/// "Invalid" rows the listview colorizer paints pink-red).
-/// Disabled rows are kept — they're an explicit user decision —
-/// only the broken-path rows are pruned. Re-installs filters if
-/// active so the kernel forgets the deleted apps' permits.
+/// Edit → Purge unused apps. Mirrors upstream `_app_isappunused`
+/// (profile.c:1473-1500): removes every app that is genuinely unused —
+/// a File app whose binary is gone, or any app that is neither enabled,
+/// silent, undeletable, nor referenced by a custom rule. `is_undeletable`
+/// apps and Service/UWP apps (whose "path" is a SID / service name, not
+/// an on-disk file) are NEVER purged for "not existing" — the old
+/// `retain(|a| a.path.exists())` silently deleted exactly those. Confirms
+/// first, since it's destructive. Re-installs filters if active so the
+/// kernel forgets the deleted apps' permits.
 fn on_purge_unused(hwnd: HWND) {
+    use crate::profile::AppKind;
+    use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO};
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
         None => return,
     };
+
+    // Decide what WOULD be purged (dry run) so we can show a count and
+    // confirm before touching anything. Build the set of app paths any
+    // custom rule targets first, so a rule's app isn't purged out from
+    // under it (case-insensitive, matching Windows path semantics).
+    let doomed: Vec<std::path::PathBuf> = {
+        let profile = state.app.profile.borrow();
+        let referenced: std::collections::HashSet<String> = profile
+            .custom_rules
+            .iter()
+            .filter_map(|r| r.apps.as_deref())
+            .flat_map(|apps| apps.split('|'))
+            .map(|tok| tok.trim().to_ascii_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        profile
+            .apps
+            .iter()
+            .filter(|a| {
+                if a.is_undeletable {
+                    return false; // never purge
+                }
+                // Service / UWP apps have no on-disk file, so they never
+                // count as "missing"; only a File app can be gone.
+                let exists = a.kind() != AppKind::File || a.path.exists();
+                let used = a.is_enabled
+                    || a.is_silent
+                    || referenced.contains(&a.path.to_string_lossy().to_ascii_lowercase());
+                !(exists && used) // unused == purge
+            })
+            .map(|a| a.path.clone())
+            .collect()
+    };
+
+    if doomed.is_empty() {
+        set_status_text(state.status.get(), 0, &t!("status.no_unused"));
+        return;
+    }
+
+    let title = wide(&t!("edit.purge_unused"));
+    let body = wide(&t!("message.bulk_delete_confirm", count = doomed.len()));
+    let answer = unsafe {
+        MessageBoxW(
+            hwnd,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    if answer != IDYES {
+        return;
+    }
+
     let removed = {
         let mut profile = state.app.profile.borrow_mut();
+        let doomed_set: std::collections::HashSet<&std::path::PathBuf> = doomed.iter().collect();
         let before = profile.apps.len();
-        profile.apps.retain(|a| a.path.exists());
+        profile.apps.retain(|a| !doomed_set.contains(&a.path));
         before - profile.apps.len()
     };
     if removed == 0 {
@@ -6221,8 +6280,9 @@ fn confirm_allow_traffic(hwnd: HWND, paths: &[std::path::PathBuf]) -> bool {
 /// figure out how to unblock — restores the system to its
 /// pre-amwall networking behaviour without uninstalling the app.
 fn on_emergency_reset(hwnd: HWND) {
+    use windows::Win32::UI::Shell::IsUserAnAdmin;
     use windows::Win32::UI::WindowsAndMessaging::{
-        IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO,
+        IDYES, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_YESNO,
     };
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
@@ -6243,19 +6303,47 @@ fn on_emergency_reset(hwnd: HWND) {
         return;
     }
 
-    // 1. Tear down every filter, sublayer, and the provider
-    //    itself. cleanup_provider is best-effort: it succeeds
-    //    even if the provider was already gone (e.g. the user
-    //    already disabled filters).
-    if let Ok(engine) = crate::wfp::WfpEngine::open() {
-        if let Err(e) = engine.cleanup_provider(&crate::install::PROVIDER_KEY) {
-            eprintln!("amwall: emergency reset: cleanup_provider failed: {e:?}");
+    // Emergency reset tears down kernel filters, which requires admin.
+    // Without it the teardown can't run -- and we must NOT wipe the
+    // profile or claim "off" while the filters are still live (that
+    // strands the user: traffic blocked, config gone, UI lying). Mirror
+    // the on_enable_filters elevation gate.
+    if !unsafe { IsUserAnAdmin() }.as_bool() {
+        let title = wide(&t!("dialog.admin_required"));
+        let body = wide(&t!("message.admin_required_body"));
+        unsafe {
+            MessageBoxW(
+                hwnd,
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONERROR,
+            );
         }
-    } else {
-        eprintln!("amwall: emergency reset: WFP engine open failed (skipping cleanup)");
+        return;
     }
 
-    // 2. Empty the in-memory profile + persist.
+    // 1. Tear down every filter, sublayer, and the provider itself.
+    //    This is the whole point of the reset, so a failure here is
+    //    FATAL: surface it and bail BEFORE wiping the profile or
+    //    flipping the UI. cleanup_provider still succeeds when the
+    //    provider is already gone (already-disabled), so a genuine Err
+    //    means the teardown really did not happen.
+    let engine = match crate::wfp::WfpEngine::open() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("amwall: emergency reset: WFP engine open failed: {e:?}");
+            set_status_text(state.status.get(), 0, &t!("status.engine_failed"));
+            return;
+        }
+    };
+    if let Err(e) = engine.cleanup_provider(&crate::install::PROVIDER_KEY) {
+        eprintln!("amwall: emergency reset: cleanup_provider failed: {e:?}");
+        set_status_text(state.status.get(), 0, &t!("status.uninstall_failed"));
+        return;
+    }
+
+    // 2. Empty the in-memory profile + persist (only after a
+    //    successful teardown).
     {
         let mut profile = state.app.profile.borrow_mut();
         profile.apps.clear();
