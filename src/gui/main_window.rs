@@ -51,6 +51,7 @@ use windows::Win32::UI::Controls::{
     NMLVCUSTOMDRAW, NMLVKEYDOWN,
     NMTBGETINFOTIPW, SBARS_TOOLTIPS, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW,
     TBN_GETINFOTIPW, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW,
+    TCM_SETCURSEL,
     TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -80,13 +81,14 @@ use super::ids::{
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
     IDM_ALLOW, IDM_BLOCK, IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK,
     IDM_BLOCKLIST_UPDATE_DISABLE, IDM_CHECK, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK,
-    IDM_CONTEXT_RULE_FIRST, IDM_CONTEXT_RULE_LAST, IDM_COPY, IDM_COPY_VALUE, IDM_DELETE, IDM_EXIT,
+    IDM_CLOSE_CONNECTION, IDM_CONTEXT_RULE_FIRST, IDM_CONTEXT_RULE_LAST, IDM_COPY, IDM_COPY_VALUE,
+    IDM_DELETE, IDM_EXIT,
     IDM_EXPLORE, IDM_EXPORT, IDM_FIND, IDM_FONT, IDM_IMPORT,
     IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_OPENRULESEDITOR, IDM_PROPERTIES, IDM_PURGE_TIMERS,
     IDM_REMOVE_FROM_PROFILE,
     IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK,
     IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SELECT_ALL,
-    IDM_SETTINGS,
+    IDM_SETTINGS, IDM_SHOW_IN_LIST,
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SIZE_EXTRALARGE, IDM_SIZE_LARGE,
     IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TIMER_15MIN, IDM_TIMER_1HR,
     IDM_TIMER_30MIN, IDM_TIMER_4HR, IDM_TOGGLE_SILENT, IDM_TOGGLE_UNDELETABLE, IDM_TRAY_ENABLELOG_CHK,
@@ -241,6 +243,10 @@ struct WndState {
     /// the oldest is dropped. `EVENT_LOG_CAP` rows is enough to
     /// see recent activity without unbounded memory growth.
     event_log: std::cell::RefCell<std::collections::VecDeque<crate::wfp::events::NetEvent>>,
+    /// The connection snapshot most recently rendered on the Network
+    /// tab. Populate stamps each row's lParam with its index into this
+    /// Vec so a right-click can round-trip row → Connection (Fable #27).
+    connections: std::cell::RefCell<Vec<super::connections::Connection>>,
     /// File-backed event log writer (M6.3). Lazily opens / rotates
     /// the on-disk log per `Settings.enable_log` + `log_path` +
     /// `log_size_limit`. Mirrors the in-memory `event_log` ring,
@@ -396,6 +402,7 @@ impl WndState {
             event_rx: std::cell::RefCell::new(None),
             event_engine: std::cell::RefCell::new(None),
             event_log: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            connections: std::cell::RefCell::new(Vec::new()),
             event_log_writer: std::cell::RefCell::new(
                 super::event_log::EventLogWriter::new(),
             ),
@@ -851,6 +858,15 @@ unsafe extern "system" fn wnd_proc(
             {
                 let activate = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
                 on_rules_context_menu(hwnd, nmhdr.idFrom as i32, activate);
+            }
+            // NM_RCLICK on the Network / Log tabs (Fable #27 parts 2/3).
+            if nmhdr.code == NM_RCLICK && nmhdr.idFrom == IDC_NETWORK as usize {
+                let activate = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
+                on_network_context_menu(hwnd, activate);
+            }
+            if nmhdr.code == NM_RCLICK && nmhdr.idFrom == IDC_LOG as usize {
+                let activate = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
+                on_log_context_menu(hwnd, activate);
             }
             // NM_CUSTOMDRAW on the Apps tabs — pick a row
             // background color per upstream simplewall's
@@ -3918,6 +3934,378 @@ fn on_rules_copy(hwnd: HWND, listview_id: i32, column: Option<i32>) {
         }
     };
     set_clipboard_text(hwnd, &lines.join("\r\n"));
+}
+
+// ===================================================================
+// Network + Log tab context menus (Fable #27 parts 2 & 3).
+// ===================================================================
+
+/// Copy the selected rows of any report listview. `column = None` joins
+/// all columns per row with ", "; `Some(c)` copies just that column.
+fn copy_selected(hwnd: HWND, lv: HWND, column: Option<i32>) {
+    if lv.0 == 0 {
+        return;
+    }
+    let rows = selected_rows(lv, -1);
+    if rows.is_empty() {
+        return;
+    }
+    let lines: Vec<String> = match column {
+        Some(c) => rows
+            .iter()
+            .map(|&r| listview_item_text(lv, r, c).unwrap_or_default())
+            .collect(),
+        None => {
+            let ncols = listview_column_count(lv).max(1);
+            rows.iter()
+                .map(|&r| {
+                    (0..ncols)
+                        .map(|c| listview_item_text(lv, r, c).unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .collect()
+        }
+    };
+    set_clipboard_text(hwnd, &lines.join("\r\n"));
+}
+
+/// Select every row of a report listview.
+fn select_all_rows(lv: HWND) {
+    if lv.0 == 0 {
+        return;
+    }
+    let item = LVITEMW {
+        state: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0),
+        stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0),
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(
+            lv,
+            LVM_SETITEMSTATE,
+            WPARAM(usize::MAX),
+            LPARAM(&item as *const _ as isize),
+        );
+    }
+}
+
+/// Open a file's containing folder in Explorer with it pre-selected.
+fn explore_path(hwnd: HWND, path: &std::path::Path) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    let args = format!("/select,\"{}\"", path.display());
+    let mut wargs = wide(&args);
+    let mut wexe = wide("explorer.exe");
+    let mut wverb = wide("open");
+    unsafe {
+        ShellExecuteW(
+            hwnd,
+            windows::core::PCWSTR(wverb.as_mut_ptr()),
+            windows::core::PCWSTR(wexe.as_mut_ptr()),
+            windows::core::PCWSTR(wargs.as_mut_ptr()),
+            windows::core::PCWSTR::null(),
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Select + scroll to the Apps-Profile row whose stamped source index
+/// maps to `path`.
+fn select_apps_row_by_path(state: &WndState, path: &std::path::Path) {
+    let lv = state.listviews[0].get();
+    if lv.0 == 0 {
+        return;
+    }
+    let count = unsafe { SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0)) }.0 as i32;
+    let profile = state.app.profile.borrow();
+    for row in 0..count {
+        if let Some(src) = listview_item_param(lv, row).map(|p| p as usize) {
+            if profile.apps.get(src).is_some_and(|a| a.path == path) {
+                drop(profile);
+                select_only_row(lv, row);
+                unsafe {
+                    SendMessageW(lv, LVM_ENSUREVISIBLE, WPARAM(row as usize), LPARAM(0));
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// "Show in list": add the app to the profile if it isn't there, switch
+/// to the Apps Profile tab, and select the app's row. Mirrors upstream's
+/// _app_command_properties network/log cases (messages.c:2789/2820).
+fn show_app_in_list(hwnd: HWND, state: &WndState, path: &std::path::Path) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let added = {
+        let mut profile = state.app.profile.borrow_mut();
+        if profile.apps.iter().any(|a| a.path == path) {
+            false
+        } else {
+            profile.apps.push(crate::profile::App {
+                path: path.to_path_buf(),
+                is_enabled: false,
+                is_silent: false,
+                is_undeletable: false,
+                timestamp: now,
+                timer: 0,
+                hash: None,
+                comment: None,
+            });
+            true
+        }
+    };
+    if added {
+        save_profile_to_disk(state);
+    }
+    // Switch the tab control to Apps Profile (index 0) and repopulate.
+    let tab = state.tab.get();
+    if tab.0 != 0 {
+        unsafe {
+            SendMessageW(tab, TCM_SETCURSEL, WPARAM(0), LPARAM(0));
+        }
+    }
+    on_tab_change(hwnd);
+    if added {
+        reinstall_filters_if_active(hwnd, state);
+    }
+    select_apps_row_by_path(state, path);
+}
+
+/// Render an (ip, port) pair as an amwall rule-string matcher. `None`
+/// for the unspecified address (nothing to match).
+fn addr_port_rule_string(ip: std::net::IpAddr, port: u16) -> Option<String> {
+    if ip.is_unspecified() {
+        return None;
+    }
+    Some(if port == 0 {
+        ip.to_string()
+    } else {
+        match ip {
+            std::net::IpAddr::V4(a) => format!("{a}:{port}"),
+            std::net::IpAddr::V6(a) => format!("[{a}]:{port}"),
+        }
+    })
+}
+
+/// Build a BLOCK rule pre-filled from an endpoint pair + app, for the
+/// Network / Log "Create rule..." command (upstream _app_command_openeditor,
+/// messages.c:2587/2635).
+fn build_endpoint_rule(
+    name: &str,
+    local: Option<(std::net::IpAddr, u16)>,
+    remote: Option<(std::net::IpAddr, u16)>,
+    protocol: Option<u8>,
+    direction: crate::profile::Direction,
+    app_path: Option<&str>,
+) -> crate::profile::Rule {
+    crate::profile::Rule {
+        name: name.to_string(),
+        remote: remote.and_then(|(ip, p)| addr_port_rule_string(ip, p)),
+        local: local.and_then(|(ip, p)| addr_port_rule_string(ip, p)),
+        direction,
+        action: crate::profile::Action::Block,
+        protocol,
+        address_family: None,
+        apps: app_path.map(|s| s.to_string()),
+        is_services: false,
+        is_enabled: true,
+        os_version: None,
+        comment: None,
+    }
+}
+
+/// Open the rule editor pre-filled with `rule`; on OK push it to
+/// custom_rules and persist/repopulate/reinstall.
+fn create_rule_prefilled(hwnd: HWND, state: &WndState, rule: crate::profile::Rule) {
+    let apps_snapshot = state.app.profile.borrow().apps.clone();
+    let new_rule = match super::rule_editor::open(hwnd, Some(&rule), &apps_snapshot) {
+        Some(r) => r,
+        None => return,
+    };
+    state.app.profile.borrow_mut().custom_rules.push(new_rule);
+    save_profile_to_disk(state);
+    populate_user_rules(state);
+    on_tab_change(hwnd);
+    reinstall_filters_if_active(hwnd, state);
+    set_status_text(state.status.get(), 0, &t!("status.rule_added"));
+}
+
+/// Tear down the selected live connection (Network "Close connection").
+/// Needs elevation and only works for IPv4 established TCP.
+fn on_close_connection(hwnd: HWND, state: &WndState, conn: &super::connections::Connection) {
+    match super::connections::close_connection(conn) {
+        Ok(()) => {
+            populate_connections_tab(state);
+            on_tab_change(hwnd);
+            set_status_text(state.status.get(), 0, "Connection closed.");
+        }
+        Err(code) => {
+            eprintln!("amwall: close_connection failed: 0x{code:08x}");
+            let msg = if !super::is_elevated() {
+                "Closing a connection requires running amwall as administrator."
+            } else {
+                "Failed to close the connection."
+            };
+            set_status_text(state.status.get(), 0, msg);
+        }
+    }
+}
+
+/// Show the Network-tab context menu and dispatch its command.
+fn on_network_context_menu(hwnd: HWND, activate: &NMITEMACTIVATE) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let lv = state.listviews[6].get();
+    let row = activate.iItem;
+    if lv.0 == 0 || row < 0 {
+        return;
+    }
+    if !is_row_selected(lv, row) {
+        select_only_row(lv, row);
+    }
+    let Some(src) = listview_item_param(lv, row).map(|p| p as usize) else {
+        return;
+    };
+    let conn = state.connections.borrow().get(src).cloned();
+    let Some(conn) = conn else {
+        return;
+    };
+    let path = super::connections::process_full_path(conn.pid);
+    let target = super::net_log_context_menu::NetContextTarget {
+        has_path: path.is_some(),
+        is_closable: conn.is_closable(),
+        column: activate.iSubItem,
+        column_text: listview_item_text(lv, row, activate.iSubItem),
+    };
+    let Some(id) = super::net_log_context_menu::show_network(hwnd, &target) else {
+        return;
+    };
+    match id {
+        IDM_SHOW_IN_LIST => {
+            if let Some(p) = &path {
+                show_app_in_list(hwnd, state, p);
+            }
+        }
+        IDM_OPENRULESEDITOR => {
+            let proto = match conn.protocol {
+                super::connections::Protocol::Tcp => Some(6u8),
+                super::connections::Protocol::Udp => Some(17u8),
+            };
+            let app_str = path.as_ref().map(|p| p.to_string_lossy().into_owned());
+            let rule = build_endpoint_rule(
+                &conn.process,
+                Some((conn.local.ip, conn.local.port)),
+                Some((conn.remote.ip, conn.remote.port)),
+                proto,
+                crate::profile::Direction::Any,
+                app_str.as_deref(),
+            );
+            create_rule_prefilled(hwnd, state, rule);
+        }
+        IDM_EXPLORE => {
+            if let Some(p) = &path {
+                explore_path(hwnd, p);
+            }
+        }
+        IDM_CLOSE_CONNECTION => on_close_connection(hwnd, state, &conn),
+        IDM_SELECT_ALL => select_all_rows(lv),
+        IDM_COPY => copy_selected(hwnd, lv, None),
+        IDM_COPY_VALUE => copy_selected(hwnd, lv, Some(activate.iSubItem)),
+        _ => {}
+    }
+}
+
+/// Show the Log-tab context menu and dispatch its command.
+fn on_log_context_menu(hwnd: HWND, activate: &NMITEMACTIVATE) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let lv = state.listviews[7].get();
+    let row = activate.iItem;
+    if lv.0 == 0 || row < 0 {
+        return;
+    }
+    if !is_row_selected(lv, row) {
+        select_only_row(lv, row);
+    }
+    let Some(evt_idx) = listview_item_param(lv, row).map(|p| p as usize) else {
+        return;
+    };
+    // Clone the detail we need so the event_log borrow drops before the
+    // menu (which pumps messages and could re-enter the log).
+    let details = {
+        let log = state.event_log.borrow();
+        match log.get(evt_idx) {
+            Some(crate::wfp::events::NetEvent::Drop(d))
+            | Some(crate::wfp::events::NetEvent::Allow(d)) => Some(d.clone()),
+            _ => None,
+        }
+    };
+    let Some(details) = details else {
+        return;
+    };
+    let app_path = details.app_path.clone();
+    let has_path = app_path.as_deref().is_some_and(|p| !p.is_empty());
+    let target = super::net_log_context_menu::LogContextTarget {
+        has_path,
+        column: activate.iSubItem,
+        column_text: listview_item_text(lv, row, activate.iSubItem),
+    };
+    let Some(id) = super::net_log_context_menu::show_log(hwnd, &target) else {
+        return;
+    };
+    match id {
+        IDM_SHOW_IN_LIST => {
+            if let Some(p) = app_path.as_deref() {
+                show_app_in_list(hwnd, state, std::path::Path::new(p));
+            }
+        }
+        IDM_OPENRULESEDITOR => {
+            let dir = match details.direction {
+                Some(crate::wfp::events::NetDirection::Inbound) => crate::profile::Direction::Inbound,
+                Some(crate::wfp::events::NetDirection::Outbound) => {
+                    crate::profile::Direction::Outbound
+                }
+                None => crate::profile::Direction::Any,
+            };
+            let name = app_path
+                .as_deref()
+                .map(log_basename)
+                .unwrap_or("rule")
+                .to_string();
+            let rule = build_endpoint_rule(
+                &name,
+                details.local_addr.zip(details.local_port),
+                details.remote_addr.zip(details.remote_port),
+                details.protocol,
+                dir,
+                app_path.as_deref(),
+            );
+            create_rule_prefilled(hwnd, state, rule);
+        }
+        IDM_EXPLORE => {
+            if let Some(p) = app_path.as_deref() {
+                explore_path(hwnd, std::path::Path::new(p));
+            }
+        }
+        IDM_TRAY_LOGCLEAR => on_log_clear(hwnd),
+        IDM_SELECT_ALL => select_all_rows(lv),
+        IDM_COPY => copy_selected(hwnd, lv, None),
+        IDM_COPY_VALUE => copy_selected(hwnd, lv, Some(activate.iSubItem)),
+        _ => {}
+    }
 }
 
 /// NM_CUSTOMDRAW handler for the Apps Profile / Services / UWP
@@ -8596,18 +8984,21 @@ fn populate_connections_tab(state: &WndState) {
     let filter = state.search_text.borrow().clone();
     let resolve = state.app.settings.borrow().use_network_resolution;
     let mut row = 0i32;
-    for c in conns.iter() {
+    for (src_idx, c) in conns.iter().enumerate() {
         if !search_match(&c.process, &filter) {
             continue;
         }
         let idx = row as usize;
         row += 1;
         let mut name_buf = wide(&c.process);
+        // Stamp the source index into lParam so a right-click round-trips
+        // row → Connection despite search filtering (Fable #27).
         let item = LVITEMW {
-            mask: LVIF_TEXT,
+            mask: LVIF_TEXT | LVIF_PARAM,
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
+            lParam: LPARAM(src_idx as isize),
             ..Default::default()
         };
         let _ = unsafe {
@@ -8646,6 +9037,8 @@ fn populate_connections_tab(state: &WndState) {
         set_subitem(lv, idx as i32, 8, c.state);
     }
     end_listview_refill(lv, saved, row);
+    // Cache the snapshot the stamped lParams index into.
+    *state.connections.borrow_mut() = conns;
 }
 
 /// Hostname-or-empty for one IP. When `resolve` is false we don't
@@ -8719,11 +9112,15 @@ fn populate_log_tab(state: &WndState) {
         let i = row;
         row += 1;
         let mut idx_buf = wide(&format!("{}", event_idx + 1));
+        // Stamp the event ring index into lParam so a right-clicked log
+        // row maps back to state.event_log[event_idx] despite search
+        // filtering — the "#" column text isn't a reliable key (Fable #27).
         let item = LVITEMW {
-            mask: LVIF_TEXT,
+            mask: LVIF_TEXT | LVIF_PARAM,
             iItem: i,
             iSubItem: 0,
             pszText: PWSTR(idx_buf.as_mut_ptr()),
+            lParam: LPARAM(event_idx as isize),
             ..Default::default()
         };
         let _ = unsafe {

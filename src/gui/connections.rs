@@ -40,12 +40,69 @@ pub struct Connection {
     /// Process name (basename of the .exe). Best-effort: PID 0
     /// (System) and PIDs we can't open are reported as "?".
     pub process: String,
+    /// Owning process id. Lets the Connections context menu resolve the
+    /// full image path on demand (Explore / Show-in-list) without paying
+    /// `process_full_path` per connection on every refresh (Fable #27).
+    pub pid: u32,
     pub local: Endpoint,
     pub remote: Endpoint,
     pub protocol: Protocol,
     /// State string ("ESTABLISHED" / "LISTEN" / etc.). For UDP
     /// (which has no connection state) this is empty.
     pub state: &'static str,
+}
+
+impl Connection {
+    /// Whether the remote endpoint is IPv4 — the only family SetTcpEntry
+    /// can close.
+    pub fn is_ipv4(&self) -> bool {
+        matches!(self.remote.ip, IpAddr::V4(_))
+    }
+
+    /// Whether this is a live IPv4 TCP connection that can be torn down
+    /// via `close_connection` (upstream gate: af==AF_INET && ESTAB).
+    pub fn is_closable(&self) -> bool {
+        self.is_ipv4() && self.protocol == Protocol::Tcp && self.state == "ESTABLISHED"
+    }
+}
+
+/// Forcibly close an established IPv4 TCP connection by setting its TCB
+/// state to DELETE (mirrors upstream, messages.c:2449-2457). Only IPv4
+/// established TCP can be closed this way — IPv6 and UDP have no
+/// SetTcpEntry equivalent, so callers gray the menu item for them.
+/// Requires an elevated process; returns the Win32 error on failure.
+///
+/// NOTE: unverifiable under `cargo test` — SetTcpEntry only works
+/// elevated and only on AF_INET established TCP, and a wrong address/port
+/// byte order silently no-ops. Verify with an elevated run tearing down a
+/// live TCP connection and confirming via `netstat`.
+pub fn close_connection(c: &Connection) -> Result<(), u32> {
+    use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        MIB_TCPROW_LH, MIB_TCPROW_LH_0, SetTcpEntry,
+    };
+
+    if !c.is_closable() {
+        return Err(ERROR_INVALID_PARAMETER.0);
+    }
+    let (IpAddr::V4(local), IpAddr::V4(remote)) = (c.local.ip, c.remote.ip) else {
+        return Err(ERROR_INVALID_PARAMETER.0);
+    };
+    // in_addr.S_un.S_addr is the network-order address as a u32; on x86
+    // that's the octets read little-endian. Ports go to network order via
+    // a 16-bit byteswap (upstream _r_byteswap_ushort), stored in the low
+    // word. The LH row's state lives in an anonymous union.
+    let row = MIB_TCPROW_LH {
+        Anonymous: MIB_TCPROW_LH_0 {
+            State: MIB_TCP_STATE_DELETE_TCB,
+        },
+        dwLocalAddr: u32::from_le_bytes(local.octets()),
+        dwLocalPort: c.local.port.to_be() as u32,
+        dwRemoteAddr: u32::from_le_bytes(remote.octets()),
+        dwRemotePort: c.remote.port.to_be() as u32,
+    };
+    let rc = unsafe { SetTcpEntry(&row) };
+    if rc == 0 { Ok(()) } else { Err(rc) }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -188,7 +245,7 @@ fn read_pids_udp6() -> Option<Vec<u32>> {
     Some(rows.iter().map(|r| r.dwOwningPid).collect())
 }
 
-fn process_full_path(pid: u32) -> Option<std::path::PathBuf> {
+pub fn process_full_path(pid: u32) -> Option<std::path::PathBuf> {
     if pid == 0 {
         return None;
     }
@@ -282,6 +339,7 @@ fn read_tcp4() -> Option<Vec<Connection>> {
     for r in rows {
         out.push(Connection {
             process: process_name(r.dwOwningPid),
+            pid: r.dwOwningPid,
             local: Endpoint {
                 ip: IpAddr::V4(Ipv4Addr::from(u32::from_be(r.dwLocalAddr))),
                 port: ntohs(r.dwLocalPort),
@@ -338,6 +396,7 @@ fn read_tcp6() -> Option<Vec<Connection>> {
     for r in rows {
         out.push(Connection {
             process: process_name(r.dwOwningPid),
+            pid: r.dwOwningPid,
             local: Endpoint {
                 ip: IpAddr::V6(Ipv6Addr::from(r.ucLocalAddr)),
                 port: ntohs(r.dwLocalPort),
@@ -394,6 +453,7 @@ fn read_udp4() -> Option<Vec<Connection>> {
     for r in rows {
         out.push(Connection {
             process: process_name(r.dwOwningPid),
+            pid: r.dwOwningPid,
             local: Endpoint {
                 ip: IpAddr::V4(Ipv4Addr::from(u32::from_be(r.dwLocalAddr))),
                 port: ntohs(r.dwLocalPort),
@@ -450,6 +510,7 @@ fn read_udp6() -> Option<Vec<Connection>> {
     for r in rows {
         out.push(Connection {
             process: process_name(r.dwOwningPid),
+            pid: r.dwOwningPid,
             local: Endpoint {
                 ip: IpAddr::V6(Ipv6Addr::from(r.ucLocalAddr)),
                 port: ntohs(r.dwLocalPort),
