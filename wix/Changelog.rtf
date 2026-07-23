@@ -1,5 +1,31 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.17 (current)\par
+What's new in amwall v1.1.18 (current)\par
+\par
+  - Right-click menus everywhere. The Rules, Network, and Log tabs\par
+    now have full right-click menus (edit / delete / enable /\par
+    disable / copy / select all), matching the Apps tab and\par
+    upstream simplewall. On the Network tab you can also close a\par
+    live connection or jump to the owning app; on Network / Log you\par
+    can create a rule pre-filled from the row\par
+  - The app-list right-click menu is complete: assign an app to your\par
+    rules from a "Rules" submenu, bulk enable / disable / remove a\par
+    whole selection at once, and copy a row or a single column\par
+  - Keyboard shortcuts for the lists: Enter (properties / edit),\par
+    Delete, Ctrl+C (copy), Ctrl+E (open folder), Ctrl+A (select\par
+    all), Ctrl+Tab / Ctrl+Shift+Tab (switch tabs), F11 (maximize).\par
+    Typing in the search box keeps working normally\par
+  - New Highlighting settings page. Turn each row-colour category\par
+    (invalid / signed / system / has-connections / disabled-removal\par
+    / etc.) on or off and pick its colour; double-click a row to\par
+    change it. Fixes a wrong default colour for system apps\par
+  - Fuller tray menu, matching upstream: Notifications and Packets-\par
+    log submenus with their toggles, plus Website / About\par
+  - Several fixes found in an internal review of the above: Delete\par
+    no longer removes apps you marked "Prevent removal", and a\par
+    keyboard Delete on the System / Blocklist rules tabs no longer\par
+    acts on a stale selection from the Custom-rules tab\par
+\par
+What's new in amwall v1.1.17\par
 \par
   - Firewall-correctness, security, and GUI release. Fixes\par
     30 issues found in a deep internal audit; the\par
