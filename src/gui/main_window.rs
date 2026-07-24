@@ -2733,6 +2733,19 @@ fn auto_catalog_drops(
     for_prompt
 }
 
+/// Whether a fresh connect-prompt window should open for an app.
+/// Pure so the overnight-stacking fix (logic-atlas stage 11) can't
+/// silently regress. Two load-bearing gates:
+///   - `is_silent`: the user chose Block / "stop asking" for this app —
+///     never re-prompt (mirrors upstream `INFO_IS_SILENT`,
+///     `log.c:1391-1395`).
+///   - `already_pending`: a prompt window for this app is already on
+///     screen; opening another is exactly the stacking bug. One window
+///     per app.
+fn should_show_connect_prompt(is_silent: bool, already_pending: bool) -> bool {
+    !is_silent && !already_pending
+}
+
 /// Show the centered Allow/Block dialog for each app in `new_apps`
 /// that doesn't already have one open. The list comes from
 /// `auto_catalog_drops` — usually apps *just added* to the profile
@@ -2770,18 +2783,17 @@ fn process_connect_prompts(
             .find(|a| a.path == *path)
             .map(|a| a.is_silent)
             .unwrap_or(false);
-        if silenced {
+        // One open prompt window per app: if this app already has a
+        // prompt on screen (e.g. the user is away and it keeps retrying),
+        // don't open another -- that stacking is what produced dozens of
+        // windows overnight. The guard clears on window close via
+        // WM_USER_CONNECT_PROMPT_CLOSED.
+        let already_pending = state.pending_prompts.borrow().contains(path);
+        if !should_show_connect_prompt(silenced, already_pending) {
             continue;
         }
-        // One open prompt window per app. If this app already has a
-        // prompt on screen (e.g. the user is away and it keeps trying
-        // to connect), don't open another -- that stacking is what
-        // produced dozens of windows overnight. `insert` returns false
-        // when the app is already pending; the guard clears on window
-        // close via WM_USER_CONNECT_PROMPT_CLOSED.
-        if !state.pending_prompts.borrow_mut().insert(path.clone()) {
-            continue;
-        }
+        // Reserve the one-window-per-app slot before showing.
+        state.pending_prompts.borrow_mut().insert(path.clone());
         // Pull cached signer for the prompt's "Signed by X" line.
         // Cache will usually have the entry by now since the
         // path was just auto-cataloged and the worker keeps a
@@ -9342,6 +9354,16 @@ fn refresh_apps_traffic_columns(state: &WndState) {
         return;
     }
     refresh_app_traffic(state);
+    // If the list is sorted by a live speed column, a plain in-place
+    // value update would leave rows in a now-wrong order (a stopped app
+    // frozen near the top). Re-run the full populate so the ranking
+    // re-sorts as rates change. Static sorts (Name / Added) keep the
+    // cheap in-place update that preserves selection and scroll.
+    let col = state.apps_sort.get().column;
+    if col == 3 || col == 4 {
+        populate_apps_tab(state);
+        return;
+    }
     let count = unsafe { SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0)) }.0 as i32;
     for row in 0..count {
         let path = {
@@ -9408,14 +9430,30 @@ fn populate_apps_tab(state: &WndState) {
     let sort = state.apps_sort.get();
     let mut indexed: Vec<(usize, &crate::profile::App)> =
         profile.apps.iter().enumerate().collect();
-    indexed.sort_by(|a, b| {
-        let cmp = match sort.column {
-            0 => a.1.path.cmp(&b.1.path),
-            // 1 (and any other column) sorts by timestamp.
-            _ => a.1.timestamp.cmp(&b.1.timestamp),
+    {
+        // Columns 3 (↓) and 4 (↑) sort by the live per-app rate, looked
+        // up in `app_traffic` by lowercased path (blank / not-connected
+        // sorts as 0). The refresh timer re-runs this populate while a
+        // speed column is active so the ranking tracks changing rates.
+        let app_traffic = state.app_traffic.borrow();
+        let speed_of = |app: &crate::profile::App, upload: bool| -> u64 {
+            let key = app.path.to_string_lossy().to_ascii_lowercase();
+            app_traffic
+                .get(&key)
+                .map(|t| if upload { t.upload_speed } else { t.download_speed })
+                .unwrap_or(0)
         };
-        if sort.ascending { cmp } else { cmp.reverse() }
-    });
+        indexed.sort_by(|a, b| {
+            let cmp = match sort.column {
+                0 => a.1.path.cmp(&b.1.path),
+                3 => speed_of(a.1, false).cmp(&speed_of(b.1, false)),
+                4 => speed_of(a.1, true).cmp(&speed_of(b.1, true)),
+                // 1 (and any other column) sorts by timestamp.
+                _ => a.1.timestamp.cmp(&b.1.timestamp),
+            };
+            if sort.ascending { cmp } else { cmp.reverse() }
+        });
+    }
 
     let mut row = 0i32;
     for (orig_idx, app) in indexed {
@@ -10351,6 +10389,15 @@ mod tests {
             total_bytes: total,
             has_stats: true,
         }
+    }
+
+    #[test]
+    fn connect_prompt_shows_only_when_not_silent_and_not_pending() {
+        // The overnight-stacking guard (logic-atlas stage 11).
+        assert!(should_show_connect_prompt(false, false)); // new drop, no window → show
+        assert!(!should_show_connect_prompt(true, false)); // silenced → never
+        assert!(!should_show_connect_prompt(false, true)); // already on screen → no stack
+        assert!(!should_show_connect_prompt(true, true)); // both → still no
     }
 
     #[test]
