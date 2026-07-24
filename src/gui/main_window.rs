@@ -2219,6 +2219,246 @@ fn is_microsoft_signed(path: &std::path::Path) -> bool {
     }
 }
 
+/// What to do with one drop net-event, decided purely so the
+/// "catalog + prompt for ANY provider's drop" rule (the v1.1.19 fix)
+/// and the Fable-#24 re-prompt throttle are unit-testable without a
+/// window or a live BFE. `auto_catalog_drops` gathers the inputs and
+/// carries out the side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropDisposition {
+    /// Nothing to do: no filter id, an excluded source category, no
+    /// resolvable app path, or an already-silenced / not-yet-due app.
+    Ignore,
+    /// A not-yet-cataloged app — add it, then auto-allow or prompt.
+    CatalogNew,
+    /// An existing blocked-but-not-silenced app due for a re-prompt.
+    Reprompt,
+}
+
+/// Read-only view of an already-cataloged app for the decision.
+#[derive(Debug, Clone, Copy)]
+struct ExistingApp {
+    is_silent: bool,
+    is_enabled: bool,
+}
+
+/// Inputs to the per-drop decision. The wrapper does the impure lookups
+/// (path resolution, profile / categorized-ids / pending / last-notify
+/// reads) and passes the resulting primitives so `classify_drop` stays
+/// pure.
+struct DropContext {
+    has_filter_id: bool,
+    has_resolved_path: bool,
+    exclude_blocklist: bool,
+    in_blocklist: bool,
+    exclude_custom: bool,
+    in_user_rules: bool,
+    exclude_stealth: bool,
+    in_stealth: bool,
+    existing: Option<ExistingApp>,
+    /// True while a prompt window for this app is already open.
+    prompt_open: bool,
+    /// notification_timeout in seconds; `<= 0` disables re-prompting.
+    reprompt_after_secs: i64,
+    secs_since_last_prompt: i64,
+}
+
+/// Decide the fate of one drop event. Pure — mirrors the exact sequence
+/// of early-outs in the original `auto_catalog_drops` loop so behavior
+/// is unchanged; the point is that the sequence is now testable.
+///
+/// CRITICAL: there is deliberately NO WFP-provider gate here. A drop
+/// from ANY provider whose filter isn't in an excluded category is
+/// cataloged — that is the v1.1.19 fix (mirrors upstream log.c:1355 /
+/// :1394, where `is_myprovider` gates only the UI packet-log tab). The
+/// `catalogs_foreign_provider_drop` test guards its absence.
+fn classify_drop(ctx: &DropContext) -> DropDisposition {
+    // No filter id -> can't categorize (upstream `!log->filter_id`, log.c:528).
+    if !ctx.has_filter_id {
+        return DropDisposition::Ignore;
+    }
+    // Settings -> Exclude by the source filter's category.
+    if (ctx.exclude_blocklist && ctx.in_blocklist)
+        || (ctx.exclude_custom && ctx.in_user_rules)
+        || (ctx.exclude_stealth && ctx.in_stealth)
+    {
+        return DropDisposition::Ignore;
+    }
+    // Need a resolvable app path.
+    if !ctx.has_resolved_path {
+        return DropDisposition::Ignore;
+    }
+    match ctx.existing {
+        None => DropDisposition::CatalogNew,
+        Some(ExistingApp { is_silent, is_enabled }) => {
+            // Re-prompt only a still-blocked, not-silenced app, throttled
+            // by notification_timeout, and never while its window is open.
+            if is_silent || is_enabled || ctx.reprompt_after_secs <= 0 {
+                return DropDisposition::Ignore;
+            }
+            if ctx.prompt_open {
+                return DropDisposition::Ignore;
+            }
+            if ctx.secs_since_last_prompt < ctx.reprompt_after_secs {
+                return DropDisposition::Ignore;
+            }
+            DropDisposition::Reprompt
+        }
+    }
+}
+
+/// The "-> addr:port" remote label for a prompt row. ASCII arrow —
+/// Segoe UI in dialog mode renders U+2192 as a placeholder box on some
+/// systems; "->" round-trips cleanly.
+fn format_remote(details: &crate::wfp::events::NetEventDetails) -> String {
+    match (details.remote_addr, details.remote_port) {
+        (Some(addr), Some(port)) => format!("-> {addr}:{port}"),
+        (Some(addr), None) => format!("-> {addr}"),
+        _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod catalog_decision_tests {
+    use super::{classify_drop, DropContext, DropDisposition, ExistingApp};
+
+    /// A drop that SHOULD be cataloged: real filter id, resolvable path,
+    /// not excluded, not yet in the profile. Tests tweak one field.
+    fn fresh_drop() -> DropContext {
+        DropContext {
+            has_filter_id: true,
+            has_resolved_path: true,
+            exclude_blocklist: false,
+            in_blocklist: false,
+            exclude_custom: false,
+            in_user_rules: false,
+            exclude_stealth: false,
+            in_stealth: false,
+            existing: None,
+            prompt_open: false,
+            reprompt_after_secs: 1800,
+            secs_since_last_prompt: 0,
+        }
+    }
+
+    fn blocked_existing() -> Option<ExistingApp> {
+        Some(ExistingApp { is_silent: false, is_enabled: false })
+    }
+
+    #[test]
+    fn ignores_drop_without_filter_id() {
+        let c = DropContext { has_filter_id: false, ..fresh_drop() };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn ignores_drop_without_resolvable_path() {
+        let c = DropContext { has_resolved_path: false, ..fresh_drop() };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn catalogs_a_new_app() {
+        assert_eq!(classify_drop(&fresh_drop()), DropDisposition::CatalogNew);
+    }
+
+    /// THE v1.1.19 guard. A drop owned by a foreign WFP provider — its
+    /// filter id is in NONE of amwall's categorized sets — is still
+    /// cataloged; there is no own-provider gate. Re-adding one fails here.
+    #[test]
+    fn catalogs_foreign_provider_drop() {
+        let c = DropContext {
+            has_filter_id: true, // a real drop...
+            in_blocklist: false, // ...whose filter is not one of ours
+            in_user_rules: false,
+            in_stealth: false,
+            ..fresh_drop()
+        };
+        assert_eq!(classify_drop(&c), DropDisposition::CatalogNew);
+    }
+
+    #[test]
+    fn excludes_category_only_when_its_flag_is_on() {
+        // Blocklist-sourced drop, but exclude flag off -> still cataloged.
+        let c = DropContext { in_blocklist: true, exclude_blocklist: false, ..fresh_drop() };
+        assert_eq!(classify_drop(&c), DropDisposition::CatalogNew);
+        // Flag on -> excluded.
+        let c = DropContext { in_blocklist: true, exclude_blocklist: true, ..fresh_drop() };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn excludes_custom_and_stealth_categories() {
+        let c = DropContext { in_user_rules: true, exclude_custom: true, ..fresh_drop() };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+        let c = DropContext { in_stealth: true, exclude_stealth: true, ..fresh_drop() };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn ignores_already_silenced_app() {
+        let c = DropContext {
+            existing: Some(ExistingApp { is_silent: true, is_enabled: false }),
+            ..fresh_drop()
+        };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn ignores_already_allowed_app() {
+        let c = DropContext {
+            existing: Some(ExistingApp { is_silent: false, is_enabled: true }),
+            ..fresh_drop()
+        };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn ignores_reprompt_when_timeout_disabled() {
+        let c = DropContext {
+            existing: blocked_existing(),
+            reprompt_after_secs: 0, // disabled
+            secs_since_last_prompt: 100_000,
+            ..fresh_drop()
+        };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn ignores_reprompt_while_prompt_window_open() {
+        let c = DropContext {
+            existing: blocked_existing(),
+            prompt_open: true,
+            secs_since_last_prompt: 100_000, // long past due, but window open
+            ..fresh_drop()
+        };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn ignores_reprompt_before_timeout_elapses() {
+        let c = DropContext {
+            existing: blocked_existing(),
+            reprompt_after_secs: 1800,
+            secs_since_last_prompt: 1799, // one second short
+            ..fresh_drop()
+        };
+        assert_eq!(classify_drop(&c), DropDisposition::Ignore);
+    }
+
+    #[test]
+    fn reprompts_blocked_app_when_due() {
+        let c = DropContext {
+            existing: blocked_existing(),
+            reprompt_after_secs: 1800,
+            secs_since_last_prompt: 1800, // exactly due
+            prompt_open: false,
+            ..fresh_drop()
+        };
+        assert_eq!(classify_drop(&c), DropDisposition::Reprompt);
+    }
+}
+
 fn auto_catalog_drops(
     hwnd: HWND,
     state: &WndState,
@@ -2243,94 +2483,90 @@ fn auto_catalog_drops(
     {
         let profile = state.app.profile.borrow();
         for event in events {
-            let details = match event {
-                NetEvent::Drop(d) => d,
-                _ => continue,
+            let NetEvent::Drop(details) = event else {
+                continue;
             };
-            // Catalog + prompt for a blocked app regardless of WHICH WFP
-            // provider's filter dropped it — mirrors upstream simplewall,
-            // whose `_app_addapplication` (log.c:1355) and connect
-            // notification (log.c:1394) are ungated by `is_myprovider`;
-            // that flag gates ONLY the UI packet-log tab (log.c:1404).
-            // The previous amwall-provider-only gate diverged from upstream
-            // and left amwall silent whenever another firewall (e.g. a VPN
-            // killswitch) blocked the traffic first and owned the drop
-            // event — so no prompt and no Apps-list entry ever appeared.
-            // `filter_id` is still needed below for the Settings->Exclude
-            // category checks; a drop with no filter id can't be
-            // categorized, matching upstream's `!log->filter_id` early-out
-            // (log.c:528).
-            let filter_id = match details.filter_id {
-                Some(f) => f,
-                None => continue,
+
+            // Resolve the app path (pure string transform).
+            let path = details
+                .app_path
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .and_then(nt_path_to_win32)
+                .map(std::path::PathBuf::from);
+
+            // Gather the (impure) decision inputs; `classify_drop` is pure.
+            // Catalog + prompt for a drop from ANY WFP provider, not just
+            // amwall's own — the v1.1.19 fix; `classify_drop` has no
+            // provider gate and its `catalogs_foreign_provider_drop` test
+            // guards that.
+            let existing = path
+                .as_ref()
+                .and_then(|p| profile.apps.iter().find(|a| a.path == *p))
+                .map(|a| ExistingApp {
+                    is_silent: a.is_silent,
+                    is_enabled: a.is_enabled,
+                });
+            let (in_blocklist, in_user_rules, in_stealth) = match details.filter_id {
+                Some(fid) => {
+                    let cats = state.categorized_filter_ids.borrow();
+                    (
+                        cats.blocklist.contains(&fid),
+                        cats.user_rules.contains(&fid),
+                        cats.stealth.contains(&fid),
+                    )
+                }
+                None => (false, false, false),
             };
-            // Settings -> Exclude gates. Drop the prompt for
-            // events whose source filter category the user has
-            // told us to ignore. The categorized sets are filled
-            // at install time; before the first install (this
-            // session) they're empty and these checks no-op.
-            {
+            let prompt_open = path
+                .as_ref()
+                .map(|p| state.pending_prompts.borrow().contains(p))
+                .unwrap_or(false);
+            let secs_since_last_prompt = path
+                .as_ref()
+                .map(|p| {
+                    now_secs.saturating_sub(
+                        state.last_notify.borrow().get(p).copied().unwrap_or(0),
+                    )
+                })
+                .unwrap_or(0);
+            let ctx = {
                 let s = state.app.settings.borrow();
-                let cats = state.categorized_filter_ids.borrow();
-                if s.exclude_blocklist && cats.blocklist.contains(&filter_id) {
-                    continue;
+                DropContext {
+                    has_filter_id: details.filter_id.is_some(),
+                    has_resolved_path: path.is_some(),
+                    exclude_blocklist: s.exclude_blocklist,
+                    in_blocklist,
+                    exclude_custom: s.exclude_custom,
+                    in_user_rules,
+                    exclude_stealth: s.exclude_stealth,
+                    in_stealth,
+                    existing,
+                    prompt_open,
+                    reprompt_after_secs: reprompt_after,
+                    secs_since_last_prompt,
                 }
-                if s.exclude_custom && cats.user_rules.contains(&filter_id) {
-                    continue;
+            };
+
+            // Seen-dedup runs only for actionable dispositions, so an
+            // Ignored drop never suppresses a later actionable one for the
+            // same path (matches the original, which `continue`d before
+            // `seen.insert` for the no-id / excluded / bad-path cases).
+            match classify_drop(&ctx) {
+                DropDisposition::Ignore => {}
+                DropDisposition::CatalogNew => {
+                    let path = path.expect("CatalogNew implies a resolved path");
+                    if seen.insert(path.clone()) {
+                        new_apps.push((path, format_remote(details)));
+                    }
                 }
-                if s.exclude_stealth && cats.stealth.contains(&filter_id) {
-                    continue;
+                DropDisposition::Reprompt => {
+                    let path = path.expect("Reprompt implies a resolved path");
+                    if seen.insert(path.clone()) {
+                        reprompt.push((path, format_remote(details)));
+                    }
                 }
             }
-            let nt = match details.app_path.as_deref() {
-                Some(s) if !s.is_empty() => s,
-                _ => continue,
-            };
-            let win32 = match nt_path_to_win32(nt) {
-                Some(p) => p,
-                None => continue,
-            };
-            let path = std::path::PathBuf::from(&win32);
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            if let Some(existing) = profile.apps.iter().find(|a| a.path == path) {
-                // Already cataloged. Re-prompt only if it's still blocked
-                // but not explicitly silenced (X / dismiss leaves is_silent
-                // false; Block sets it true), and notification_timeout has
-                // elapsed since the last prompt -- otherwise a single
-                // dismiss silenced the app forever. Fable sweep finding #24.
-                if existing.is_silent || existing.is_enabled || reprompt_after <= 0 {
-                    continue;
-                }
-                // Don't re-prompt an app whose prompt window is still open
-                // (user away from the PC): one window per app, never a
-                // stack. Cleared on window close via
-                // WM_USER_CONNECT_PROMPT_CLOSED.
-                if state.pending_prompts.borrow().contains(&path) {
-                    continue;
-                }
-                let last = state.last_notify.borrow().get(&path).copied().unwrap_or(0);
-                if now_secs.saturating_sub(last) < reprompt_after {
-                    continue;
-                }
-                let remote = match (details.remote_addr, details.remote_port) {
-                    (Some(addr), Some(port)) => format!("-> {addr}:{port}"),
-                    (Some(addr), None) => format!("-> {addr}"),
-                    _ => String::new(),
-                };
-                reprompt.push((path, remote));
-                continue;
-            }
-            // ASCII arrow — Segoe UI in dialog mode renders the
-            // Unicode "→" (U+2192) as a placeholder box on some
-            // systems; "->" round-trips cleanly.
-            let remote = match (details.remote_addr, details.remote_port) {
-                (Some(addr), Some(port)) => format!("-> {addr}:{port}"),
-                (Some(addr), None) => format!("-> {addr}"),
-                _ => String::new(),
-            };
-            new_apps.push((path, remote));
         }
     }
 
