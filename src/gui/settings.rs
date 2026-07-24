@@ -359,7 +359,7 @@ impl Default for Settings {
             color_signed: rgb(175, 228, 163),
             color_pico: rgb(51, 153, 255),
             color_system: rgb(151, 196, 251),
-            color_connection: rgb(255, 168, 242),
+            color_connection: rgb(237, 224, 214),
             color_undelete: rgb(211, 211, 211),
             blocklist_spy: BlocklistMode::Block,
             blocklist_update: BlocklistMode::Disable,
