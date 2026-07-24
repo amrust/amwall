@@ -1,5 +1,31 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.19 (current)\par
+What's new in amwall v2.0.0 (current)\par
+\par
+  - Live traffic on the Connections tab. Each active TCP\par
+    connection now shows its download speed, upload speed, and\par
+    the total bytes it has transferred, refreshed as you watch.\par
+    UDP entries and listeners stay blank -- Windows exposes no\par
+    per-socket counters for them. Matches the same feature in\par
+    upstream simplewall\par
+  - Connect prompts no longer stack up. If you step away from\par
+    the PC without answering, amwall keeps a single prompt window\par
+    per program instead of opening a new popup each time that\par
+    program retries -- so you come back to one prompt per app,\par
+    not dozens for the same few\par
+  - Exe-swap protection is on by default. amwall verifies each\par
+    allowed program by SHA-256 hash, so a program whose file is\par
+    replaced on disk no longer silently inherits the old allow\par
+    rule -- it is caught instead\par
+  - Custom rules now accept IPv6 address ranges (start-end),\par
+    matching the existing IPv4 range support and upstream\par
+    simplewall\par
+  - Reliability: a pre-release test gate now proves the\par
+    default-deny firewall actually blocks outbound traffic on a\par
+    live system before any build is published, so the\par
+    non-enforcing regression seen in 1.1.17 / 1.1.18 cannot\par
+    ship again\par
+\par
+What's new in amwall v1.1.19\par
 \par
   - Critical fix: the default-deny rule could permit outbound\par
     connections instead of blocking them, so new apps were not\par
