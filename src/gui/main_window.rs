@@ -300,6 +300,13 @@ struct WndState {
     /// key would never match (same normalization as the rule/colorizer
     /// matching elsewhere). Refreshed on the apps-tab timer.
     app_traffic: std::cell::RefCell<std::collections::HashMap<String, AppTraffic>>,
+    /// Per-process network meter (ETW Kernel-Network). Drives the Apps
+    /// tab's Speed columns with real TCP+UDP throughput — unlike the
+    /// per-connection ESTATS view it captures UDP (µTP torrents, etc.).
+    /// `None` when the trace couldn't start (not elevated), in which case
+    /// the Speed columns fall back to blank. Stops its session + thread
+    /// on drop.
+    net_meter: std::cell::RefCell<Option<super::net_meter::NetMeter>>,
     /// File-backed event log writer (M6.3). Lazily opens / rotates
     /// the on-disk log per `Settings.enable_log` + `log_path` +
     /// `log_size_limit`. Mirrors the in-memory `event_log` ring,
@@ -471,6 +478,7 @@ impl WndState {
             ),
             network_sort: Cell::new(NetworkSortState::default()),
             app_traffic: std::cell::RefCell::new(std::collections::HashMap::new()),
+            net_meter: std::cell::RefCell::new(super::net_meter::NetMeter::start()),
             event_log_writer: std::cell::RefCell::new(
                 super::event_log::EventLogWriter::new(),
             ),
@@ -9295,35 +9303,59 @@ fn write_rule_subitems(lv: HWND, idx: i32, rule: &crate::profile::Rule) {
 /// rides. pid → path resolution is memoized per call so a busy process
 /// with many sockets pays one lookup.
 fn refresh_app_traffic(state: &WndState) {
-    let conns = {
-        let mut monitor = state.traffic_monitor.borrow_mut();
-        super::connections::enumerate_with_traffic(&mut monitor)
-    };
+    // Speed comes from the ETW per-process meter (real TCP+UDP), keyed by
+    // PID. Empty when the meter isn't running (not elevated) — the Speed
+    // columns then stay blank, same as the old ESTATS fallback.
+    let pid_rates: std::collections::HashMap<u32, (u64, u64)> = state
+        .net_meter
+        .borrow_mut()
+        .as_mut()
+        .map(|m| m.rates())
+        .unwrap_or_default();
+
+    // The current connection table gives PID -> local IP for interface
+    // attribution and marks which apps are connected at all.
+    let conns = super::connections::enumerate();
     let ifaces = super::connections::interface_names_by_ip();
+
+    // Memoized PID -> lowercased image path (matches profile.apps[].path;
+    // see the `app_traffic` field doc).
     let mut pid_path: std::collections::HashMap<u32, Option<String>> =
         std::collections::HashMap::new();
-    let mut rollup: std::collections::HashMap<String, AppTraffic> =
-        std::collections::HashMap::new();
-    for c in &conns {
-        // Key by lowercased path so it matches profile.apps[].path (see
-        // the `app_traffic` field doc).
-        let path = pid_path
-            .entry(c.pid)
+    let mut resolve = |pid: u32| -> Option<String> {
+        pid_path
+            .entry(pid)
             .or_insert_with(|| {
-                super::connections::process_full_path(c.pid)
+                super::connections::process_full_path(pid)
                     .map(|p| p.to_string_lossy().to_ascii_lowercase())
             })
-            .clone();
-        let Some(path) = path else { continue };
+            .clone()
+    };
+
+    let mut rollup: std::collections::HashMap<String, AppTraffic> =
+        std::collections::HashMap::new();
+
+    // Speed: fold each PID's rate onto its owning app path.
+    for (&pid, &(down, up)) in &pid_rates {
+        let Some(path) = resolve(pid) else { continue };
         let entry = rollup.entry(path).or_default();
-        entry.download_speed = entry.download_speed.saturating_add(c.download_speed);
-        entry.upload_speed = entry.upload_speed.saturating_add(c.upload_speed);
+        entry.download_speed = entry.download_speed.saturating_add(down);
+        entry.upload_speed = entry.upload_speed.saturating_add(up);
+    }
+
+    // Interface: attribute each live connection's local-IP adapter to its
+    // app (also creates a 0-speed entry for connected-but-idle apps so
+    // they still show their interface rather than blank).
+    for c in &conns {
+        let Some(path) = resolve(c.pid) else { continue };
+        let entry = rollup.entry(path).or_default();
         if let Some(name) = ifaces.get(&c.local.ip) {
             if !entry.interfaces.iter().any(|n| n == name) {
                 entry.interfaces.push(name.clone());
             }
         }
     }
+
     *state.app_traffic.borrow_mut() = rollup;
 }
 

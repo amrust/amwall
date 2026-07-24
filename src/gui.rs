@@ -20,6 +20,7 @@ pub mod net_log_context_menu;
 pub mod rules_context_menu;
 pub mod connect_dialog;
 pub mod connections;
+pub mod net_meter;
 pub mod dialogs;
 pub mod dns_resolve;
 pub mod event_log;
