@@ -66,23 +66,29 @@ fn can_connect(addr: &SocketAddr) -> bool {
 fn default_deny_actually_blocks_outbound() {
     let addr = resolve();
 
-    // (A) Baseline. The endpoint must be reachable BEFORE amwall
-    // installs, or a later block can't be attributed to amwall (the
-    // machine may be offline, or another firewall may already be
-    // blocking). Guardrail #1: assert the DELTA, not an absolute.
+    let engine = WfpEngine::open().expect("open engine (are you elevated?)");
+    // Clear amwall's OWN provider first so the baseline below reflects
+    // "amwall not enforcing". On a dev box with amwall installed, its
+    // persistent default-deny is still in the kernel and would otherwise
+    // block the (unapproved) baseline connect and force a needless skip.
+    // A FOREIGN firewall (VPN killswitch) is not touched, so a genuinely
+    // foreign block still correctly forces a skip below. NOTE: this
+    // uninstalls any active amwall filters for the duration of the run;
+    // relaunch amwall afterward to restore them.
+    let _ = engine.cleanup_provider(&PROVIDER_KEY);
+
+    // (A) Baseline. With amwall not enforcing, the endpoint must be
+    // reachable, or a later block can't be attributed to amwall (offline,
+    // or a foreign firewall already blocking). Guardrail #1: assert the
+    // DELTA, not an absolute.
     if !can_connect(&addr) {
         eprintln!(
-            "SKIP: no baseline connectivity to {addr} (offline, or another \
-             firewall / VPN killswitch is already blocking). Cannot \
-             attribute a block to amwall; skipping."
+            "SKIP: no baseline connectivity to {addr} with amwall cleared \
+             (offline, or a foreign firewall / VPN killswitch is blocking). \
+             Cannot attribute a block to amwall; skipping."
         );
         return;
     }
-
-    let engine = WfpEngine::open().expect("open engine (are you elevated?)");
-    // Own the provider cleanly: remove any amwall filters left by the
-    // app or a prior run before this test installs its own.
-    let _ = engine.cleanup_provider(&PROVIDER_KEY);
 
     // Empty user profile -> install_profile installs only the
     // provider / sublayer + the default-deny set (GlobalRulesConfig
