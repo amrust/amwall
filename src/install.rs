@@ -1285,42 +1285,22 @@ fn install_default_deny(
     block_inbound: bool,
     ids: &mut Vec<u64>,
 ) -> Result<u32, InstallError> {
-    let layers = [
-        (FWPM_LAYER_ALE_AUTH_CONNECT_V4, block_outbound),
-        (FWPM_LAYER_ALE_AUTH_CONNECT_V6, block_outbound),
-        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, block_inbound),
-        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, block_inbound),
-    ];
     let mut count = 0u32;
-    for (layer, block) in &layers {
-        let action = if *block {
-            FilterAction::Block
-        } else {
-            FilterAction::Permit
-        };
-        let f = filter::add(
-            engine,
-            "amwall default-catch-all",
-            "amwall: catch-all at lowest weight (action per Block toggles)",
-            layer,
-            &SUBLAYER_KEY,
-            Some(&PROVIDER_KEY),
-            &[], // no conditions = match-all
-            action,
-            persistent,
-            filter::weight::LOWEST, // FW_WEIGHT_LOWEST: every higher band wins
-        )?;
-        ids.push(f.runtime_id());
-        count += 1;
-    }
 
-    // TCP-templates terminating callouts (upstream #689 workaround).
-    // When outbound is blocked, a plain block filter at the CONNECT
-    // layer can still let a TCP connection slip through via connection-
-    // template reuse; upstream adds a built-in terminating callout at
-    // both CONNECT layers to swallow those too (wfp.c:2393-2425, Win8+).
-    // The callout GUIDs are OS built-ins present on every amwall-
-    // supported Windows (10+), so no version gate is needed here.
+    // 1. TCP-templates terminating callouts FIRST (upstream #689 workaround).
+    // When outbound is blocked, a plain block filter at the CONNECT layer can
+    // still let a TCP connection slip through via connection-template reuse;
+    // upstream adds a built-in terminating callout at both CONNECT layers to
+    // swallow those too (wfp.c:2393-2425, Win8+). ORDER IS LOAD-BEARING: the
+    // callout and the fallback block below are both match-all at
+    // FW_WEIGHT_LOWEST in the same sublayer, so their relative install order
+    // breaks the same-weight tie. Upstream installs the callout BEFORE the
+    // block (wfp.c:2398 then 2429) so the block wins the tie for ordinary
+    // connections while the callout only catches template reuse. amwall used
+    // to install the block first, which let the callout win and PERMIT
+    // ordinary outbound connections — the default-deny silently never
+    // enforced. The callout GUIDs are OS built-ins present on every
+    // amwall-supported Windows (10+), so no version gate is needed here.
     if block_outbound {
         for (layer, callout) in &[
             (
@@ -1349,6 +1329,38 @@ fn install_default_deny(
             ids.push(f.runtime_id());
             count += 1;
         }
+    }
+
+    // 2. Fallback catch-all at every ALE layer, added LAST (after the callout
+    // above) so it wins the FW_WEIGHT_LOWEST same-weight arbitration for
+    // ordinary connections — mirrors upstream wfp.c:2428-2450. Its action is
+    // Block or Permit per the Block-outbound / Block-inbound toggles.
+    let layers = [
+        (FWPM_LAYER_ALE_AUTH_CONNECT_V4, block_outbound),
+        (FWPM_LAYER_ALE_AUTH_CONNECT_V6, block_outbound),
+        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, block_inbound),
+        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, block_inbound),
+    ];
+    for (layer, block) in &layers {
+        let action = if *block {
+            FilterAction::Block
+        } else {
+            FilterAction::Permit
+        };
+        let f = filter::add(
+            engine,
+            "amwall default-catch-all",
+            "amwall: catch-all at lowest weight (action per Block toggles)",
+            layer,
+            &SUBLAYER_KEY,
+            Some(&PROVIDER_KEY),
+            &[], // no conditions = match-all
+            action,
+            persistent,
+            filter::weight::LOWEST, // FW_WEIGHT_LOWEST: every higher band wins
+        )?;
+        ids.push(f.runtime_id());
+        count += 1;
     }
     Ok(count)
 }
