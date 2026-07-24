@@ -339,6 +339,16 @@ struct WndState {
     /// `notification_timeout` minutes have elapsed rather than being
     /// silenced forever by a single dismiss. Fable sweep finding #24.
     last_notify: std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, i64>>,
+    /// Runtime-only set of app paths that currently have an OPEN connect-
+    /// prompt window. A drop for an app already in this set never spawns
+    /// a second window, so an un-acted prompt (user away from the PC)
+    /// can't stack into dozens overnight. This mirrors upstream
+    /// simplewall's one-notification-per-app model (`_app_notify_addobject`
+    /// swaps a single `ptr_app->notification`, notifications.c:149, into
+    /// one window). Cleared when the window closes for ANY reason (Allow /
+    /// Block / dismiss) via `WM_USER_CONNECT_PROMPT_CLOSED`, so the normal
+    /// `notification_timeout` re-prompt still applies after the user acts.
+    pending_prompts: std::cell::RefCell<std::collections::HashSet<std::path::PathBuf>>,
     /// Cached per-path icon indices into the system small-icon
     /// imagelist (same global imagelist Explorer uses). Filled
     /// lazily on first row-render and reused across repaints,
@@ -417,6 +427,7 @@ impl WndState {
             uwp_packages: std::cell::RefCell::new(Vec::new()),
             context_target: std::cell::RefCell::new(None),
             last_notify: std::cell::RefCell::new(std::collections::HashMap::new()),
+            pending_prompts: std::cell::RefCell::new(std::collections::HashSet::new()),
             apps_sort: Cell::new(AppsSortState::default()),
             connected_paths: std::cell::RefCell::new(std::collections::HashSet::new()),
             signed_cache: std::sync::Arc::new(std::sync::Mutex::new(
@@ -1006,6 +1017,10 @@ unsafe extern "system" fn wnd_proc(
         }
         m if m == super::connect_dialog::WM_USER_CONNECT_BLOCK => {
             on_connect_block(hwnd, wparam);
+            LRESULT(0)
+        }
+        m if m == super::connect_dialog::WM_USER_CONNECT_PROMPT_CLOSED => {
+            on_connect_prompt_closed(hwnd, wparam);
             LRESULT(0)
         }
         m if m == super::update_check::WM_USER_UPDATE_AVAILABLE => {
@@ -2288,6 +2303,13 @@ fn auto_catalog_drops(
                 if existing.is_silent || existing.is_enabled || reprompt_after <= 0 {
                     continue;
                 }
+                // Don't re-prompt an app whose prompt window is still open
+                // (user away from the PC): one window per app, never a
+                // stack. Cleared on window close via
+                // WM_USER_CONNECT_PROMPT_CLOSED.
+                if state.pending_prompts.borrow().contains(&path) {
+                    continue;
+                }
                 let last = state.last_notify.borrow().get(&path).copied().unwrap_or(0);
                 if now_secs.saturating_sub(last) < reprompt_after {
                     continue;
@@ -2394,12 +2416,15 @@ fn auto_catalog_drops(
     for_prompt
 }
 
-/// Show the centered Allow/Block dialog once per app in
-/// `new_apps`. The list comes from `auto_catalog_drops` and
-/// only contains paths that were *just added* to the profile in
-/// this drain tick — so this is necessarily the app's first
-/// drop since filters went on. One dialog per entry, ever:
-/// already-in-profile apps never reach this list.
+/// Show the centered Allow/Block dialog for each app in `new_apps`
+/// that doesn't already have one open. The list comes from
+/// `auto_catalog_drops` — usually apps *just added* to the profile
+/// this drain tick, but also blocked-not-silenced apps due for a
+/// timeout re-prompt. At most ONE prompt window per app is open at a
+/// time (tracked in `state.pending_prompts`), so an un-acted prompt
+/// (user away from the PC) can't stack into dozens of windows
+/// overnight; the guard clears on window close via
+/// `WM_USER_CONNECT_PROMPT_CLOSED`.
 ///
 /// Skips entries whose `profile.apps` row is `is_silent=true`.
 /// Auto-catalog creates new entries with `is_silent=false`, so
@@ -2431,6 +2456,15 @@ fn process_connect_prompts(
         if silenced {
             continue;
         }
+        // One open prompt window per app. If this app already has a
+        // prompt on screen (e.g. the user is away and it keeps trying
+        // to connect), don't open another -- that stacking is what
+        // produced dozens of windows overnight. `insert` returns false
+        // when the app is already pending; the guard clears on window
+        // close via WM_USER_CONNECT_PROMPT_CLOSED.
+        if !state.pending_prompts.borrow_mut().insert(path.clone()) {
+            continue;
+        }
         // Pull cached signer for the prompt's "Signed by X" line.
         // Cache will usually have the entry by now since the
         // path was just auto-cataloged and the worker keeps a
@@ -2438,7 +2472,11 @@ fn process_connect_prompts(
         // first-ever drop will see None and the prompt renders
         // without the signer line.
         let signer = path_signer_cached(state, path);
-        super::connect_dialog::show_async(hwnd, path, remote, signer.as_deref());
+        if !super::connect_dialog::show_async(hwnd, path, remote, signer.as_deref()) {
+            // Window creation failed -- don't leave a stuck guard that
+            // would suppress this app's prompt for the rest of the session.
+            state.pending_prompts.borrow_mut().remove(path);
+        }
     }
 }
 
@@ -2684,6 +2722,25 @@ fn on_connect_allow(hwnd: HWND, wparam: WPARAM) {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
     set_status_text(state.status.get(), 0, &t!("status.allowed_count", name = name));
+}
+
+/// Handler for `WM_USER_CONNECT_PROMPT_CLOSED`, posted by the connect-
+/// prompt dialog's `WM_NCDESTROY` when its window closes for ANY reason
+/// (Allow, Block, or a plain dismiss). Clears the per-app "prompt
+/// already open" guard so a later drop can prompt again — throttled by
+/// `notification_timeout` as before. Without this, one open window
+/// would suppress the app's prompt for the rest of the session, so the
+/// app-level dedup that stops overnight prompt stacking wouldn't reset.
+fn on_connect_prompt_closed(hwnd: HWND, wparam: WPARAM) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    // take() the path by token; a forged / stale wparam is a safe miss.
+    let Some(path) = super::msg_slab::take::<std::path::PathBuf>(wparam.0) else {
+        return;
+    };
+    state.pending_prompts.borrow_mut().remove(&path);
 }
 
 /// Drain any pending events from the channel into the log buffer,

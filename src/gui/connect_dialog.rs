@@ -98,6 +98,19 @@ pub const WM_USER_CONNECT_ALLOW: u32 =
 pub const WM_USER_CONNECT_BLOCK: u32 =
     windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x103;
 
+/// Posted from the dialog's `WM_NCDESTROY` when the prompt window
+/// closes for ANY reason — Allow, Block, or a plain dismiss (X). The
+/// `wparam` holds a `msg_slab` token for the app `PathBuf`; the parent
+/// take()s it to clear its "a prompt is already open for this app"
+/// guard, so a later drop can prompt again (throttled by
+/// `notification_timeout`). This is what lets the app-level dedup that
+/// prevents overnight prompt stacking reset cleanly on close.
+///
+/// Note: `WM_USER + 0x104` is taken by `dns_resolve::WM_USER_DNS_REFRESH`
+/// — do not reuse it. `0x105` keeps this adjacent to Allow/Block.
+pub const WM_USER_CONNECT_PROMPT_CLOSED: u32 =
+    windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x105;
+
 /// State stashed in the dialog's GWLP_USERDATA. Heap-allocated
 /// because the dialog is modeless and lives past `show_async`'s
 /// return; reclaimed on WM_NCDESTROY.
@@ -120,7 +133,12 @@ struct DialogState {
 /// Show the centered Allow/Block prompt for `app_path`
 /// connecting to `remote`. Returns immediately (modeless) — the
 /// user's Allow choice arrives at `parent` as
-/// `WM_USER_CONNECT_ALLOW`. Block / dismiss is silent.
+/// `WM_USER_CONNECT_ALLOW`. Block / dismiss is silent, but on close
+/// (any reason) the dialog posts `WM_USER_CONNECT_PROMPT_CLOSED` so the
+/// parent can clear its per-app "prompt already open" guard.
+///
+/// Returns `true` if the window was created (the caller tracks it as
+/// the app's single open prompt), `false` if creation failed.
 ///
 /// `signer` is the leaf certificate display name from the
 /// WinVerifyTrust cache when `Settings.use_certificates` is on.
@@ -128,7 +146,7 @@ struct DialogState {
 /// remote endpoint so the user can decide based on whether the
 /// publisher is trusted, not just the path. `None` falls back to
 /// the prior behaviour (no signer line).
-pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&str>) {
+pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&str>) -> bool {
     let displayed_remote = match signer {
         Some(s) if !s.is_empty() => format!("{remote}\nSigned by {s}"),
         _ => remote.to_string(),
@@ -150,7 +168,7 @@ pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&s
             unsafe {
                 let _ = Box::from_raw(raw as *mut DialogState);
             }
-            return;
+            return false;
         }
     };
 
@@ -167,7 +185,7 @@ pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&s
         unsafe {
             let _ = Box::from_raw(raw as *mut DialogState);
         }
-        return;
+        return false;
     }
     // SW_SHOWNA = "show without activating" — combined with the
     // template's WS_EX_NOACTIVATE, this is what keeps focus on
@@ -207,6 +225,7 @@ pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&s
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
+    true
 }
 
 unsafe extern "system" fn dialog_proc(
@@ -412,6 +431,22 @@ unsafe extern "system" fn dialog_proc(
             // Reclaim the heap-allocated state so we don't leak.
             let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
             if raw != 0 {
+                // Tell the parent this app's prompt window has closed
+                // (Allow / Block / dismiss all funnel through WM_NCDESTROY)
+                // so it clears the per-app "prompt already open" guard and
+                // a future drop can prompt again. Without this, one open
+                // window would suppress the app's prompt for the rest of
+                // the session.
+                let state = unsafe { &*(raw as *const DialogState) };
+                let token = super::msg_slab::stash(state.path.clone());
+                unsafe {
+                    let _ = PostMessageW(
+                        state.parent,
+                        WM_USER_CONNECT_PROMPT_CLOSED,
+                        WPARAM(token),
+                        LPARAM(0),
+                    );
+                }
                 unsafe {
                     let _ = Box::from_raw(raw as *mut DialogState);
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
