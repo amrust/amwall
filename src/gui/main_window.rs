@@ -173,6 +173,9 @@ const NETWORK_COL_WIDTHS: &[i32] = &[
     60,  // Port (Destination)
     70,  // Protocol
     70,  // State
+    90,  // ↓ Speed
+    90,  // ↑ Speed
+    90,  // Total
 ];
 const LOG_COL_WIDTHS: &[i32] = &[
     50,  // #
@@ -248,6 +251,11 @@ struct WndState {
     /// tab. Populate stamps each row's lParam with its index into this
     /// Vec so a right-click can round-trip row → Connection (Fable #27).
     connections: std::cell::RefCell<Vec<super::connections::Connection>>,
+    /// Persistent per-connection TCP traffic counters for the
+    /// Connections tab's download/upload/total columns. Survives across
+    /// refresh ticks (each rate is diffed against the previous tick's
+    /// byte counts) and prunes closed connections. UI-thread only.
+    traffic_monitor: std::cell::RefCell<super::connections::TrafficMonitor>,
     /// File-backed event log writer (M6.3). Lazily opens / rotates
     /// the on-disk log per `Settings.enable_log` + `log_path` +
     /// `log_size_limit`. Mirrors the in-memory `event_log` ring,
@@ -414,6 +422,9 @@ impl WndState {
             event_engine: std::cell::RefCell::new(None),
             event_log: std::cell::RefCell::new(std::collections::VecDeque::new()),
             connections: std::cell::RefCell::new(Vec::new()),
+            traffic_monitor: std::cell::RefCell::new(
+                super::connections::TrafficMonitor::new(),
+            ),
             event_log_writer: std::cell::RefCell::new(
                 super::event_log::EventLogWriter::new(),
             ),
@@ -8583,7 +8594,7 @@ fn configure_listview(lv: HWND, id: i32, dpi: u32) -> Result<(), String> {
             add_column(lv, 2, &t!("column.direction"), scale_dpi(RULES_COL_WIDTHS[2], dpi), true)?;
         }
         IDC_NETWORK => {
-            let cols: [String; 9] = [
+            let cols: [String; 12] = [
                 t!("column.name").into(),
                 t!("column.address_src").into(),
                 t!("column.host_src").into(),
@@ -8593,9 +8604,12 @@ fn configure_listview(lv: HWND, id: i32, dpi: u32) -> Result<(), String> {
                 t!("column.port_dst").into(),
                 t!("column.protocol").into(),
                 t!("column.state").into(),
+                format!("\u{2193} {}", t!("column.speed")),
+                format!("\u{2191} {}", t!("column.speed")),
+                t!("column.total").into(),
             ];
             for (i, label) in cols.iter().enumerate() {
-                let right = matches!(i, 3 | 6 | 7 | 8);
+                let right = matches!(i, 3 | 6 | 7 | 8 | 9 | 10 | 11);
                 add_column(lv, i as i32, label, scale_dpi(NETWORK_COL_WIDTHS[i], dpi), right)?;
             }
         }
@@ -9487,20 +9501,25 @@ fn format_timestamp_local(unix_ts: i64) -> String {
 }
 
 /// Populate the Connections tab (`IDC_NETWORK`) from a fresh
-/// IP Helper enumeration. Each row covers the 9 columns set up
+/// IP Helper enumeration. Each row covers the 12 columns set up
 /// in `configure_listview` for IDC_NETWORK:
 ///   Name | Address(Source) | Host(Source) | Port(Source) |
 ///   Address(Destination) | Host(Destination) | Port(Destination) |
-///   Protocol | State
+///   Protocol | State | ↓ Speed | ↑ Speed | Total
 /// Host(Source) / Host(Destination) are blank for now — DNS
-/// reverse-resolution is async and would block the UI thread.
+/// reverse-resolution is async and would block the UI thread. The
+/// three traffic columns come from per-connection TCP ESTATS via
+/// `state.traffic_monitor` (upstream PR #2100).
 fn populate_connections_tab(state: &WndState) {
     // Index 6 in TAB_LISTVIEW_IDS is IDC_NETWORK.
     let lv = state.listviews[6].get();
     if lv.0 == 0 {
         return;
     }
-    let conns = super::connections::enumerate();
+    let conns = {
+        let mut monitor = state.traffic_monitor.borrow_mut();
+        super::connections::enumerate_with_traffic(&mut monitor)
+    };
 
     let saved = begin_listview_refill(lv);
     let filter = state.search_text.borrow().clone();
@@ -9557,6 +9576,18 @@ fn populate_connections_tab(state: &WndState) {
         set_subitem(lv, idx as i32, 6, &remote_port);
         set_subitem(lv, idx as i32, 7, c.protocol.label());
         set_subitem(lv, idx as i32, 8, c.state);
+        // Traffic columns: only TCP connections with a live ESTATS
+        // reading show a value; UDP / listeners / pre-baseline rows stay
+        // blank, matching upstream PR #2100.
+        if c.has_stats {
+            set_subitem(lv, idx as i32, 9, &super::connections::format_speed(c.download_speed));
+            set_subitem(lv, idx as i32, 10, &super::connections::format_speed(c.upload_speed));
+            set_subitem(lv, idx as i32, 11, &super::connections::format_bytesize(c.total_bytes));
+        } else {
+            set_subitem(lv, idx as i32, 9, "");
+            set_subitem(lv, idx as i32, 10, "");
+            set_subitem(lv, idx as i32, 11, "");
+        }
     }
     end_listview_refill(lv, saved, row);
     // Cache the snapshot the stamped lParams index into.

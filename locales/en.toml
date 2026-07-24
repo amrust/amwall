@@ -105,6 +105,8 @@ port_dst = "Port (Destination)"
 state = "State"
 filter = "Filter"
 index = "#"
+speed = "Speed"
+total = "Total"
 
 # --- Group headers ---
 [group]
