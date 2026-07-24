@@ -1278,31 +1278,51 @@ struct PerAppCounts {
 /// permits and blocks whitelisted apps; folding the decision into the
 /// catch-all action is what lets a per-app Permit still connect while
 /// the default is deny.
-fn install_default_deny(
-    engine: &WfpEngine,
-    persistent: bool,
-    block_outbound: bool,
-    block_inbound: bool,
-    ids: &mut Vec<u64>,
-) -> Result<u32, InstallError> {
-    let mut count = 0u32;
+/// One planned filter in the default-deny set, captured as data
+/// BEFORE it is committed to the kernel. Making the plan explicit
+/// lets the ordering / weight / action invariants that WFP's
+/// same-weight arbitration depends on be asserted in a fast unit test
+/// with no live Base Filtering Engine — the class of regression that
+/// shipped in v1.1.17/1.1.18 (block catch-all emitted before the
+/// TCP-templates callout, so the callout won the FW_WEIGHT_LOWEST tie
+/// and outbound was silently permitted) is now caught by the
+/// `default_deny_plan` unit tests, not only by an elevated smoke run.
+#[derive(Clone, Copy)]
+struct DefaultDenyStep {
+    name: &'static str,
+    description: &'static str,
+    layer: GUID,
+    action: FilterAction,
+    weight: u8,
+}
 
-    // 1. TCP-templates terminating callouts FIRST (upstream #689 workaround).
-    // When outbound is blocked, a plain block filter at the CONNECT layer can
-    // still let a TCP connection slip through via connection-template reuse;
-    // upstream adds a built-in terminating callout at both CONNECT layers to
-    // swallow those too (wfp.c:2393-2425, Win8+). ORDER IS LOAD-BEARING: the
-    // callout and the fallback block below are both match-all at
-    // FW_WEIGHT_LOWEST in the same sublayer, so their relative install order
-    // breaks the same-weight tie. Upstream installs the callout BEFORE the
-    // block (wfp.c:2398 then 2429) so the block wins the tie for ordinary
-    // connections while the callout only catches template reuse. amwall used
-    // to install the block first, which let the callout win and PERMIT
-    // ordinary outbound connections — the default-deny silently never
-    // enforced. The callout GUIDs are OS built-ins present on every
-    // amwall-supported Windows (10+), so no version gate is needed here.
+/// Build the ordered default-deny filter plan. Pure — no engine, no
+/// kernel — so it is unit-testable. The Vec order IS the exact commit
+/// order, and because every entry sits at FW_WEIGHT_LOWEST in the one
+/// amwall sublayer, that order is precisely what breaks the
+/// same-weight arbitration tie.
+///
+/// ORDER IS LOAD-BEARING. The TCP-templates terminating callouts go
+/// FIRST (upstream #689 workaround). When outbound is blocked, a plain
+/// block filter at the CONNECT layer can still let a TCP connection
+/// slip through via connection-template reuse; upstream adds a
+/// built-in terminating callout at both CONNECT layers to swallow
+/// those too (wfp.c:2393-2425, Win8+). The callout and the fallback
+/// block are both match-all at FW_WEIGHT_LOWEST in the same sublayer,
+/// so their relative install order breaks the same-weight tie.
+/// Upstream installs the callout BEFORE the block (wfp.c:2398 then
+/// 2429) so the block wins the tie for ordinary connections while the
+/// callout only catches template reuse. amwall used to install the
+/// block first, which let the callout win and PERMIT ordinary outbound
+/// connections — the default-deny silently never enforced. The callout
+/// GUIDs are OS built-ins present on every amwall-supported Windows
+/// (10+), so no version gate is needed here.
+fn default_deny_plan(block_outbound: bool, block_inbound: bool) -> Vec<DefaultDenyStep> {
+    let mut plan: Vec<DefaultDenyStep> = Vec::new();
+
+    // 1. TCP-templates terminating callouts FIRST.
     if block_outbound {
-        for (layer, callout) in &[
+        for (layer, callout) in [
             (
                 FWPM_LAYER_ALE_AUTH_CONNECT_V4,
                 FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4,
@@ -1312,22 +1332,13 @@ fn install_default_deny(
                 FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6,
             ),
         ] {
-            let f = filter::add(
-                engine,
-                "amwall block-connection-tcp-templates",
-                "amwall: TCP-templates terminating callout (outbound block, #689)",
+            plan.push(DefaultDenyStep {
+                name: "amwall block-connection-tcp-templates",
+                description: "amwall: TCP-templates terminating callout (outbound block, #689)",
                 layer,
-                &SUBLAYER_KEY,
-                Some(&PROVIDER_KEY),
-                &[], // match-all; the callout decides
-                FilterAction::CalloutTerminating {
-                    callout_key: *callout,
-                },
-                persistent,
-                filter::weight::LOWEST,
-            )?;
-            ids.push(f.runtime_id());
-            count += 1;
+                action: FilterAction::CalloutTerminating { callout_key: callout },
+                weight: filter::weight::LOWEST,
+            });
         }
     }
 
@@ -1335,29 +1346,50 @@ fn install_default_deny(
     // above) so it wins the FW_WEIGHT_LOWEST same-weight arbitration for
     // ordinary connections — mirrors upstream wfp.c:2428-2450. Its action is
     // Block or Permit per the Block-outbound / Block-inbound toggles.
-    let layers = [
+    for (layer, block) in [
         (FWPM_LAYER_ALE_AUTH_CONNECT_V4, block_outbound),
         (FWPM_LAYER_ALE_AUTH_CONNECT_V6, block_outbound),
         (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, block_inbound),
         (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, block_inbound),
-    ];
-    for (layer, block) in &layers {
-        let action = if *block {
-            FilterAction::Block
-        } else {
-            FilterAction::Permit
-        };
+    ] {
+        plan.push(DefaultDenyStep {
+            name: "amwall default-catch-all",
+            description: "amwall: catch-all at lowest weight (action per Block toggles)",
+            layer,
+            action: if block {
+                FilterAction::Block
+            } else {
+                FilterAction::Permit
+            },
+            weight: filter::weight::LOWEST, // FW_WEIGHT_LOWEST: every higher band wins
+        });
+    }
+
+    plan
+}
+
+fn install_default_deny(
+    engine: &WfpEngine,
+    persistent: bool,
+    block_outbound: bool,
+    block_inbound: bool,
+    ids: &mut Vec<u64>,
+) -> Result<u32, InstallError> {
+    let mut count = 0u32;
+    // Commit the plan in order — the Vec order is load-bearing for
+    // WFP's same-weight arbitration (see `default_deny_plan`).
+    for step in default_deny_plan(block_outbound, block_inbound) {
         let f = filter::add(
             engine,
-            "amwall default-catch-all",
-            "amwall: catch-all at lowest weight (action per Block toggles)",
-            layer,
+            step.name,
+            step.description,
+            &step.layer,
             &SUBLAYER_KEY,
             Some(&PROVIDER_KEY),
-            &[], // no conditions = match-all
-            action,
+            &[], // match-all; the callout / catch-all needs no conditions
+            step.action,
             persistent,
-            filter::weight::LOWEST, // FW_WEIGHT_LOWEST: every higher band wins
+            step.weight,
         )?;
         ids.push(f.runtime_id());
         count += 1;
@@ -1943,6 +1975,114 @@ mod tests {
         assert!(sd.len() >= 32, "SD too small: {}", sd.len());
         // Revision byte is always 1.
         assert_eq!(sd[0], 1);
+    }
+
+    // --- Default-deny install-plan invariants (Tier-1 release gate) ---
+    //
+    // These assert the ordering / action / weight properties WFP's
+    // same-weight arbitration relies on, with NO live BFE — so a
+    // re-regression of the v1.1.17/1.1.18 "firewall permits everything"
+    // bug is caught by `cargo test` (and therefore CI) before a tag is
+    // ever pushed, not only by an elevated smoke run. This is the
+    // install pipeline expressed as inspectable data with invariants
+    // asserted over it.
+
+    fn is_callout(a: &FilterAction) -> bool {
+        matches!(a, FilterAction::CalloutTerminating { .. })
+    }
+    fn is_block(a: &FilterAction) -> bool {
+        matches!(a, FilterAction::Block)
+    }
+    fn is_permit(a: &FilterAction) -> bool {
+        matches!(a, FilterAction::Permit)
+    }
+
+    /// THE regression guard. When outbound is blocked, the
+    /// TCP-templates callout at each CONNECT layer MUST be committed
+    /// before the block catch-all at the SAME layer and SAME weight —
+    /// otherwise the callout wins the FW_WEIGHT_LOWEST tie and outbound
+    /// is silently permitted (the shipped-twice v1.1.17/1.1.18 bug).
+    #[test]
+    fn callout_precedes_block_catchall_at_connect_layers() {
+        let plan = default_deny_plan(true, true);
+        for layer in [
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        ] {
+            let callout_idx = plan
+                .iter()
+                .position(|s| s.layer == layer && is_callout(&s.action))
+                .expect("TCP-templates callout missing at a CONNECT layer");
+            let block_idx = plan
+                .iter()
+                .position(|s| s.layer == layer && is_block(&s.action))
+                .expect("block catch-all missing at a CONNECT layer");
+            assert!(
+                callout_idx < block_idx,
+                "callout must install BEFORE the block catch-all so the \
+                 block wins the same-weight tie (regression would permit \
+                 all outbound)",
+            );
+            // The tie only exists because both sit at the same weight;
+            // if these ever diverge the ordering stops mattering.
+            assert_eq!(plan[callout_idx].weight, plan[block_idx].weight);
+            assert_eq!(plan[block_idx].weight, crate::wfp::filter::weight::LOWEST);
+        }
+    }
+
+    /// Default-deny must actually DENY: with block_outbound set, both
+    /// CONNECT catch-alls carry the Block action (not Permit).
+    #[test]
+    fn outbound_catchall_blocks_when_configured() {
+        let plan = default_deny_plan(true, false);
+        for layer in [
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        ] {
+            let catchall = plan
+                .iter()
+                .find(|s| s.layer == layer && !is_callout(&s.action))
+                .expect("CONNECT catch-all missing");
+            assert!(
+                is_block(&catchall.action),
+                "outbound catch-all must Block when block_outbound is set",
+            );
+        }
+        // Inbound left open => the RECV-ACCEPT catch-alls Permit.
+        for layer in [
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+        ] {
+            let catchall = plan
+                .iter()
+                .find(|s| s.layer == layer)
+                .expect("RECV-ACCEPT catch-all missing");
+            assert!(is_permit(&catchall.action));
+        }
+    }
+
+    /// The callout only exists to backstop an outbound block; without
+    /// block_outbound there is no callout, just the four catch-alls.
+    #[test]
+    fn no_callout_without_outbound_block() {
+        let plan = default_deny_plan(false, true);
+        assert!(
+            !plan.iter().any(|s| is_callout(&s.action)),
+            "no TCP-templates callout should be planned without an outbound block",
+        );
+        assert_eq!(plan.len(), 4, "four ALE catch-alls regardless of action");
+    }
+
+    /// Exact plan shape: 2 callouts + 4 catch-alls under full
+    /// default-deny; 4 permit catch-alls with everything open. Every
+    /// planned filter sits at the lowest weight band.
+    #[test]
+    fn default_deny_plan_shape() {
+        assert_eq!(default_deny_plan(true, true).len(), 6);
+        assert_eq!(default_deny_plan(false, false).len(), 4);
+        for step in default_deny_plan(true, true) {
+            assert_eq!(step.weight, crate::wfp::filter::weight::LOWEST);
+        }
     }
 
     #[test]
