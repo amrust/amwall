@@ -1296,6 +1296,15 @@ struct DefaultDenyStep {
     weight: u8,
 }
 
+/// The ALE authorization layer for a concrete (direction, family) pair,
+/// via the shared [`layer_guid`] mapping. The default-deny plan only
+/// ever passes concrete Outbound/Inbound × Ipv4/Ipv6 pairs, which
+/// `layer_guid` always resolves, so `None` is unreachable here.
+fn default_deny_layer(direction: Direction, family: AddressFamily) -> GUID {
+    *layer_guid(direction, family)
+        .expect("default-deny uses only concrete direction/family pairs")
+}
+
 /// Build the ordered default-deny filter plan. Pure — no engine, no
 /// kernel — so it is unit-testable. The Vec order IS the exact commit
 /// order, and because every entry sits at FW_WEIGHT_LOWEST in the one
@@ -1322,20 +1331,14 @@ fn default_deny_plan(block_outbound: bool, block_inbound: bool) -> Vec<DefaultDe
 
     // 1. TCP-templates terminating callouts FIRST.
     if block_outbound {
-        for (layer, callout) in [
-            (
-                FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-                FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4,
-            ),
-            (
-                FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-                FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6,
-            ),
+        for (family, callout) in [
+            (AddressFamily::Ipv4, FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4),
+            (AddressFamily::Ipv6, FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6),
         ] {
             plan.push(DefaultDenyStep {
                 name: "amwall block-connection-tcp-templates",
                 description: "amwall: TCP-templates terminating callout (outbound block, #689)",
-                layer,
+                layer: default_deny_layer(Direction::Outbound, family),
                 action: FilterAction::CalloutTerminating { callout_key: callout },
                 weight: filter::weight::LOWEST,
             });
@@ -1346,16 +1349,16 @@ fn default_deny_plan(block_outbound: bool, block_inbound: bool) -> Vec<DefaultDe
     // above) so it wins the FW_WEIGHT_LOWEST same-weight arbitration for
     // ordinary connections — mirrors upstream wfp.c:2428-2450. Its action is
     // Block or Permit per the Block-outbound / Block-inbound toggles.
-    for (layer, block) in [
-        (FWPM_LAYER_ALE_AUTH_CONNECT_V4, block_outbound),
-        (FWPM_LAYER_ALE_AUTH_CONNECT_V6, block_outbound),
-        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, block_inbound),
-        (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, block_inbound),
+    for (direction, family, block) in [
+        (Direction::Outbound, AddressFamily::Ipv4, block_outbound),
+        (Direction::Outbound, AddressFamily::Ipv6, block_outbound),
+        (Direction::Inbound, AddressFamily::Ipv4, block_inbound),
+        (Direction::Inbound, AddressFamily::Ipv6, block_inbound),
     ] {
         plan.push(DefaultDenyStep {
             name: "amwall default-catch-all",
             description: "amwall: catch-all at lowest weight (action per Block toggles)",
-            layer,
+            layer: default_deny_layer(direction, family),
             action: if block {
                 FilterAction::Block
             } else {
@@ -2085,6 +2088,39 @@ mod tests {
         for step in default_deny_plan(true, true) {
             assert_eq!(step.weight, crate::wfp::filter::weight::LOWEST);
         }
+    }
+
+    /// Layer selection (logic-atlas stage 06): every (direction, family)
+    /// maps to the ALE layer that authorizes that exact half of traffic.
+    /// A wrong layer applies a filter to the wrong traffic and nothing in
+    /// the gate triad catches it, so pin the whole table.
+    #[test]
+    fn layer_guid_maps_direction_and_family() {
+        // Outbound → ALE_AUTH_CONNECT; inbound → ALE_AUTH_RECV_ACCEPT.
+        assert_eq!(
+            layer_guid(Direction::Outbound, AddressFamily::Ipv4),
+            Some(&FWPM_LAYER_ALE_AUTH_CONNECT_V4)
+        );
+        assert_eq!(
+            layer_guid(Direction::Outbound, AddressFamily::Ipv6),
+            Some(&FWPM_LAYER_ALE_AUTH_CONNECT_V6)
+        );
+        assert_eq!(
+            layer_guid(Direction::Inbound, AddressFamily::Ipv4),
+            Some(&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4)
+        );
+        assert_eq!(
+            layer_guid(Direction::Inbound, AddressFamily::Ipv6),
+            Some(&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6)
+        );
+        // Outbound must never land on an inbound (recv-accept) layer.
+        for f in [AddressFamily::Ipv4, AddressFamily::Ipv6] {
+            assert_ne!(layer_guid(Direction::Outbound, f), layer_guid(Direction::Inbound, f));
+        }
+        // Non-concrete direction/family have no single layer (fanned out
+        // or unsupported), so they resolve to None rather than a guess.
+        assert_eq!(layer_guid(Direction::Any, AddressFamily::Ipv4), None);
+        assert_eq!(layer_guid(Direction::Outbound, AddressFamily::Other(99)), None);
     }
 
     #[test]
