@@ -330,7 +330,14 @@ impl Default for Settings {
             // explicit "off" choice is honoured next launch.
             filters_active_persisted: true,
             use_certificates: false,
-            use_hashes: false,
+            // Deliberate divergence from upstream (simplewall defaults
+            // "check hashes" OFF): amwall defaults it ON so exe-swap /
+            // tamper protection is active out of the box. When on,
+            // `check_hash_drift` re-hashes allowed File apps at launch and
+            // every 10 min and disables + un-permits any whose binary
+            // changed on disk. The periodic I/O is the tradeoff. An
+            // explicit off in settings.txt is still honoured.
+            use_hashes: true,
             use_network_resolution: false,
             auto_allow_microsoft_signed: false,
             // Match upstream simplewall's defaults: Spy = Block (the
