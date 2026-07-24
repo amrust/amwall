@@ -293,10 +293,13 @@ struct WndState {
     /// header clicks). Default: unsorted (enumeration order).
     network_sort: Cell<NetworkSortState>,
     /// Per-app network rollup (aggregate speed + interfaces) keyed by
-    /// full image path, feeding the Apps tab's Speed / Interface
-    /// columns. Refreshed on the apps-tab timer from the same traffic
-    /// sampling the Connections tab uses.
-    app_traffic: std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, AppTraffic>>,
+    /// the **ASCII-lowercased** full image path, feeding the Apps tab's
+    /// Speed / Interface columns. Lowercased because `profile.apps[].path`
+    /// is stored lowercase while `process_full_path` returns the OS's real
+    /// casing, and Windows paths are case-insensitive — an exact `PathBuf`
+    /// key would never match (same normalization as the rule/colorizer
+    /// matching elsewhere). Refreshed on the apps-tab timer.
+    app_traffic: std::cell::RefCell<std::collections::HashMap<String, AppTraffic>>,
     /// File-backed event log writer (M6.3). Lazily opens / rotates
     /// the on-disk log per `Settings.enable_log` + `log_path` +
     /// `log_size_limit`. Mirrors the in-memory `event_log` ring,
@@ -2139,7 +2142,15 @@ fn post_signed_refresh(hwnd_raw: usize) {
 /// only invoked from populator entry points so it runs at most
 /// once per tab repaint, not once per row.
 fn refresh_connected_paths(state: &WndState) {
-    *state.connected_paths.borrow_mut() = super::connections::enumerate_active_paths();
+    // Store ASCII-lowercased so membership tests match the lowercase
+    // `profile.apps[].path`; `enumerate_active_paths` returns the OS's
+    // real casing and Windows paths are case-insensitive (an exact
+    // `PathBuf` compare would silently never hit — the "talking now"
+    // highlight then never lit).
+    *state.connected_paths.borrow_mut() = super::connections::enumerate_active_paths()
+        .into_iter()
+        .map(|p| std::path::PathBuf::from(p.to_string_lossy().to_ascii_lowercase()))
+        .collect();
 }
 
 /// Run the M5.9.5 paint-jiggle on the currently-active apps
@@ -5067,8 +5078,13 @@ fn pick_app_row_color(
         return Some(COLORREF(s.color_invalid));
     }
     // 2. Active connection — refreshed by populate_apps_tab.
-    if s.highlight_connection && state.connected_paths.borrow().contains(path) {
-        return Some(COLORREF(s.color_connection));
+    //    Compare lowercased: connected_paths is stored lowercase to match
+    //    the lowercase profile path (Windows paths are case-insensitive).
+    if s.highlight_connection && !path.as_os_str().is_empty() {
+        let lc = std::path::PathBuf::from(path.to_string_lossy().to_ascii_lowercase());
+        if state.connected_paths.borrow().contains(&lc) {
+            return Some(COLORREF(s.color_connection));
+        }
     }
     // 3. Signed (cached — first paint slow, subsequent fast).
     if s.highlight_signed && path_is_signed_cached(state, path) {
@@ -9272,14 +9288,19 @@ fn refresh_app_traffic(state: &WndState) {
         super::connections::enumerate_with_traffic(&mut monitor)
     };
     let ifaces = super::connections::interface_names_by_ip();
-    let mut pid_path: std::collections::HashMap<u32, Option<std::path::PathBuf>> =
+    let mut pid_path: std::collections::HashMap<u32, Option<String>> =
         std::collections::HashMap::new();
-    let mut rollup: std::collections::HashMap<std::path::PathBuf, AppTraffic> =
+    let mut rollup: std::collections::HashMap<String, AppTraffic> =
         std::collections::HashMap::new();
     for c in &conns {
+        // Key by lowercased path so it matches profile.apps[].path (see
+        // the `app_traffic` field doc).
         let path = pid_path
             .entry(c.pid)
-            .or_insert_with(|| super::connections::process_full_path(c.pid))
+            .or_insert_with(|| {
+                super::connections::process_full_path(c.pid)
+                    .map(|p| p.to_string_lossy().to_ascii_lowercase())
+            })
             .clone();
         let Some(path) = path else { continue };
         let entry = rollup.entry(path).or_default();
@@ -9298,8 +9319,9 @@ fn refresh_app_traffic(state: &WndState) {
 /// from `state.app_traffic`. An app with no live connection renders
 /// blank; a connected-but-idle app shows "0 B/s" plus its interface.
 fn set_app_traffic_subitems(state: &WndState, lv: HWND, row: i32, path: &std::path::Path) {
+    let key = path.to_string_lossy().to_ascii_lowercase();
     let at = state.app_traffic.borrow();
-    if let Some(t) = at.get(path) {
+    if let Some(t) = at.get(&key) {
         set_subitem(lv, row, 3, &super::connections::format_speed(t.download_speed));
         set_subitem(lv, row, 4, &super::connections::format_speed(t.upload_speed));
         set_subitem(lv, row, 5, &t.interfaces.join(", "));
