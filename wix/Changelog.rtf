@@ -1,5 +1,16 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v1.1.18 (current)\par
+What's new in amwall v1.1.19 (current)\par
+\par
+  - Critical fix: the default-deny rule could permit outbound\par
+    connections instead of blocking them, so new apps were not\par
+    actually blocked or shown for approval. Blocking now works as\par
+    intended -- every unapproved app is blocked and prompts for\par
+    allow / block. Anyone running 1.1.17 or 1.1.18 should update\par
+    immediately\par
+  - Connection prompts and the app list now also appear while\par
+    another firewall or a VPN kill switch is active\par
+\par
+What's new in amwall v1.1.18\par
 \par
   - Right-click menus everywhere. The Rules, Network, and Log tabs\par
     now have full right-click menus (edit / delete / enable /\par
