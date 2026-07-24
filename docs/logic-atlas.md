@@ -335,7 +335,8 @@ Highest-risk file (mostly `unsafe` Win32). Grouped by job:
   `refresh_amwall_filter_ids_with`, `apply_initial_settings`, `maybe_run_first_run_wizard`.
 - **Enforcement loop (GUI half of the spine):** `drain_events` (poll the `Receiver<NetEvent>` →
   append to log ring + `auto_catalog_drops`) → **`auto_catalog_drops`** (drop → catalog app +
-  queue prompts; catalogs for ANY provider, the v1.1.19 fix; **BLIND SPOT — not unit-tested**) →
+  queue prompts; catalogs for ANY provider, the v1.1.19 fix — the per-drop decision is the pure,
+  tested **`classify_drop`**, 12 cases incl. the foreign-provider guard) →
   **`process_connect_prompts`** (show one prompt per app via `pending_prompts` dedup) → verdicts
   `on_connect_allow` / `on_connect_block` / `on_connect_prompt_closed` → `reinstall_filters_if_active`
   (rebuild kernel filters from the profile). `on_enable_filters` (the master toggle),
@@ -469,9 +470,10 @@ bug and the v1.1.19 catalog bug were both *edges*, not functions).
 
 ## Known blind spots & gaps (cross-referenced to the verification map)
 
-- **Catalog decision** (`auto_catalog_drops`) — CRITICAL, no unit test (GUI-coupled). Extract the
-  drop→should-catalog predicate to guard the v1.1.19 fix.
+- **Catalog decision** — CLOSED: extracted to the pure `classify_drop` with 12 tests (incl.
+  `catalogs_foreign_provider_drop`, which guards the v1.1.19 fix). Was the top critical blind spot.
 - **Layer selection** (`install::layer_guid`) — CRITICAL, pure but untested. One assertion closes it.
+  Now the last critical blind spot.
 - **Prompt dedup** (`process_connect_prompts` + `pending_prompts`) — HIGH, no unit test.
 - **Rule parser** — subset of upstream `ParseNetworkString`: IPv4-mapped (`::ffff:…`) and scoped
   (`fe80::1%12`) IPv6 rejected → rule skipped.
