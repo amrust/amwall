@@ -188,6 +188,23 @@ fn parse_ipv6_addr_or_cidr(s: &str) -> Result<AddrSpec, ParseError> {
         }
         return Ok(AddrSpec::Ipv6Cidr(addr, prefix));
     }
+    // IPv6 addresses never contain `-`, so any dash is a `start-end`
+    // range divider. Upstream simplewall splits rules on `-` for both
+    // families (helper.c DIVIDER_RULE_RANGE); amwall previously only
+    // handled the IPv4 range form, so a migrated IPv6-range rule was
+    // rejected and silently skipped at install.
+    if let Some(dash) = s.find('-') {
+        let a: Ipv6Addr = s[..dash]
+            .parse()
+            .map_err(|_| ParseError::BadAddress(s.to_string()))?;
+        let b: Ipv6Addr = s[dash + 1..]
+            .parse()
+            .map_err(|_| ParseError::BadAddress(s.to_string()))?;
+        if u128::from(a) > u128::from(b) {
+            return Err(ParseError::BadRange(s.to_string()));
+        }
+        return Ok(AddrSpec::Ipv6Range(a, b));
+    }
     let addr: Ipv6Addr = s
         .parse()
         .map_err(|_| ParseError::BadAddress(s.to_string()))?;
@@ -246,6 +263,34 @@ mod tests {
             Some(AddrSpec::Ipv4Range(v4(192, 168, 0, 1), v4(192, 168, 0, 10)))
         );
         assert_eq!(c.port, None);
+    }
+
+    #[test]
+    fn ipv6_range() {
+        let c = parse_clause("2001:db8::1-2001:db8::10").unwrap();
+        assert_eq!(
+            c.addr,
+            Some(AddrSpec::Ipv6Range(
+                "2001:db8::1".parse().unwrap(),
+                "2001:db8::10".parse().unwrap(),
+            ))
+        );
+        assert_eq!(c.port, None);
+    }
+
+    #[test]
+    fn ipv6_range_bracketed_with_port() {
+        // `[start-end]:port` — brackets disambiguate the range from the
+        // trailing port, same as the single / CIDR bracketed forms.
+        let c = parse_clause("[2001:db8::1-2001:db8::ff]:443").unwrap();
+        assert_eq!(
+            c.addr,
+            Some(AddrSpec::Ipv6Range(
+                "2001:db8::1".parse().unwrap(),
+                "2001:db8::ff".parse().unwrap(),
+            ))
+        );
+        assert_eq!(c.port, Some(PortSpec::Single(443)));
     }
 
     #[test]
@@ -401,6 +446,14 @@ mod tests {
     fn cidr_prefix_too_large_v6() {
         let err = parse_clause("fe80::/129").unwrap_err();
         assert!(matches!(err, ParseError::BadCidr(_)));
+    }
+
+    #[test]
+    fn ipv6_range_reversed_rejected() {
+        // start > end must be rejected, not compiled into a filter that
+        // silently matches nothing (same guard as the v4 / port ranges).
+        let err = parse_clause("2001:db8::10-2001:db8::1").unwrap_err();
+        assert!(matches!(err, ParseError::BadRange(_)));
     }
 
     #[test]

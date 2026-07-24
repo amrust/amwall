@@ -1846,7 +1846,9 @@ fn clause_address_family(c: &RuleClause) -> Option<AddressFamily> {
         AddrSpec::Ipv4(_) | AddrSpec::Ipv4Range(..) | AddrSpec::Ipv4Cidr(..) => {
             Some(AddressFamily::Ipv4)
         }
-        AddrSpec::Ipv6(_) | AddrSpec::Ipv6Cidr(..) => Some(AddressFamily::Ipv6),
+        AddrSpec::Ipv6(_) | AddrSpec::Ipv6Cidr(..) | AddrSpec::Ipv6Range(..) => {
+            Some(AddressFamily::Ipv6)
+        }
     }
 }
 

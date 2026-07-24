@@ -119,6 +119,11 @@ pub enum FilterCondition {
     RemoteAddrV4Range(Ipv4Addr, Ipv4Addr),
     LocalAddrV6 { addr: Ipv6Addr, prefix: Option<u8> },
     RemoteAddrV6 { addr: Ipv6Addr, prefix: Option<u8> },
+    /// Inclusive IPv6 address range, compiled to `FWP_RANGE0` over
+    /// `FWP_BYTE_ARRAY16` values (network byte order) with
+    /// `FWP_MATCH_RANGE`. Mirrors upstream simplewall helper.c:1416-1426.
+    LocalAddrV6Range(Ipv6Addr, Ipv6Addr),
+    RemoteAddrV6Range(Ipv6Addr, Ipv6Addr),
     Direction(Direction),
     AppPath(PathBuf),
     /// ICMP type (8-bit on the wire but the WFP condition is
@@ -226,6 +231,13 @@ pub(super) fn compile(
             }
             FilterCondition::RemoteAddrV4Range(lo, hi) => {
                 storage.fc_v4_range(FWPM_CONDITION_IP_REMOTE_ADDRESS, *lo, *hi)
+            }
+
+            FilterCondition::LocalAddrV6Range(lo, hi) => {
+                storage.fc_v6_range(FWPM_CONDITION_IP_LOCAL_ADDRESS, *lo, *hi)
+            }
+            FilterCondition::RemoteAddrV6Range(lo, hi) => {
+                storage.fc_v6_range(FWPM_CONDITION_IP_REMOTE_ADDRESS, *lo, *hi)
             }
 
             FilterCondition::LocalAddrV4 { addr, prefix: None } => {
@@ -559,6 +571,45 @@ impl CompiledConditions {
                 r#type:
                     windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_ARRAY16_TYPE,
                 Anonymous: FWP_CONDITION_VALUE0_0 { byteArray16: raw_ptr },
+            },
+        }
+    }
+
+    /// Build a `FWP_RANGE0`-backed IPv6 address range condition.
+    /// `valueLow` / `valueHigh` are `FWP_BYTE_ARRAY16` (16-byte,
+    /// network byte order). WFP compares them lexicographically, which
+    /// for network byte order is the correct numeric ordering — so
+    /// `lo <= hi` (enforced at parse) yields an inclusive numeric
+    /// range. Mirrors upstream simplewall helper.c:1416-1426. Both
+    /// byte arrays and the range live in `self`'s Vecs so they outlive
+    /// the `FwpmFilterAdd0` that copies them out.
+    fn fc_v6_range(&mut self, field: GUID, lo: Ipv6Addr, hi: Ipv6Addr) -> FWPM_FILTER_CONDITION0 {
+        use windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_ARRAY16_TYPE;
+        let lo_arr = Box::new(FWP_BYTE_ARRAY16 { byteArray16: lo.octets() });
+        let hi_arr = Box::new(FWP_BYTE_ARRAY16 { byteArray16: hi.octets() });
+        let lo_ptr: *mut FWP_BYTE_ARRAY16 = lo_arr.as_ref() as *const _ as *mut _;
+        let hi_ptr: *mut FWP_BYTE_ARRAY16 = hi_arr.as_ref() as *const _ as *mut _;
+        self.v6_addrs.push(lo_arr);
+        self.v6_addrs.push(hi_arr);
+
+        let range = Box::new(FWP_RANGE0 {
+            valueLow: FWP_VALUE0 {
+                r#type: FWP_BYTE_ARRAY16_TYPE,
+                Anonymous: FWP_VALUE0_0 { byteArray16: lo_ptr },
+            },
+            valueHigh: FWP_VALUE0 {
+                r#type: FWP_BYTE_ARRAY16_TYPE,
+                Anonymous: FWP_VALUE0_0 { byteArray16: hi_ptr },
+            },
+        });
+        let raw_ptr: *mut FWP_RANGE0 = range.as_ref() as *const _ as *mut _;
+        self.ranges.push(range);
+        FWPM_FILTER_CONDITION0 {
+            fieldKey: field,
+            matchType: FWP_MATCH_RANGE,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_RANGE_TYPE,
+                Anonymous: FWP_CONDITION_VALUE0_0 { rangeValue: raw_ptr },
             },
         }
     }

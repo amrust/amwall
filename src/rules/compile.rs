@@ -76,6 +76,10 @@ fn compile_addr(side: Side, addr: &AddrSpec) -> FilterCondition {
             Side::Local => FilterCondition::LocalAddrV6 { addr: a, prefix: Some(p) },
             Side::Remote => FilterCondition::RemoteAddrV6 { addr: a, prefix: Some(p) },
         },
+        AddrSpec::Ipv6Range(lo, hi) => match side {
+            Side::Local => FilterCondition::LocalAddrV6Range(lo, hi),
+            Side::Remote => FilterCondition::RemoteAddrV6Range(lo, hi),
+        },
     }
 }
 
@@ -195,6 +199,19 @@ mod tests {
             FilterCondition::RemoteAddrV4Range(lo, hi) => {
                 assert_eq!(*lo, Ipv4Addr::new(10, 0, 0, 1));
                 assert_eq!(*hi, Ipv4Addr::new(10, 0, 0, 10));
+            }
+            other => panic!("unexpected condition: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ipv6_range_compiles_to_addr_range() {
+        let conds = one(Side::Remote, "2001:db8::1-2001:db8::10");
+        assert_eq!(conds.len(), 1);
+        match &conds[0] {
+            FilterCondition::RemoteAddrV6Range(lo, hi) => {
+                assert_eq!(*lo, "2001:db8::1".parse::<Ipv6Addr>().unwrap());
+                assert_eq!(*hi, "2001:db8::10".parse::<Ipv6Addr>().unwrap());
             }
             other => panic!("unexpected condition: {other:?}"),
         }

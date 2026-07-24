@@ -57,6 +57,8 @@ pub enum AddrSpec {
     Ipv4Cidr(Ipv4Addr, u8),
     /// Single IPv6 address.
     Ipv6(Ipv6Addr),
+    /// IPv6 inclusive range, `start-end`.
+    Ipv6Range(Ipv6Addr, Ipv6Addr),
     /// IPv6 CIDR — address + prefix length 0..=128.
     Ipv6Cidr(Ipv6Addr, u8),
 }
@@ -75,7 +77,10 @@ impl AddrSpec {
     /// Used by `Display` for `RuleClause` to decide whether the
     /// address needs `[…]` brackets when a port is present.
     pub fn is_ipv6(&self) -> bool {
-        matches!(self, Self::Ipv6(_) | Self::Ipv6Cidr(_, _))
+        matches!(
+            self,
+            Self::Ipv6(_) | Self::Ipv6Cidr(_, _) | Self::Ipv6Range(_, _)
+        )
     }
 }
 
@@ -86,6 +91,7 @@ impl std::fmt::Display for AddrSpec {
             Self::Ipv4Range(a, b) => write!(f, "{a}-{b}"),
             Self::Ipv4Cidr(a, p) => write!(f, "{a}/{p}"),
             Self::Ipv6(a) => write!(f, "{a}"),
+            Self::Ipv6Range(a, b) => write!(f, "{a}-{b}"),
             Self::Ipv6Cidr(a, p) => write!(f, "{a}/{p}"),
         }
     }
