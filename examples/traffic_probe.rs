@@ -53,6 +53,49 @@ fn main() {
         std::thread::sleep(Duration::from_millis(900));
     }
 
+    // --- features 2 & 3: interface map + per-app rollup ---
+    use amwall::gui::connections::{interface_names_by_ip, process_full_path};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let ifaces = interface_names_by_ip();
+    line!("");
+    line!("--- {} interface IP(s) mapped ---", ifaces.len());
+    {
+        // Print each distinct interface name once.
+        let mut names: Vec<&String> = ifaces.values().collect();
+        names.sort();
+        names.dedup();
+        for n in names {
+            line!("  interface: {n}");
+        }
+    }
+    let conns = enumerate_with_traffic(&mut monitor);
+    let mut pid_path: HashMap<u32, Option<PathBuf>> = HashMap::new();
+    let mut rollup: HashMap<PathBuf, (u64, u64, Vec<String>)> = HashMap::new();
+    for c in &conns {
+        let path = pid_path.entry(c.pid).or_insert_with(|| process_full_path(c.pid)).clone();
+        let Some(path) = path else { continue };
+        let e = rollup.entry(path).or_insert((0, 0, Vec::new()));
+        e.0 += c.download_speed;
+        e.1 += c.upload_speed;
+        if let Some(n) = ifaces.get(&c.local.ip) {
+            if !e.2.iter().any(|x| x == n) {
+                e.2.push(n.clone());
+            }
+        }
+    }
+    line!("--- per-app rollup ({} apps with connections) ---", rollup.len());
+    for (path, (down, up, ifs)) in &rollup {
+        let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        line!(
+            "  {:<24} down {:>10}  up {:>10}  iface [{}]",
+            name,
+            format_speed(*down),
+            format_speed(*up),
+            ifs.join(", ")
+        );
+    }
+
     line!("");
     line!("ESTATS enabled on at least {max_enabled} connection(s) at peak.");
     line!("Connections with observed traffic in the final pass: {ever_moved}.");

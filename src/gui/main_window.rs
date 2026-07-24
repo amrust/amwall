@@ -133,10 +133,42 @@ impl Default for AppsSortState {
     }
 }
 
+/// Sort state for the Connections listview. Click a column header to
+/// sort by it; click again to flip direction. `column == -1` means
+/// "no sort" — rows stay in IP-Helper enumeration order (the default).
+/// A fresh click starts descending, so clicking a Speed / Total header
+/// puts the busiest connection at the top.
+#[derive(Debug, Clone, Copy)]
+struct NetworkSortState {
+    column: i32,
+    ascending: bool,
+}
+
+impl Default for NetworkSortState {
+    fn default() -> Self {
+        Self { column: -1, ascending: false }
+    }
+}
+
+/// Per-app network rollup shown on the Apps tab: aggregate download /
+/// upload rate across the app's live TCP connections, plus the set of
+/// interfaces those connections ride. Recomputed each sampling tick.
+#[derive(Debug, Default, Clone)]
+struct AppTraffic {
+    download_speed: u64,
+    upload_speed: u64,
+    /// Friendly interface names ("Wi-Fi", "Ethernet", a VPN tunnel),
+    /// de-duplicated and in first-seen order. Usually one.
+    interfaces: Vec<String>,
+}
+
 /// Win32 timer id used to drive Connections-tab live refresh.
 /// Distinct from any IDC_* control id since Win32 routes timers
 /// through the same WM_TIMER queue.
 const TIMER_CONNECTIONS_REFRESH: usize = 9001;
+
+/// Win32 timer id driving the Apps-tab live traffic/interface columns.
+const TIMER_APPS_REFRESH: usize = 9002;
 
 /// Refresh interval for the Connections tab in milliseconds.
 /// 2 seconds matches upstream's `_app_network_refresh_timer`.
@@ -161,7 +193,8 @@ const LOGICAL_INITIAL_H: i32 = 600;
 /// computed at WM_CREATE time. Negative values in upstream were
 /// "percent-of-rect" hints; we translate them to fixed logical
 /// widths for the M5.2 baseline (M5.4 will revisit auto-sizing).
-const APPS_COL_WIDTHS: &[i32] = &[280, 150, 460]; // Name, Added (date+time), Path
+// Name, Added (date+time), Path, ↓ Speed, ↑ Speed, Interface.
+const APPS_COL_WIDTHS: &[i32] = &[260, 130, 300, 85, 85, 130];
 const RULES_COL_WIDTHS: &[i32] = &[280, 80, 80]; // Name, Protocol, Direction
 const NETWORK_COL_WIDTHS: &[i32] = &[
     180, // Name
@@ -256,6 +289,14 @@ struct WndState {
     /// refresh ticks (each rate is diffed against the previous tick's
     /// byte counts) and prunes closed connections. UI-thread only.
     traffic_monitor: std::cell::RefCell<super::connections::TrafficMonitor>,
+    /// Sort column/direction for the Connections listview (column
+    /// header clicks). Default: unsorted (enumeration order).
+    network_sort: Cell<NetworkSortState>,
+    /// Per-app network rollup (aggregate speed + interfaces) keyed by
+    /// full image path, feeding the Apps tab's Speed / Interface
+    /// columns. Refreshed on the apps-tab timer from the same traffic
+    /// sampling the Connections tab uses.
+    app_traffic: std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, AppTraffic>>,
     /// File-backed event log writer (M6.3). Lazily opens / rotates
     /// the on-disk log per `Settings.enable_log` + `log_path` +
     /// `log_size_limit`. Mirrors the in-memory `event_log` ring,
@@ -425,6 +466,8 @@ impl WndState {
             traffic_monitor: std::cell::RefCell::new(
                 super::connections::TrafficMonitor::new(),
             ),
+            network_sort: Cell::new(NetworkSortState::default()),
+            app_traffic: std::cell::RefCell::new(std::collections::HashMap::new()),
             event_log_writer: std::cell::RefCell::new(
                 super::event_log::EventLogWriter::new(),
             ),
@@ -919,6 +962,18 @@ unsafe extern "system" fn wnd_proc(
                 };
                 on_apps_column_click(hwnd, nmlv.iSubItem);
             }
+            // LVN_COLUMNCLICK on the Connections listview sorts by the
+            // clicked column (toggling direction on repeat clicks). Lets
+            // the user rank by download / upload / total to surface the
+            // busiest connections.
+            if nmhdr.code == LVN_COLUMNCLICK
+                && nmhdr.idFrom == IDC_NETWORK as usize
+            {
+                let nmlv = unsafe {
+                    &*(lparam.0 as *const windows::Win32::UI::Controls::NMLISTVIEW)
+                };
+                on_network_column_click(hwnd, nmlv.iSubItem);
+            }
             // Apps tab keyboard shortcuts (Ctrl+A select all,
             // Del bulk delete from profile).
             if nmhdr.code == LVN_KEYDOWN
@@ -1137,6 +1192,10 @@ unsafe extern "system" fn wnd_proc(
             if wparam.0 == TIMER_CONNECTIONS_REFRESH {
                 if let Some(state) = unsafe { state_ref(hwnd) } {
                     populate_connections_tab(state);
+                }
+            } else if wparam.0 == TIMER_APPS_REFRESH {
+                if let Some(state) = unsafe { state_ref(hwnd) } {
+                    refresh_apps_traffic_columns(state);
                 }
             } else if wparam.0 == TIMER_EVENT_DRAIN {
                 if let Some(state) = unsafe { state_ref(hwnd) } {
@@ -3667,6 +3726,20 @@ fn on_tab_change(hwnd: HWND) {
         }
     }
 
+    // Slot 0 is IDC_APPS_PROFILE — drive the live Speed / Interface
+    // columns while it's showing, off the same traffic sample the
+    // Connections tab uses.
+    if sel_slot == 0 {
+        refresh_apps_traffic_columns(state);
+        unsafe {
+            SetTimer(hwnd, TIMER_APPS_REFRESH, CONNECTIONS_REFRESH_MS, None);
+        }
+    } else {
+        unsafe {
+            let _ = KillTimer(hwnd, TIMER_APPS_REFRESH);
+        }
+    }
+
     // Update the right-hand status bar segment with the selected
     // tab's item count.
     let lv = state.listviews[sel_slot].get();
@@ -5572,6 +5645,54 @@ fn on_apps_column_click(hwnd: HWND, column: i32) {
     }
     state.apps_sort.set(sort);
     populate_apps_tab(state);
+}
+
+/// Column-header click on the Connections tab: set/toggle the sort and
+/// re-render. First click on a column sorts descending; clicking the
+/// same column again flips to ascending.
+fn on_network_column_click(hwnd: HWND, column: i32) {
+    let state = match unsafe { state_ref(hwnd) } {
+        Some(s) => s,
+        None => return,
+    };
+    let mut sort = state.network_sort.get();
+    if sort.column == column {
+        sort.ascending = !sort.ascending;
+    } else {
+        sort.column = column;
+        sort.ascending = false;
+    }
+    state.network_sort.set(sort);
+    populate_connections_tab(state);
+}
+
+/// Order the connection rows per the current [`NetworkSortState`].
+/// `column == -1` leaves enumeration order untouched. Numeric columns
+/// (ports, speeds, total) compare as numbers; the rest compare as
+/// strings. The async Host columns (2, 5) have no stable sort key, so
+/// they're treated as equal (no-op) rather than sorting on a
+/// half-populated cache.
+fn sort_connections(conns: &mut [super::connections::Connection], sort: NetworkSortState) {
+    use std::cmp::Ordering;
+    if sort.column < 0 {
+        return;
+    }
+    conns.sort_by(|a, b| {
+        let ord = match sort.column {
+            0 => a.process.to_ascii_lowercase().cmp(&b.process.to_ascii_lowercase()),
+            1 => a.local.ip.cmp(&b.local.ip),
+            3 => a.local.port.cmp(&b.local.port),
+            4 => a.remote.ip.cmp(&b.remote.ip),
+            6 => a.remote.port.cmp(&b.remote.port),
+            7 => a.protocol.label().cmp(b.protocol.label()),
+            8 => a.state.cmp(b.state),
+            9 => a.download_speed.cmp(&b.download_speed),
+            10 => a.upload_speed.cmp(&b.upload_speed),
+            11 => a.total_bytes.cmp(&b.total_bytes),
+            _ => Ordering::Equal,
+        };
+        if sort.ascending { ord } else { ord.reverse() }
+    });
 }
 
 /// `true` if either Ctrl key is currently pressed. Used to
@@ -8566,6 +8687,9 @@ fn configure_listview(lv: HWND, id: i32, dpi: u32) -> Result<(), String> {
             add_column(lv, 0, &t!("column.name"), scale_dpi(APPS_COL_WIDTHS[0], dpi), false)?;
             add_column(lv, 1, &t!("column.added"), scale_dpi(APPS_COL_WIDTHS[1], dpi), true)?;
             add_column(lv, 2, &t!("column.path"), scale_dpi(APPS_COL_WIDTHS[2], dpi), false)?;
+            add_column(lv, 3, &format!("\u{2193} {}", t!("column.speed")), scale_dpi(APPS_COL_WIDTHS[3], dpi), true)?;
+            add_column(lv, 4, &format!("\u{2191} {}", t!("column.speed")), scale_dpi(APPS_COL_WIDTHS[4], dpi), true)?;
+            add_column(lv, 5, &t!("column.interface"), scale_dpi(APPS_COL_WIDTHS[5], dpi), false)?;
 
             // Attach the system small-icon imagelist so per-row
             // LVITEMW.iImage indices resolve to whatever icon the
@@ -9135,6 +9259,81 @@ fn write_rule_subitems(lv: HWND, idx: i32, rule: &crate::profile::Rule) {
 /// Toggling the checkbox is wired in a follow-up (it mutates the
 /// in-memory App.is_enabled; actual filter (re-)install fires off
 /// an Apply or the Enable filters toolbar button).
+/// Recompute the per-app traffic rollup (aggregate speed + interfaces)
+/// from a fresh traffic sample and store it in `state.app_traffic`.
+/// Aggregates the same ESTATS sample the Connections tab uses: each TCP
+/// connection's rate is summed onto its owning process's full image
+/// path, and the connection's local IP is mapped to the interface it
+/// rides. pid → path resolution is memoized per call so a busy process
+/// with many sockets pays one lookup.
+fn refresh_app_traffic(state: &WndState) {
+    let conns = {
+        let mut monitor = state.traffic_monitor.borrow_mut();
+        super::connections::enumerate_with_traffic(&mut monitor)
+    };
+    let ifaces = super::connections::interface_names_by_ip();
+    let mut pid_path: std::collections::HashMap<u32, Option<std::path::PathBuf>> =
+        std::collections::HashMap::new();
+    let mut rollup: std::collections::HashMap<std::path::PathBuf, AppTraffic> =
+        std::collections::HashMap::new();
+    for c in &conns {
+        let path = pid_path
+            .entry(c.pid)
+            .or_insert_with(|| super::connections::process_full_path(c.pid))
+            .clone();
+        let Some(path) = path else { continue };
+        let entry = rollup.entry(path).or_default();
+        entry.download_speed = entry.download_speed.saturating_add(c.download_speed);
+        entry.upload_speed = entry.upload_speed.saturating_add(c.upload_speed);
+        if let Some(name) = ifaces.get(&c.local.ip) {
+            if !entry.interfaces.iter().any(|n| n == name) {
+                entry.interfaces.push(name.clone());
+            }
+        }
+    }
+    *state.app_traffic.borrow_mut() = rollup;
+}
+
+/// Fill the Apps-tab Speed / Interface subitems (cols 3-5) for one row
+/// from `state.app_traffic`. An app with no live connection renders
+/// blank; a connected-but-idle app shows "0 B/s" plus its interface.
+fn set_app_traffic_subitems(state: &WndState, lv: HWND, row: i32, path: &std::path::Path) {
+    let at = state.app_traffic.borrow();
+    if let Some(t) = at.get(path) {
+        set_subitem(lv, row, 3, &super::connections::format_speed(t.download_speed));
+        set_subitem(lv, row, 4, &super::connections::format_speed(t.upload_speed));
+        set_subitem(lv, row, 5, &t.interfaces.join(", "));
+    } else {
+        set_subitem(lv, row, 3, "");
+        set_subitem(lv, row, 4, "");
+        set_subitem(lv, row, 5, "");
+    }
+}
+
+/// Live-refresh the Apps-tab Speed / Interface columns in place, without
+/// a full repopulate (which would drop the user's selection/scroll and
+/// re-enqueue signature verification every tick). Samples traffic, then
+/// rewrites cols 3-5 for each rendered row via its lParam → app path.
+fn refresh_apps_traffic_columns(state: &WndState) {
+    let lv = state.listviews[0].get();
+    if lv.0 == 0 {
+        return;
+    }
+    refresh_app_traffic(state);
+    let count = unsafe { SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0)) }.0 as i32;
+    for row in 0..count {
+        let path = {
+            let profile = state.app.profile.borrow();
+            listview_item_param(lv, row)
+                .map(|p| p as usize)
+                .and_then(|src| profile.apps.get(src).map(|a| a.path.clone()))
+        };
+        if let Some(path) = path {
+            set_app_traffic_subitems(state, lv, row, &path);
+        }
+    }
+}
+
 fn populate_apps_tab(state: &WndState) {
     // Index 0 in TAB_LISTVIEW_IDS is IDC_APPS_PROFILE.
     let lv = state.listviews[0].get();
@@ -9284,6 +9483,9 @@ fn populate_apps_tab(state: &WndState) {
         // Column 2: full path (independent of `show_filenames_only`,
         // which only controls the Name column).
         set_subitem(lv, idx as i32, 2, &app.path.display().to_string());
+        // Columns 3-5: live download / upload speed + interface, from
+        // the most recent traffic sample (blank if not connected).
+        set_app_traffic_subitems(state, lv, idx as i32, &app.path);
     }
     drop(profile);
     refresh_apps_group_headers(lv);
@@ -9516,10 +9718,14 @@ fn populate_connections_tab(state: &WndState) {
     if lv.0 == 0 {
         return;
     }
-    let conns = {
+    let mut conns = {
         let mut monitor = state.traffic_monitor.borrow_mut();
         super::connections::enumerate_with_traffic(&mut monitor)
     };
+    // Apply the user's column-header sort (default: enumeration order).
+    // The row loop stamps each row's lParam with its index into this
+    // now-sorted Vec, so right-click round-tripping stays consistent.
+    sort_connections(&mut conns, state.network_sort.get());
 
     let saved = begin_listview_refill(lv);
     let filter = state.search_text.borrow().clone();
@@ -10107,6 +10313,57 @@ const fn windows_lvm_getitemcount() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn conn(process: &str, port: u16, down: u64, up: u64, total: u64) -> super::super::connections::Connection {
+        use std::net::{IpAddr, Ipv4Addr};
+        use super::super::connections::{Connection, Endpoint, Protocol};
+        Connection {
+            process: process.to_string(),
+            pid: 0,
+            local: Endpoint { ip: IpAddr::V4(Ipv4Addr::LOCALHOST), port },
+            remote: Endpoint { ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), port: 443 },
+            protocol: Protocol::Tcp,
+            state: "ESTABLISHED",
+            download_speed: down,
+            upload_speed: up,
+            total_bytes: total,
+            has_stats: true,
+        }
+    }
+
+    #[test]
+    fn network_sort_orders_speed_and_toggles_direction() {
+        let base = vec![
+            conn("a", 10, 100, 5, 1000),
+            conn("b", 20, 300, 1, 50),
+            conn("c", 30, 200, 9, 700),
+        ];
+
+        // Column -1 (default) leaves enumeration order untouched.
+        let mut v = base.clone();
+        sort_connections(&mut v, NetworkSortState { column: -1, ascending: false });
+        assert_eq!(v.iter().map(|c| c.process.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+
+        // Download speed (col 9), first click = descending -> b(300) c(200) a(100).
+        let mut v = base.clone();
+        sort_connections(&mut v, NetworkSortState { column: 9, ascending: false });
+        assert_eq!(v.iter().map(|c| c.download_speed).collect::<Vec<_>>(), [300, 200, 100]);
+
+        // Same column ascending -> a(100) c(200) b(300).
+        let mut v = base.clone();
+        sort_connections(&mut v, NetworkSortState { column: 9, ascending: true });
+        assert_eq!(v.iter().map(|c| c.download_speed).collect::<Vec<_>>(), [100, 200, 300]);
+
+        // Total (col 11) descending is numeric, not lexicographic (1000 > 700 > 50).
+        let mut v = base.clone();
+        sort_connections(&mut v, NetworkSortState { column: 11, ascending: false });
+        assert_eq!(v.iter().map(|c| c.total_bytes).collect::<Vec<_>>(), [1000, 700, 50]);
+
+        // Local port (col 3) ascending.
+        let mut v = base.clone();
+        sort_connections(&mut v, NetworkSortState { column: 3, ascending: true });
+        assert_eq!(v.iter().map(|c| c.local.port).collect::<Vec<_>>(), [10, 20, 30]);
+    }
 
     #[test]
     fn revocation_policy_maps_allow_vs_display() {

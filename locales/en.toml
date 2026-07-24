@@ -107,6 +107,7 @@ filter = "Filter"
 index = "#"
 speed = "Speed"
 total = "Total"
+interface = "Interface"
 
 # --- Group headers ---
 [group]

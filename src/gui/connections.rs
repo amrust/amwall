@@ -28,7 +28,13 @@ use windows::Win32::NetworkManagement::IpHelper::{
     SetPerTcp6ConnectionEStats, SetPerTcpConnectionEStats, TCP_ESTATS_DATA_ROD_v0,
     TCP_ESTATS_DATA_RW_v0, TcpConnectionEstatsData, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
-use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6, IN6_ADDR, IN6_ADDR_0};
+use windows::Win32::NetworkManagement::IpHelper::{
+    GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
+    GET_ADAPTERS_ADDRESSES_FLAGS, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+};
+use windows::Win32::Networking::WinSock::{
+    AF_INET, AF_INET6, AF_UNSPEC, IN6_ADDR, IN6_ADDR_0, SOCKADDR_IN, SOCKADDR_IN6,
+};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -660,6 +666,75 @@ pub fn format_bytesize(bytes: u64) -> String {
 /// Byte-rate label for the speed columns: byte size with a "/s" suffix.
 pub fn format_speed(bytes_per_sec: u64) -> String {
     format!("{}/s", format_bytesize(bytes_per_sec))
+}
+
+/// Map every local unicast IP to the friendly name of the adapter that
+/// owns it -- the name Windows shows in Network Connections ("Wi-Fi",
+/// "Ethernet", a VPN's tunnel name, "Loopback Pseudo-Interface 1", ...).
+/// A connection's LOCAL address identifies the interface it rides, so
+/// callers look up `conn.local.ip` here. Empty on any failure (the
+/// Interface column then just stays blank). Rebuilt per sampling pass —
+/// adapters and DHCP leases can change while amwall runs.
+pub fn interface_names_by_ip() -> std::collections::HashMap<IpAddr, String> {
+    let mut out = std::collections::HashMap::new();
+    // Only unicast addresses matter for mapping a connection's local IP.
+    let flags = GET_ADAPTERS_ADDRESSES_FLAGS(
+        GAA_FLAG_SKIP_ANYCAST.0 | GAA_FLAG_SKIP_MULTICAST.0 | GAA_FLAG_SKIP_DNS_SERVER.0,
+    );
+    let family = AF_UNSPEC.0 as u32;
+
+    let mut size = 0u32;
+    unsafe {
+        let _ = GetAdaptersAddresses(family, flags, None, None, &mut size);
+    }
+    if size == 0 {
+        return out;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let res = unsafe {
+        GetAdaptersAddresses(
+            family,
+            flags,
+            None,
+            Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+            &mut size,
+        )
+    };
+    if res != ERROR_SUCCESS.0 {
+        return out;
+    }
+
+    let mut adapter = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while !adapter.is_null() {
+        let a = unsafe { &*adapter };
+        let name = if a.FriendlyName.is_null() {
+            String::new()
+        } else {
+            unsafe { a.FriendlyName.to_string() }.unwrap_or_default()
+        };
+        if !name.is_empty() {
+            let mut uni = a.FirstUnicastAddress;
+            while !uni.is_null() {
+                let u = unsafe { &*uni };
+                let sa = u.Address.lpSockaddr;
+                if !sa.is_null() {
+                    let fam = unsafe { (*sa).sa_family };
+                    if fam == AF_INET {
+                        let sin = unsafe { &*(sa as *const SOCKADDR_IN) };
+                        let ip = Ipv4Addr::from(u32::from_be(unsafe { sin.sin_addr.S_un.S_addr }));
+                        out.insert(IpAddr::V4(ip), name.clone());
+                    } else if fam == AF_INET6 {
+                        let sin6 = unsafe { &*(sa as *const SOCKADDR_IN6) };
+                        let ip = Ipv6Addr::from(unsafe { sin6.sin6_addr.u.Byte });
+                        out.insert(IpAddr::V6(ip), name.clone());
+                    }
+                }
+                uni = u.Next;
+            }
+        }
+        adapter = a.Next;
+    }
+    out
 }
 
 // ---- TCP v4 ----
