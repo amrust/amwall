@@ -2232,17 +2232,23 @@ fn auto_catalog_drops(
                 NetEvent::Drop(d) => d,
                 _ => continue,
             };
-            // Only auto-catalog drops from amwall's own filters.
-            // Without this gate, every Windows Defender / third-
-            // party WFP-provider drop would dump exes into our
-            // profile.
+            // Catalog + prompt for a blocked app regardless of WHICH WFP
+            // provider's filter dropped it — mirrors upstream simplewall,
+            // whose `_app_addapplication` (log.c:1355) and connect
+            // notification (log.c:1394) are ungated by `is_myprovider`;
+            // that flag gates ONLY the UI packet-log tab (log.c:1404).
+            // The previous amwall-provider-only gate diverged from upstream
+            // and left amwall silent whenever another firewall (e.g. a VPN
+            // killswitch) blocked the traffic first and owned the drop
+            // event — so no prompt and no Apps-list entry ever appeared.
+            // `filter_id` is still needed below for the Settings->Exclude
+            // category checks; a drop with no filter id can't be
+            // categorized, matching upstream's `!log->filter_id` early-out
+            // (log.c:528).
             let filter_id = match details.filter_id {
                 Some(f) => f,
                 None => continue,
             };
-            if !state.amwall_filter_ids.borrow().contains(&filter_id) {
-                continue;
-            }
             // Settings -> Exclude gates. Drop the prompt for
             // events whose source filter category the user has
             // told us to ignore. The categorized sets are filled
