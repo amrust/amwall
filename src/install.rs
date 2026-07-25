@@ -747,7 +747,14 @@ fn install_global_rules(
     //      multicast ranges (wfp.c:1730-1761), keyed on the REMOTE
     //      address at the CONNECT layer and the LOCAL address at the
     //      RECV_ACCEPT layer -- so inbound is matched on OUR address,
-    //      not the peer's.
+    //      not the peer's. CRITICAL: each CIDR permit ALSO carries the
+    //      loopback-flag condition (fwfc[0], count=2 in upstream
+    //      wfp.c:1884-1958). Without it the permit is address-only and
+    //      unconditionally allows ALL traffic to/from those ranges at
+    //      HIGHEST_IMPORTANT, defeating default-deny and overriding
+    //      user/blocklist blocks for the entire RFC1918/link-local/
+    //      multicast space. The flag AND address only fires for
+    //      kernel-tagged loopback traffic (as upstream intends).
     // The old code installed only 127/8 + ::1 and keyed BOTH layers on
     // the remote address (wrong for RECV_ACCEPT). Upstream's `[::]/0`
     // entry is deliberately OMITTED: parsed with prefix 0 it is a /0
@@ -809,7 +816,7 @@ fn install_global_rules(
                 &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
                 &SUBLAYER_KEY,
                 Some(&PROVIDER_KEY),
-                std::slice::from_ref(&remote),
+                &[loop_flags.clone(), remote],
                 FilterAction::Permit,
                 persistent,
                 filter::weight::HIGHEST_IMPORTANT,
@@ -825,7 +832,7 @@ fn install_global_rules(
                 &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
                 &SUBLAYER_KEY,
                 Some(&PROVIDER_KEY),
-                std::slice::from_ref(&local),
+                &[loop_flags.clone(), local],
                 FilterAction::Permit,
                 persistent,
                 filter::weight::HIGHEST_IMPORTANT,
@@ -859,7 +866,7 @@ fn install_global_rules(
                 &FWPM_LAYER_ALE_AUTH_CONNECT_V6,
                 &SUBLAYER_KEY,
                 Some(&PROVIDER_KEY),
-                std::slice::from_ref(&remote),
+                &[loop_flags.clone(), remote],
                 FilterAction::Permit,
                 persistent,
                 filter::weight::HIGHEST_IMPORTANT,
@@ -875,7 +882,7 @@ fn install_global_rules(
                 &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
                 &SUBLAYER_KEY,
                 Some(&PROVIDER_KEY),
-                std::slice::from_ref(&local),
+                &[loop_flags.clone(), local],
                 FilterAction::Permit,
                 persistent,
                 filter::weight::HIGHEST_IMPORTANT,
