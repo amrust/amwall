@@ -208,6 +208,19 @@ on Windows has no equivalent userspace-pressure fail-open.
 
 ## Gaps, prioritized (all found by reading, none verified on a kernel)
 
+> **Fix-pass status (branch `feat/linux-gap-fixes`).** These are committed but built/tested only as
+> far as a Windows host allows — the Linux crates are unverified pending a Mint VM build:
+> - **#5 (specific IPv6 addresses) — FIXED.** `amwall-core` gains `DestIp`/`dest_ip()` (unit-tested,
+>   and it *does* compile+test on Windows); the daemon routes v4/v6/any to the right map; the CLI
+>   accepts `[v6]:port`; the rule editor validates v6.
+> - **#9 (daemon rules-path) — FIXED.** Defaults to `/etc/amwall/rules.toml`, no `$HOME`.
+> - **#10 (Qt window geometry) — FIXED.** `save/restoreGeometry` via QSettings.
+> - **#14 (shared BPF structs) — FIXED.** New `no_std` `amwall-abi` crate; ebpf + daemon share it.
+> - **#6 (TCP/UDP protocol matching) — DEFERRED to VM.** Needs a verifier-sensitive BPF change
+>   (read the socket protocol in the LSM hook) that can't be validated off a live kernel; doing it
+>   blind would risk a placeholder, so it's held for VM-verified work.
+> All other gaps below remain open.
+
 **HIGH — enforcement correctness / security:**
 
 1. **Only `socket_connect` is hooked.** No inbound (`security_socket_bind`) and no unconnected-UDP /
