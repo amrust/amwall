@@ -102,23 +102,57 @@ pub struct NetMeter {
     last_endpoints_tick: u64,
 }
 
+/// What a Kernel-Network data-event id tells us, derived purely from the
+/// id. Pulled out of the callback so the fragile bits — which ids we
+/// meter, send-vs-recv, TCP-vs-UDP, and the payload offset of the LOCAL
+/// port — are unit-testable (`classify_event_table`); a wrong offset here
+/// would silently mis-key every UDP row and the gate triad couldn't see
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EventKind {
+    /// True = a received datagram (download); false = sent (upload).
+    is_recv: bool,
+    /// True = UDP, false = TCP.
+    is_udp: bool,
+    /// Byte offset of the LOCAL port in the payload: the source port on a
+    /// send, the destination port on a receive. IPv6's 16-byte addresses
+    /// push it back vs IPv4. (Network byte order at that offset.)
+    local_port_offset: usize,
+}
+
+/// Classify a data-event id, or `None` for ids we don't meter
+/// (connect/disconnect/retransmit/... and everything non-network).
+fn classify_event(id: u16) -> Option<EventKind> {
+    let is_recv = RECV_IDS.contains(&id);
+    let is_send = SEND_IDS.contains(&id);
+    if !is_recv && !is_send {
+        return None;
+    }
+    let is_v6 = V6_IDS.contains(&id);
+    let local_port_offset = match (is_send, is_v6) {
+        (true, false) => 18,  // sport, IPv4
+        (true, true) => 42,   // sport, IPv6
+        (false, false) => 16, // dport, IPv4
+        (false, true) => 40,  // dport, IPv6
+    };
+    Some(EventKind { is_recv, is_udp: UDP_IDS.contains(&id), local_port_offset })
+}
+
 /// The ETW real-time callback. Runs on the consumer thread for every
 /// event the enabled provider emits. Adds the datagram's byte count to
-/// its owning PID's running total. The owning PID comes from the event
-/// PAYLOAD (`UserData[0..4]`), not `EventHeader.ProcessId` — kernel
-/// network events are logged in arbitrary thread context, so the header
-/// PID is unreliable; the payload PID is the socket owner.
+/// its owning PID's and local endpoint's running totals. The owning PID
+/// comes from the event PAYLOAD (`UserData[0..4]`), not
+/// `EventHeader.ProcessId` — kernel network events are logged in
+/// arbitrary thread context, so the header PID is unreliable; the payload
+/// PID is the socket owner.
 unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     if record.is_null() {
         return;
     }
     let rec = unsafe { &*record };
-    let id = rec.EventHeader.EventDescriptor.Id;
-    let is_recv = RECV_IDS.contains(&id);
-    let is_send = SEND_IDS.contains(&id);
-    if !is_recv && !is_send {
+    let Some(kind) = classify_event(rec.EventHeader.EventDescriptor.Id) else {
         return;
-    }
+    };
     if rec.UserData.is_null() || rec.UserDataLength < 8 {
         return;
     }
@@ -138,31 +172,22 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     // Per-process totals (Apps tab).
     if let Ok(mut map) = counters.pids.lock() {
         let entry = map.entry(pid).or_insert((0, 0));
-        if is_recv {
+        if kind.is_recv {
             entry.0 = entry.0.saturating_add(size);
         } else {
             entry.1 = entry.1.saturating_add(size);
         }
     }
 
-    // Per-endpoint totals (Connections tab). The LOCAL port is the source
-    // port on a send and the destination port on a receive; its offset
-    // depends on IPv4 vs IPv6 (16-byte addresses push it back). Ports are
-    // network byte order in the payload.
-    let is_v6 = V6_IDS.contains(&id);
-    let port_off = match (is_send, is_v6) {
-        (true, false) => 18,  // sport, IPv4
-        (true, true) => 42,   // sport, IPv6
-        (false, false) => 16, // dport, IPv4
-        (false, true) => 40,  // dport, IPv6
-    };
+    // Per-endpoint totals (Connections tab), keyed by (is_udp, local port).
+    let port_off = kind.local_port_offset;
     if data.len() >= port_off + 2 {
         let local_port = u16::from_be_bytes([data[port_off], data[port_off + 1]]);
         if local_port != 0 {
-            let key = (UDP_IDS.contains(&id), local_port);
+            let key = (kind.is_udp, local_port);
             if let Ok(mut map) = counters.endpoints.lock() {
                 let entry = map.entry(key).or_insert((0, 0));
-                if is_recv {
+                if kind.is_recv {
                     entry.0 = entry.0.saturating_add(size);
                 } else {
                     entry.1 = entry.1.saturating_add(size);
@@ -400,6 +425,54 @@ impl Drop for NetMeter {
         stop_session(self.session, &name_w);
         if let Some(h) = self.consumer.take() {
             let _ = h.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_event, EventKind};
+
+    /// Pin the full id → (direction, protocol, local-port offset) table.
+    /// These offsets are read straight out of raw ETW payloads, so a
+    /// silent drift would mis-key every row with no compile-time warning.
+    #[test]
+    fn classify_event_table() {
+        // (id, is_recv, is_udp, local_port_offset)
+        let cases = [
+            (10u16, false, false, 18), // TCP v4 send  -> sport @18
+            (11, true, false, 16),     // TCP v4 recv  -> dport @16
+            (26, false, false, 42),    // TCP v6 send  -> sport @42
+            (27, true, false, 40),     // TCP v6 recv  -> dport @40
+            (42, false, true, 18),     // UDP v4 send  -> sport @18
+            (43, true, true, 16),      // UDP v4 recv  -> dport @16
+            (58, false, true, 42),     // UDP v6 send  -> sport @42
+            (59, true, true, 40),      // UDP v6 recv  -> dport @40
+        ];
+        for (id, is_recv, is_udp, off) in cases {
+            assert_eq!(
+                classify_event(id),
+                Some(EventKind { is_recv, is_udp, local_port_offset: off }),
+                "id {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_event_ignores_non_data_events() {
+        // connect(12)/disconnect(13)/retransmit(14)/accept(15) and any
+        // unrelated id carry no metered payload -> None.
+        for id in [0u16, 12, 13, 14, 15, 28, 99, 1000] {
+            assert_eq!(classify_event(id), None, "id {id} should not be metered");
+        }
+    }
+
+    #[test]
+    fn recv_and_send_ids_are_disjoint() {
+        // An id is never both a send and a receive, so direction is
+        // unambiguous.
+        for id in super::RECV_IDS {
+            assert!(!super::SEND_IDS.contains(&id));
         }
     }
 }

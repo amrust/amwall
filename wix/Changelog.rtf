@@ -1,12 +1,16 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
 What's new in amwall v2.0.0 (current)\par
 \par
-  - Live traffic on the Connections tab. Each active TCP\par
-    connection now shows its download speed, upload speed, and\par
-    the total bytes it has transferred, refreshed as you watch.\par
-    UDP entries and listeners stay blank -- Windows exposes no\par
-    per-socket counters for them. Matches the same feature in\par
-    upstream simplewall\par
+  - Real network meter. amwall now shows live download and\par
+    upload speed -- per app on the Apps tab and per connection\par
+    on the Connections tab -- along with a running total. It\par
+    counts BOTH TCP and UDP, so a BitTorrent client or any\par
+    UDP-heavy app shows its true rate, not just its TCP slice.\par
+    Click a Speed column header to rank the busiest talkers\par
+  - See which network each app is using. A new Interface column\par
+    on the Apps tab names the adapter each app's traffic rides\par
+    -- Wi-Fi, Ethernet, or a VPN tunnel -- so you can tell at a\par
+    glance whether an app is going through your VPN\par
   - Connect prompts no longer stack up. If you step away from\par
     the PC without answering, amwall keeps a single prompt window\par
     per program instead of opening a new popup each time that\par
