@@ -168,7 +168,10 @@ struct AppTraffic {
 const TIMER_CONNECTIONS_REFRESH: usize = 9001;
 
 /// Win32 timer id driving the Apps-tab live traffic/interface columns.
-const TIMER_APPS_REFRESH: usize = 9002;
+/// MUST be unique across all TIMER_* ids below (9002 collided with
+/// TIMER_EVENT_DRAIN, which silently killed the event-drain / connect-
+/// prompt pipeline). Keep this list collision-free.
+const TIMER_APPS_REFRESH: usize = 9008;
 
 /// Refresh interval for the Connections tab in milliseconds.
 /// 2 seconds matches upstream's `_app_network_refresh_timer`.
