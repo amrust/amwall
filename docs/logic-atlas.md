@@ -195,9 +195,15 @@ the tx guard's Drop, so partial installs are impossible):**
    `RULE_BLOCKLIST 0x0D` (outranks per-app + user/system, upstream db.c:399).
 6. **Per-app permits** → `install_per_app_filters` (band `APP 0x09`).
 7. **Default-deny** → `install_default_deny(block_outbound, use_stealth || block_inbound)`.
-8. **Global rules** → `install_global_rules` (loopback / 6to4 / windows-update / …).
+8. **Global rules** → `install_global_rules` (loopback / 6to4 / windows-update / …). Loopback = a
+   flag permit (kernel loopback flag) PLUS the local-CIDR list; each CIDR permit carries the loopback
+   flag AND the address (2 conditions), so it only matches kernel-tagged loopback — an address-only
+   permit would over-permit the whole RFC1918 space and defeat default-deny (fixed v2.0.0).
 9. **Stealth filters** → `install_stealth_filters` (split out for `exclude_stealth` categorization).
-10. **Boot-time permits** → `install_boottime_permits` — only when `install_boottime && persistent`.
+10. **Boot-time filters** → `install_boottime_permits` — only when `install_boottime && persistent`.
+    Installs the full set (v2.0.0), not just permits: 8 loopback permits at HIGHEST_IMPORTANT + 6
+    match-all BLOCK catch-alls at LOWEST (RECV_ACCEPT + ICMP-error) + 2 IPFORWARD blocks. The BLOCKs
+    are what close the early-boot fail-open window (WFP is default-permit; permits alone can't).
 
 **Weight-band ladder (finding A; higher wins within the sublayer):** `HIGHEST_IMPORTANT 0x0F` >
 `HIGHEST 0x0E` > `RULE_BLOCKLIST 0x0D` > `RULE_USER_BLOCK 0x0C` > `RULE_USER 0x0B` > `RULE_SYSTEM
@@ -228,8 +234,11 @@ but keeps engine/transaction errors **fatal**.
 `clause_address_family`.
 
 **Invariants:** stable GUIDs; weight bands encode precedence; default-deny callout-before-block;
-one bad rule skips (never fail-open the whole install); everything in one transaction; boottime only
-when persistent (BOOTTIME and PERSISTENT flags are mutually exclusive at the filter level).
+loopback CIDR permits are flag-gated (never address-only); boottime installs BLOCKs not just permits;
+`CLEAR_ACTION_RIGHT` on every HIGHEST_IMPORTANT permit + block (hard permits, uncontestable
+cross-sublayer); `INDEXED` on non-boottime filters; one bad rule skips (never fail-open the whole
+install); everything in one transaction; boottime only when persistent (BOOTTIME and PERSISTENT flags
+are mutually exclusive at the filter level).
 **Coupling:** ← `profile`, `rules`, `internal_rules_state`; → `wfp::{filter, condition, provider,
 sublayer, WfpEngine}`. Driven by `main` (CLI) and `gui` (reinstall_filters_if_active).
 
@@ -447,6 +456,13 @@ Explorer icons). `font` (font picker + HFONT).
 `0x101` toast-moved · `0x102` connect-allow · `0x103` connect-block · `0x104` dns-refresh ·
 `0x105` connect-prompt-closed · `0x110` tray · `0x120` signed-refresh · `0x150/1/2` update.
 
+**Win32 TIMER id registry (grep `TIMER_` before adding — a duplicate id silently kills one
+timer; a 9002 collision shipped in v2.0.0 dev and killed the whole event-drain / connect-prompt
+pipeline):** `9001` connections-refresh · `9002` event-drain · `9003` resize-cleanup ·
+`9004` group-collapse-repaint · `9005` app-expiry · `9006` update-check · `9007` hash-check ·
+`9008` apps-refresh. All must be unique: `WM_TIMER` dispatch is a first-match `if/else if` chain,
+so two ids with the same value make the later arm dead code.
+
 ---
 
 ## Cross-cutting flows (where the bugs live)
@@ -458,7 +474,13 @@ bug and the v1.1.19 catalog bug were both *edges*, not functions).
    (kernel) → wfp::events (drop) → main_window::drain_events → auto_catalog_drops → connect prompt →
    verdict → reinstall_filters_if_active`. Edges that broke before: *install-order* (default-deny
    callout-vs-block, v1.1.17/18 — now guarded); *events→catalog* (own-provider-only gate, v1.1.19 —
-   fixed, still unit-test-blind).
+   fixed + `classify_drop` tested). v2.0.0 whole-tree audit edges (all fixed): a **TIMER-id
+   collision** (apps-refresh == event-drain == 9002) made `drain_events` dead code and killed the
+   entire drop→catalog→prompt pipeline while WFP kept enforcing — a two-const value clash the gate
+   triad can't see; **loopback over-permit** (address-only CIDR permits allowed all of RFC1918 over
+   default-deny); **import/refresh** replaced the profile but never re-applied filters (UI showed one
+   policy, kernel enforced another). All confirmed live at v2.0.0 via `release-gate.ps1` Tier 2 +
+   `netsh wfp show filters` (loopback filters carry 2 conditions; boottime BLOCKs present).
 
 2. **Startup.** `gui::run → build App → main_window::create → on_create → detect_initial_filter_state
    → try_auto_enable_filters_at_startup (if filters_active_persisted) → try_subscribe_events →
@@ -490,15 +512,28 @@ bug and the v1.1.19 catalog bug were both *edges*, not functions).
 
 ## Known blind spots & gaps (cross-referenced to the verification map)
 
-- **Catalog decision** — CLOSED: extracted to the pure `classify_drop` with 12 tests (incl.
-  `catalogs_foreign_provider_drop`, which guards the v1.1.19 fix). Was the top critical blind spot.
-- **Layer selection** (`install::layer_guid`) — CRITICAL, pure but untested. One assertion closes it.
-  Now the last critical blind spot.
-- **Prompt dedup** (`process_connect_prompts` + `pending_prompts`) — HIGH, no unit test.
-- **Rule parser** — subset of upstream `ParseNetworkString`: IPv4-mapped (`::ffff:…`) and scoped
-  (`fe80::1%12`) IPv6 rejected → rule skipped.
-- **Weight precedence** & **condition kernel-match** — logic tested; the actual kernel arbitration /
-  packet match only provable via elevated `netsh wfp show filters` + `live_enforcement`.
+- **Catalog decision** — CLOSED: pure `classify_drop`, 12 tests (incl. `catalogs_foreign_provider_drop`).
+- **Layer selection** (`install::layer_guid`) — CLOSED (v2.0.0): `layer_guid_maps_direction_and_family`
+  pins all four (dir × family) pairs + the None cases; `default_deny_plan` routes through it.
+- **Prompt dedup** — CLOSED (v2.0.0): the show-predicate is the pure `should_show_connect_prompt`
+  (`is_silent` + already-pending) with a test.
+- **Rule parser** — subset of upstream `ParseNetworkString`: scoped (`fe80::1%12`) IPv6 still rejected.
+  IPv4-mapped (`::ffff:…`) now round-trips (Display always brackets IPv6, v2.0.0), but the parser
+  still won't accept an *unbracketed* `::ffff:1.2.3.4` typed directly.
+- **Weight precedence** & **condition kernel-match** — logic tested; kernel arbitration / packet match
+  only provable via elevated `netsh wfp show filters` + `live_enforcement` — **both run and PASSED at
+  v2.0.0** (loopback 2-condition permits, boottime BLOCKs, `CLEAR_ACTION_RIGHT`, and default-deny
+  actually blocking all confirmed in the live BFE), so this is now point-in-time verified, not just a
+  standing automated guard.
+- **ETW net-meter payload offsets** (`net_meter::classify_event`) — CLOSED: the id → direction /
+  protocol / local-port-offset table is pinned by `classify_event_table`.
+
+**v2.0.0 whole-tree audit:** an adversarial re-read of every subsystem (find → verify each finding)
+surfaced 17 real defects — 1 self-introduced regression (the TIMER collision), 3 high (loopback
+bypass, profile total-data-loss on one bad `<item>`, import/refresh fail-open), 4 medium, 9 low — all
+fixed, unit-tested where testable, and (for the enforcement ones) live-verified. The recurring lesson:
+the highest-impact bugs were *edges the gate triad cannot see* (an id clash, a missing filter
+condition, a dropped re-apply), which is exactly what this atlas and the visual map exist to surface.
 
 ## Reading guide for the next bug hunt
 
