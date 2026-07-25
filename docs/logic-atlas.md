@@ -13,7 +13,13 @@
 > **Maintenance.** Regenerate a section when you materially change that subsystem. Line
 > numbers drift — trust the function *names* and *invariants*, verify positions against code.
 > Companion: the visual verification map (which stages are guarded vs. blind) and
-> `feedback_verify_by_running`. Snapshot: amwall @ v1.1.19 + branch feat/release-gate-and-prompt-dedup.
+> `feedback_verify_by_running`. Snapshot: amwall @ v2.0.0 + branch feat/release-gate-and-prompt-dedup.
+>
+> **Scope.** This atlas maps the *enforcement spine* (profile/config → WFP filters → drop →
+> prompt). The v2.0.0 network meter (`connections` traffic + `net_meter` ETW) is **observation**,
+> not enforcement — it drives the Apps/Connections speed + interface columns and never touches WFP,
+> so it adds no stage to the enforcement pipeline. See the `net_meter` entry under
+> "System integration / enumeration".
 
 ---
 
@@ -410,8 +416,22 @@ Explorer icons). `font` (font picker + HFONT).
 **System integration / enumeration (each feeds a tab or a menu):**
 - `connections` — `enumerate() -> Vec<Connection>` (IP Helper TCP/UDP tables), `Endpoint`,
   `Protocol`, `process_full_path(pid)`, `enumerate_active_paths()` (which apps have live
-  connections — drives the "connected" highlight), `close_connection(&Connection)` (SetTcpEntry
-  MIB_TCPROW_LH teardown; IPv4 established TCP only). Feeds the Network tab.
+  connections — drives the "connected" highlight; compared case-insensitively — profile paths
+  are stored lowercase, `process_full_path` isn't), `close_connection(&Connection)` (SetTcpEntry
+  MIB_TCPROW_LH teardown; IPv4 established TCP only). `enumerate_with_traffic(&mut TrafficMonitor)`
+  layers **per-connection TCP ESTATS** (`Get/SetPerTcpConnectionEStats`) onto each `Connection`
+  (download/upload speed + total; TCP only — ESTATS has no UDP). `interface_names_by_ip()`
+  (`GetAdaptersAddresses`) maps a local IP → adapter friendly name for the Apps-tab Interface
+  column. `format_bytesize`/`format_speed` render the columns. Feeds the Network tab.
+- `net_meter` — **the real network meter (v2.0.0, observation only — never touches WFP).** A
+  real-time `Microsoft-Windows-Kernel-Network` ETW trace (`StartTraceW` + `EnableTraceEx2` +
+  `OpenTraceW`/`ProcessTrace` on a consumer thread) counting every TCP **and** UDP datagram by
+  owning PID + size. `NetMeter::rates()` → per-PID bytes/sec (Apps-tab per-app speed);
+  `conn_rates()` → per-`(is_udp, local_port)` bytes/sec + total (Connections-tab UDP fill —
+  what ESTATS can't do). `classify_event(id)` (pure, tested) decodes the send/recv · TCP/UDP ·
+  local-port-offset table from the event id. Elevation-gated (`start()` → `None` otherwise →
+  blank columns); stops session + thread on drop; self-heals a leftover session via
+  `ERROR_ALREADY_EXISTS`. **Deliberately beyond upstream** (simplewall is TCP-ESTATS-only).
 - `dns_resolve` — async reverse-DNS worker; posts `WM_USER_DNS_REFRESH = WM_USER+0x104`; results
   cached in `WndState.dns_cache`, drives Host columns via `lookup_or_enqueue`.
 - `services_enum` (`ServiceEntry`, `enumerate`) → Services tab; `uwp_enum` (`PackageEntry`,
