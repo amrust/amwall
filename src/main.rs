@@ -363,11 +363,16 @@ mod cli {
         Some(buf)
     }
 
-    /// Build a Windows command line from `args`, with each
-    /// space/tab/quote-containing arg wrapped in `"…"` and internal
-    /// `"` escaped to `\"`, matching `CommandLineToArgvW` parsing
-    /// rules. Args without special chars pass through verbatim.
-    /// Empty args render as `""` (preserved as a positional empty).
+    /// Build a Windows command line from `args`, quoted for
+    /// `CommandLineToArgvW` (which the elevated child's CRT uses to
+    /// re-split them). Each space/tab/quote-containing arg is wrapped in
+    /// `"…"`; internal quotes are escaped, and — crucially — any run of
+    /// backslashes preceding a quote OR the closing quote is DOUBLED, per
+    /// the CommandLineToArgvW rule. Without that, an arg ending in a
+    /// backslash (a directory path like `C:\Program Files\App\`) would
+    /// have its closing quote consumed as an escaped literal quote, and
+    /// the child would receive a garbled argv. Args without special chars
+    /// pass through verbatim; empty args render as `""`.
     pub(super) fn build_command_line(args: &[String]) -> String {
         let mut s = String::new();
         for (i, a) in args.iter().enumerate() {
@@ -376,11 +381,32 @@ mod cli {
             }
             if a.is_empty() || a.contains(' ') || a.contains('\t') || a.contains('"') {
                 s.push('"');
+                let mut backslashes = 0usize;
                 for ch in a.chars() {
-                    if ch == '"' {
-                        s.push('\\');
+                    match ch {
+                        '\\' => backslashes += 1,
+                        '"' => {
+                            // Double the pending backslashes (keep them
+                            // literal), then escape the quote itself.
+                            for _ in 0..backslashes * 2 + 1 {
+                                s.push('\\');
+                            }
+                            s.push('"');
+                            backslashes = 0;
+                        }
+                        _ => {
+                            for _ in 0..backslashes {
+                                s.push('\\');
+                            }
+                            s.push(ch);
+                            backslashes = 0;
+                        }
                     }
-                    s.push(ch);
+                }
+                // Trailing backslashes precede the closing quote — double
+                // them so they don't escape it.
+                for _ in 0..backslashes * 2 {
+                    s.push('\\');
                 }
                 s.push('"');
             } else {
@@ -680,6 +706,22 @@ mod cli {
                 build_command_line(&s(&[r#"a"b"#])),
                 r#""a\"b""#,
             );
+        }
+
+        #[test]
+        fn build_command_line_doubles_trailing_backslash() {
+            // A directory arg ending in '\' must have the run doubled so
+            // the elevated child's CommandLineToArgvW doesn't read the
+            // closing quote as an escaped literal quote.
+            assert_eq!(
+                build_command_line(&s(&["-install", "C:\\Program Files\\App\\"])),
+                r#"-install "C:\Program Files\App\\""#,
+            );
+        }
+
+        #[test]
+        fn build_command_line_doubles_backslashes_before_quote() {
+            assert_eq!(build_command_line(&s(&[r#"a\"b"#])), r#""a\\\"b""#);
         }
 
         #[test]
