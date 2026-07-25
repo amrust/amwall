@@ -22,7 +22,7 @@
 //!
 //! Required env:    AMWALL_EBPF_PATH    path to the BPF ELF
 //! Optional env:    AMWALL_RULES_PATH   path to rules.toml
-//!                                       (default: ~/.config/amwall/rules.toml)
+//!                                       (default: /etc/amwall/rules.toml)
 
 use std::collections::{HashMap as StdHashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -970,11 +970,12 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// Resolution order: AMWALL_RULES_PATH (set by the systemd unit), else the
+// system store /etc/amwall/rules.toml. No $HOME fallback: the daemon runs
+// as root, so $HOME is /root and a home-relative default would never be
+// the user's rules file — it would silently diverge from user tooling.
 fn rules_path_from_env() -> PathBuf {
     if let Ok(p) = std::env::var("AMWALL_RULES_PATH") { return p.into(); }
-    if let Ok(h) = std::env::var("HOME") {
-        return PathBuf::from(h).join(".config/amwall/rules.toml");
-    }
     PathBuf::from("/etc/amwall/rules.toml")
 }
 
