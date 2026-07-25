@@ -10,8 +10,8 @@
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_ACTION_BLOCK, FWP_ACTION_CALLOUT_TERMINATING, FWP_ACTION_PERMIT, FWP_ACTION_TYPE,
     FWP_UINT8, FWP_VALUE0, FWP_VALUE0_0, FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0,
-    FWPM_FILTER_FLAG_BOOTTIME, FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT, FWPM_FILTER_FLAG_PERSISTENT,
-    FWPM_FILTER_FLAGS,
+    FWPM_FILTER_FLAG_BOOTTIME, FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT, FWPM_FILTER_FLAG_INDEXED,
+    FWPM_FILTER_FLAG_PERSISTENT, FWPM_FILTER_FLAGS,
     FwpmFilterAdd0, FwpmFilterDeleteByKey0,
 };
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
@@ -279,19 +279,28 @@ fn add_impl(
     };
     filter.layerKey = *layer_key;
     filter.subLayerKey = *sublayer_key;
-    // Compose flags: PERSISTENT (caller-driven) plus, on every block /
-    // terminating-callout filter, CLEAR_ACTION_RIGHT, which upstream
-    // sets so a lower-weight permit in another sublayer cannot override
-    // the block (wfp.c:805-806). Security audit finding A.
+    // Compose flags to match upstream wfp.c:804-817.
     let mut flags = extra_flags;
-    if persistent {
-        flags |= FWPM_FILTER_FLAG_PERSISTENT;
-    }
-    if matches!(
-        action,
-        FilterAction::Block | FilterAction::CalloutTerminating { .. }
-    ) {
+    // CLEAR_ACTION_RIGHT (wfp.c:805): set on any block / terminating
+    // callout AND on any filter at the HIGHEST_IMPORTANT band, so a
+    // lower-weight permit or block in another sublayer (a co-installed
+    // firewall, Defender) cannot override it. Without the weight-band
+    // arm the loopback/local hard-permits are only soft permits and are
+    // overridable cross-sublayer. Security audit finding A.
+    if matches!(action, FilterAction::Block | FilterAction::CalloutTerminating { .. })
+        || weight_band == weight::HIGHEST_IMPORTANT
+    {
         flags |= FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT;
+    }
+    // Non-boottime filters (wfp.c:809-816): PERSISTENT when the caller
+    // asks, and INDEXED for faster classification-time lookup on Win8+.
+    // Boottime filters take neither (they carry FWPM_FILTER_FLAG_BOOTTIME
+    // via extra_flags).
+    if (flags & FWPM_FILTER_FLAG_BOOTTIME).0 == 0 {
+        if persistent {
+            flags |= FWPM_FILTER_FLAG_PERSISTENT;
+        }
+        flags |= FWPM_FILTER_FLAG_INDEXED;
     }
     filter.flags = flags;
 
