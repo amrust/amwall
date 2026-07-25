@@ -7695,6 +7695,10 @@ fn on_import(hwnd: HWND) {
     populate_user_rules(state);
     on_tab_change(hwnd);
     set_window_title(hwnd, &path);
+    // Re-apply the WFP filter set so the kernel actually enforces the
+    // imported profile instead of the previous one (upstream IDM_IMPORT
+    // -> _app_changefilters). No-op unless filters are currently active.
+    reinstall_filters_if_active(hwnd, state);
     set_status_text(state.status.get(), 0, &t!("status.imported"));
 }
 
@@ -7772,6 +7776,10 @@ fn on_refresh(hwnd: HWND) {
     populate_uwp_tab(state);
     populate_user_rules(state);
     on_tab_change(hwnd); // refresh status-bar item count
+    // Re-apply filters so an externally-edited profile is actually
+    // enforced, not just displayed (upstream IDM_REFRESH ->
+    // _app_changefilters). No-op unless filters are active.
+    reinstall_filters_if_active(hwnd, state);
     set_status_text(state.status.get(), 0, &t!("status.profile_reloaded"));
 }
 
