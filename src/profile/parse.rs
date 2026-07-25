@@ -203,7 +203,7 @@ pub fn parse_str(input: &str) -> Result<Profile, ParseError> {
                 b"rules_system" => section = Some(Section::RulesSystem),
                 b"rules_custom" => section = Some(Section::RulesCustom),
                 b"rules_blocklist" => section = Some(Section::RulesBlocklist),
-                b"item" => collect_item(&e, profile.as_mut(), section)?,
+                b"item" => collect_item(&e, profile.as_mut(), section),
                 _ => {} // unknown element: ignore
             },
             // Empty tags = self-closing (<item ... />). Same item-
@@ -211,7 +211,7 @@ pub fn parse_str(input: &str) -> Result<Profile, ParseError> {
             // (a self-closing <apps/> means "this section is empty").
             Event::Empty(e) => match e.name().as_ref() {
                 b"root" => profile = Some(parse_root(&e)?),
-                b"item" => collect_item(&e, profile.as_mut(), section)?,
+                b"item" => collect_item(&e, profile.as_mut(), section),
                 _ => {}
             },
             Event::End(e) => match e.name().as_ref() {
@@ -239,21 +239,26 @@ enum Section {
     RulesBlocklist,
 }
 
-fn collect_item(
-    e: &BytesStart,
-    profile: Option<&mut Profile>,
-    section: Option<Section>,
-) -> Result<(), ParseError> {
-    let Some(p) = profile else { return Ok(()) }; // <item> outside <root>
-    match section {
-        Some(Section::Apps) => p.apps.push(parse_app(e)?),
-        Some(Section::RulesConfig) => p.rule_configs.push(parse_rule_config(e)?),
-        Some(Section::RulesSystem) => p.system_rules.push(parse_rule(e)?),
-        Some(Section::RulesCustom) => p.custom_rules.push(parse_rule(e)?),
-        Some(Section::RulesBlocklist) => p.blocklist_rules.push(parse_rule(e)?),
-        None => {} // stray <item> outside any rules section: ignore
+fn collect_item(e: &BytesStart, profile: Option<&mut Profile>, section: Option<Section>) {
+    let Some(p) = profile else { return }; // <item> outside <root>
+    // Per-item leniency: a malformed <item> (missing name/path, unparseable
+    // attribute) is skipped, NOT fatal — every other app/rule still loads.
+    // Mirrors upstream simplewall db.c (_app_db_parse_* are void and bail
+    // with a bare `return` on a bad item, getattribute_* default to 0/FALSE),
+    // so migrating a hand-edited or foreign-version profile.xml never drops
+    // the entire app list from one bad row. Document-level errors (malformed
+    // XML, missing <root>) still propagate from `parse_str`.
+    let result = match section {
+        Some(Section::Apps) => parse_app(e).map(|v| p.apps.push(v)),
+        Some(Section::RulesConfig) => parse_rule_config(e).map(|v| p.rule_configs.push(v)),
+        Some(Section::RulesSystem) => parse_rule(e).map(|v| p.system_rules.push(v)),
+        Some(Section::RulesCustom) => parse_rule(e).map(|v| p.custom_rules.push(v)),
+        Some(Section::RulesBlocklist) => parse_rule(e).map(|v| p.blocklist_rules.push(v)),
+        None => Ok(()), // stray <item> outside any rules section: ignore
+    };
+    if let Err(err) = result {
+        eprintln!("amwall: profile: skipping malformed <item>: {err}");
     }
-    Ok(())
 }
 
 fn parse_root(e: &BytesStart) -> Result<Profile, ParseError> {
@@ -402,6 +407,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_malformed_item_does_not_drop_the_rest() {
+        // A rule item missing `name` and an app item with an unparseable
+        // attribute must be SKIPPED, not abort the whole load — the valid
+        // app and valid rule still land (upstream db.c per-item leniency).
+        let xml = r#"<root timestamp="0" type="4" version="5">
+            <apps>
+                <item path="C:\good.exe" is_enabled="true"/>
+                <item is_enabled="not_a_bool" path="C:\bad.exe"/>
+            </apps>
+            <rules_custom>
+                <item name="ok" rule="80" dir="0" is_enabled="true"/>
+                <item rule="443" dir="0"/>
+            </rules_custom>
+        </root>"#;
+        let p = parse_str(xml).expect("document itself is well-formed");
+        assert_eq!(p.apps.len(), 1, "valid app kept, bad-attr app skipped");
+        assert_eq!(p.apps[0].path.to_string_lossy(), "C:\\good.exe");
+        assert_eq!(p.custom_rules.len(), 1, "valid rule kept, nameless rule skipped");
+        assert_eq!(p.custom_rules[0].name, "ok");
+    }
+
+    #[test]
+    fn malformed_document_still_errors() {
+        // Per-item leniency must NOT swallow document-level failures.
+        assert!(parse_str("<root><apps><item path=\"x\"").is_err());
+        assert!(matches!(parse_str("<notroot/>"), Err(ParseError::MissingRoot)));
+    }
+
+    #[test]
     fn decode_plain_xml_passthrough() {
         // No fourcc header -> returned as-is (the common case).
         let xml = "<root></root>";
@@ -523,20 +557,18 @@ mod tests {
     }
 
     #[test]
-    fn bad_protocol_returns_bad_attribute_error() {
+    fn bad_protocol_item_is_skipped_not_fatal() {
+        // Per-item leniency: an unparseable attribute value skips ONLY
+        // that item (it can't be represented), it does not abort the load.
+        // The document is still well-formed, so parse_str succeeds and the
+        // one bad rule is simply absent.
         let xml = r#"<?xml version="1.0"?>
 <root timestamp="0" type="4" version="5">
   <rules_custom>
     <item name="oops" protocol="not-a-number" />
   </rules_custom>
 </root>"#;
-        let err = parse_str(xml).unwrap_err();
-        match err {
-            ParseError::BadAttribute { attribute, value, .. } => {
-                assert_eq!(attribute, "protocol");
-                assert_eq!(value, "not-a-number");
-            }
-            other => panic!("expected BadAttribute, got {other:?}"),
-        }
+        let p = parse_str(xml).expect("bad item is skipped, not fatal");
+        assert!(p.custom_rules.is_empty(), "unparseable-protocol item was skipped");
     }
 }
