@@ -158,7 +158,17 @@ fn read_package_entry(parent: HKEY, full_name: &str) -> Option<PackageEntry> {
 /// via `ConvertSidToStringSidW`. Frees the LocalAlloc'd Win32
 /// buffer immediately. Returns `None` for malformed input.
 fn sid_bytes_to_string(bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
+    // ConvertSidToStringSidW takes a bare PSID with no length, so it will
+    // read revision(1) + count(1) + authority(6) + count*4 subauthority
+    // bytes based on the SID's OWN self-declared SubAuthorityCount. A
+    // truncated/malformed PackageSid from the user-writable registry hive
+    // could otherwise drive a read far past this buffer. Validate the
+    // declared length fits before handing the pointer across the FFI.
+    if bytes.len() < 8 {
+        return None;
+    }
+    let sub_auth_count = bytes[1] as usize;
+    if bytes.len() < 8 + sub_auth_count * 4 {
         return None;
     }
     let psid = PSID(bytes.as_ptr() as *mut _);

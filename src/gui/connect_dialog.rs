@@ -308,12 +308,18 @@ unsafe extern "system" fn dialog_proc(
                     // the token to find the right App slot. Fable sweep #19.
                     let token = super::msg_slab::stash(state.path.clone());
                     unsafe {
-                        let _ = PostMessageW(
+                        if PostMessageW(
                             state.parent,
                             WM_USER_CONNECT_ALLOW,
                             WPARAM(token),
                             LPARAM(0),
-                        );
+                        )
+                        .is_err()
+                        {
+                            // Post failed (parent gone / queue full) — reclaim
+                            // the stashed token so it can't leak in the slab.
+                            let _ = super::msg_slab::take::<std::path::PathBuf>(token);
+                        }
                         let _ = DestroyWindow(hwnd);
                     }
                     1
@@ -325,12 +331,16 @@ unsafe extern "system" fn dialog_proc(
                     // future drops for this exe don't re-prompt.
                     let token = super::msg_slab::stash(state.path.clone());
                     unsafe {
-                        let _ = PostMessageW(
+                        if PostMessageW(
                             state.parent,
                             WM_USER_CONNECT_BLOCK,
                             WPARAM(token),
                             LPARAM(0),
-                        );
+                        )
+                        .is_err()
+                        {
+                            let _ = super::msg_slab::take::<std::path::PathBuf>(token);
+                        }
                         let _ = DestroyWindow(hwnd);
                     }
                     1
@@ -440,12 +450,16 @@ unsafe extern "system" fn dialog_proc(
                 let state = unsafe { &*(raw as *const DialogState) };
                 let token = super::msg_slab::stash(state.path.clone());
                 unsafe {
-                    let _ = PostMessageW(
+                    if PostMessageW(
                         state.parent,
                         WM_USER_CONNECT_PROMPT_CLOSED,
                         WPARAM(token),
                         LPARAM(0),
-                    );
+                    )
+                    .is_err()
+                    {
+                        let _ = super::msg_slab::take::<std::path::PathBuf>(token);
+                    }
                 }
                 unsafe {
                     let _ = Box::from_raw(raw as *mut DialogState);

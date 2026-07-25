@@ -147,8 +147,15 @@ pub fn open(parent: HWND, initial: Option<&Rule>, available_apps: &[ProfileApp])
     let state_ptr = Box::into_raw(state);
 
     unsafe {
-        let hi = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null())
-            .ok()?;
+        let hi = match windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null()) {
+            Ok(h) => h,
+            Err(_) => {
+                // Reclaim the box so a GetModuleHandleW failure doesn't leak
+                // the dialog state (matches connect_dialog/settings_dialog).
+                let _ = Box::from_raw(state_ptr);
+                return None;
+            }
+        };
         let result_id = DialogBoxParamW(
             hi,
             make_int_resource(IDD_EDITOR),
@@ -978,8 +985,13 @@ fn open_addrule_dialog(parent: HWND, initial: &str) -> Option<String> {
     });
     let state_ptr = Box::into_raw(state);
     unsafe {
-        let hi = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null())
-            .ok()?;
+        let hi = match windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null()) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = Box::from_raw(state_ptr);
+                return None;
+            }
+        };
         let r = DialogBoxParamW(
             hi,
             make_int_resource(IDD_EDITOR_ADDRULE),
