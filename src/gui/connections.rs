@@ -16,7 +16,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, GetPerTcp6ConnectionEStats, GetPerTcpConnectionEStats,
     MIB_TCP6ROW, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCP_STATE,
@@ -193,7 +193,7 @@ fn read_pids_tcp4() -> Option<Vec<u32>> {
     let res = unsafe {
         GetExtendedTcpTable(Some(buf.as_mut_ptr() as *mut _), &mut size, true, AF_INET.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0)
     };
-    if res != ERROR_SUCCESS.0 && res != ERROR_INSUFFICIENT_BUFFER.0 {
+    if res != ERROR_SUCCESS.0 {
         return None;
     }
     let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
@@ -215,7 +215,7 @@ fn read_pids_tcp6() -> Option<Vec<u32>> {
     let res = unsafe {
         GetExtendedTcpTable(Some(buf.as_mut_ptr() as *mut _), &mut size, true, AF_INET6.0 as u32, TCP_TABLE_OWNER_PID_ALL, 0)
     };
-    if res != ERROR_SUCCESS.0 && res != ERROR_INSUFFICIENT_BUFFER.0 {
+    if res != ERROR_SUCCESS.0 {
         return None;
     }
     let table = unsafe { &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
@@ -237,7 +237,7 @@ fn read_pids_udp4() -> Option<Vec<u32>> {
     let res = unsafe {
         GetExtendedUdpTable(Some(buf.as_mut_ptr() as *mut _), &mut size, true, AF_INET.0 as u32, UDP_TABLE_OWNER_PID, 0)
     };
-    if res != ERROR_SUCCESS.0 && res != ERROR_INSUFFICIENT_BUFFER.0 {
+    if res != ERROR_SUCCESS.0 {
         return None;
     }
     let table = unsafe { &*(buf.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
@@ -259,7 +259,7 @@ fn read_pids_udp6() -> Option<Vec<u32>> {
     let res = unsafe {
         GetExtendedUdpTable(Some(buf.as_mut_ptr() as *mut _), &mut size, true, AF_INET6.0 as u32, UDP_TABLE_OWNER_PID, 0)
     };
-    if res != ERROR_SUCCESS.0 && res != ERROR_INSUFFICIENT_BUFFER.0 {
+    if res != ERROR_SUCCESS.0 {
         return None;
     }
     let table = unsafe { &*(buf.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
@@ -766,7 +766,7 @@ fn read_tcp4(mut stats: Option<&mut TrafficMonitor>) -> Option<Vec<Connection>> 
             0,
         )
     };
-    if res != ERROR_SUCCESS.0 && res != ERROR_INSUFFICIENT_BUFFER.0 {
+    if res != ERROR_SUCCESS.0 {
         eprintln!("amwall: GetExtendedTcpTable(v4) failed: {res}");
         return None;
     }
@@ -830,7 +830,7 @@ fn read_tcp6(mut stats: Option<&mut TrafficMonitor>) -> Option<Vec<Connection>> 
             0,
         )
     };
-    if res != ERROR_SUCCESS.0 && res != ERROR_INSUFFICIENT_BUFFER.0 {
+    if res != ERROR_SUCCESS.0 {
         eprintln!("amwall: GetExtendedTcpTable(v6) failed: {res}");
         return None;
     }
@@ -892,7 +892,7 @@ fn read_udp4() -> Option<Vec<Connection>> {
             0,
         )
     };
-    if res != ERROR_SUCCESS.0 && res != ERROR_INSUFFICIENT_BUFFER.0 {
+    if res != ERROR_SUCCESS.0 {
         eprintln!("amwall: GetExtendedUdpTable(v4) failed: {res}");
         return None;
     }
@@ -953,7 +953,7 @@ fn read_udp6() -> Option<Vec<Connection>> {
             0,
         )
     };
-    if res != ERROR_SUCCESS.0 && res != ERROR_INSUFFICIENT_BUFFER.0 {
+    if res != ERROR_SUCCESS.0 {
         eprintln!("amwall: GetExtendedUdpTable(v6) failed: {res}");
         return None;
     }
