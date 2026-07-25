@@ -256,6 +256,20 @@ pub struct Settings {
     pub notification_x: i32,
     pub notification_y: i32,
 
+    /// Saved main-window placement — the *normal* (restored) rectangle in
+    /// virtual-screen pixels, plus whether the window was maximized on
+    /// exit. Persisted on exit, restored on launch. Mirrors upstream
+    /// simplewall `_r_window_restoreposition`/`_r_window_saveposition`
+    /// (main.c:2201). `window_w <= 0 || window_h <= 0` means "unset" →
+    /// the window falls back to `CW_USEDEFAULT`. Signed because
+    /// virtual-screen coords are negative on multi-monitor layouts where a
+    /// monitor sits left of / above the primary.
+    pub window_x: i32,
+    pub window_y: i32,
+    pub window_w: i32,
+    pub window_h: i32,
+    pub window_maximized: bool,
+
     // ---- Settings → Logging ----
     pub enable_log: bool,
     pub log_path: String,
@@ -371,6 +385,13 @@ impl Default for Settings {
             notification_timeout: 30,
             notification_x: i32::MIN,
             notification_y: i32::MIN,
+            // Unset until the window is first closed: zero size ==
+            // "no saved placement" (see `has_window_placement`).
+            window_x: 0,
+            window_y: 0,
+            window_w: 0,
+            window_h: 0,
+            window_maximized: false,
             // M9.2 / v1.1.2 default-on: makes installed-mode bug
             // reports actionable (the packet log writes a per-event
             // record under `%APPDATA%\amwall\amwall.log`, alongside
@@ -391,6 +412,14 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// True when a usable main-window placement has been saved. A
+    /// zero-or-negative width/height is the "unset" sentinel (fresh
+    /// install, or a settings file written before this feature existed),
+    /// in which case the window uses the system default position.
+    pub fn has_window_placement(&self) -> bool {
+        self.window_w > 0 && self.window_h > 0
+    }
+
     /// Read the settings file at the given path. Missing file →
     /// defaults; unreadable file or parse errors also → defaults
     /// (with a warning to stderr) so a corrupt settings file never
@@ -543,6 +572,11 @@ impl Settings {
         kv_u32(&mut buf, "notification_timeout", self.notification_timeout);
         kv_i32(&mut buf, "notification_x", self.notification_x);
         kv_i32(&mut buf, "notification_y", self.notification_y);
+        kv_i32(&mut buf, "window_x", self.window_x);
+        kv_i32(&mut buf, "window_y", self.window_y);
+        kv_i32(&mut buf, "window_w", self.window_w);
+        kv_i32(&mut buf, "window_h", self.window_h);
+        kv(&mut buf, "window_maximized", self.window_maximized);
         kv(&mut buf, "enable_log", self.enable_log);
         kv_str(&mut buf, "log_path", &self.log_path);
         kv_u32(&mut buf, "log_size_limit", self.log_size_limit);
@@ -620,6 +654,30 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
         "notification_y" => {
             if let Ok(n) = value.parse::<i32>() {
                 s.notification_y = n;
+            }
+            return;
+        }
+        "window_x" => {
+            if let Ok(n) = value.parse::<i32>() {
+                s.window_x = n;
+            }
+            return;
+        }
+        "window_y" => {
+            if let Ok(n) = value.parse::<i32>() {
+                s.window_y = n;
+            }
+            return;
+        }
+        "window_w" => {
+            if let Ok(n) = value.parse::<i32>() {
+                s.window_w = n;
+            }
+            return;
+        }
+        "window_h" => {
+            if let Ok(n) = value.parse::<i32>() {
+                s.window_h = n;
             }
             return;
         }
@@ -708,6 +766,7 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
         "use_dark_theme" => s.use_dark_theme = b,
         "load_on_startup" => s.load_on_startup = b,
         "start_minimized" => s.start_minimized = b,
+        "window_maximized" => s.window_maximized = b,
         "skip_uac_warning" => s.skip_uac_warning = b,
         "check_updates" => s.check_updates = b,
         "confirm_exit" => s.confirm_exit = b,
@@ -894,6 +953,52 @@ mod tests {
         let loaded = Settings::load(&path);
         assert_eq!(loaded.notification_x, -1024);
         assert_eq!(loaded.notification_y, -50);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn window_placement_is_unset_by_default() {
+        // A fresh install (and any settings file written before this
+        // feature existed) must report "no placement" so the window
+        // uses the system default position instead of a bogus 0×0 rect.
+        let s = Settings::default();
+        assert!(!s.has_window_placement());
+    }
+
+    #[test]
+    fn window_placement_round_trips_including_maximized_and_negative_coords() {
+        // Guards the save-window-position feature end to end at the
+        // persistence layer: this is the part that runs under `cargo
+        // test`, so a regression that stops the geometry from being
+        // written or read back fails the gate on every local build.
+        // (The Win32 GetWindowPlacement/SetWindowPlacement side needs a
+        // live window and is verified by an elevated run, not here.)
+        let dir = std::env::temp_dir().join("amwall-tests");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("settings_window_pos.txt");
+        let _ = std::fs::remove_file(&path);
+
+        // Negative left/top models a secondary monitor placed left of the
+        // primary — the coords must survive with their sign intact.
+        let s = Settings {
+            window_x: -1440,
+            window_y: -120,
+            window_w: 1024,
+            window_h: 768,
+            window_maximized: true,
+            ..Settings::default()
+        };
+        assert!(s.has_window_placement());
+
+        s.save(&path).expect("save should succeed");
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.window_x, -1440);
+        assert_eq!(loaded.window_y, -120);
+        assert_eq!(loaded.window_w, 1024);
+        assert_eq!(loaded.window_h, 768);
+        assert!(loaded.window_maximized);
+        assert!(loaded.has_window_placement());
 
         let _ = std::fs::remove_file(&path);
     }

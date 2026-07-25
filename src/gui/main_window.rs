@@ -665,6 +665,16 @@ pub fn create(app: Box<App>, force_show: bool) -> Result<HWND, String> {
             return Err("CreateWindowExW failed".into());
         }
 
+        // Restore the saved window position + size before the window is
+        // shown, so it appears where the user left it instead of at the
+        // system default. No-op when nothing valid was saved (fresh
+        // install) — the show block below then uses CW_USEDEFAULT.
+        // Mirrors upstream simplewall `_r_window_restoreposition`
+        // (main.c:2201). When starting minimized we still set the normal
+        // rect (so a later restore-from-tray lands in the right spot) but
+        // keep the window hidden.
+        restore_window_placement(hwnd, start_minimized);
+
         // Tray icon is added during WM_CREATE so it's already
         // registered by the time we either show or hide the
         // window — keeps "Start minimized" honest (the user
@@ -7857,9 +7867,167 @@ fn on_exit(hwnd: HWND) {
             }
         }
     }
+    // Persist the current window position + size so the next launch
+    // restores it. Done here (the real exit path) rather than on WM_CLOSE,
+    // which only hides to the tray. Mirrors upstream simplewall
+    // `_r_window_saveposition` (main.c close handler).
+    save_window_placement(hwnd);
     unsafe {
         let _ = DestroyWindow(hwnd);
     }
+}
+
+/// Apply the saved main-window placement (position + size + maximized
+/// state) recorded by [`save_window_placement`]. The saved rectangle is
+/// clamped to a currently-visible monitor's work area first, so a rect
+/// saved on a monitor that has since been unplugged or resized can never
+/// strand the window off-screen. No-op when nothing valid is saved (fresh
+/// install) — the caller's show path then uses the system default.
+///
+/// `start_minimized` keeps the window hidden (only the normal restored
+/// rect is set, for a later restore-from-tray) instead of showing it.
+/// Mirrors upstream simplewall `_r_window_restoreposition` (main.c:2201).
+fn restore_window_placement(hwnd: HWND, start_minimized: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SetWindowPlacement, WINDOWPLACEMENT,
+    };
+
+    let Some(state) = (unsafe { state_ref(hwnd) }) else {
+        return;
+    };
+    let (x, y, w, h, maximized) = {
+        let s = state.app.settings.borrow();
+        if !s.has_window_placement() {
+            eprintln!("amwall: window placement: none saved; using system default position");
+            return;
+        }
+        (
+            s.window_x,
+            s.window_y,
+            s.window_w,
+            s.window_h,
+            s.window_maximized,
+        )
+    };
+
+    let mut rect = RECT {
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
+    };
+    clamp_rect_to_work_area(&mut rect);
+
+    let show = if start_minimized {
+        SW_HIDE
+    } else if maximized {
+        SW_SHOWMAXIMIZED
+    } else {
+        SW_SHOWNORMAL
+    };
+    // GetWindowPlacement/SetWindowPlacement use the *normal* rect; showCmd
+    // carries the maximized/hidden state separately.
+    let wp = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        showCmd: show.0 as u32,
+        rcNormalPosition: rect,
+        ..Default::default()
+    };
+    match unsafe { SetWindowPlacement(hwnd, &wp) } {
+        Ok(()) => eprintln!(
+            "amwall: window placement: restored {}x{} at ({},{}) maximized={maximized} start_minimized={start_minimized}",
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            rect.left,
+            rect.top,
+        ),
+        Err(e) => eprintln!("amwall: window placement: SetWindowPlacement failed: {e}"),
+    }
+}
+
+/// Record the current main-window position + size into settings and
+/// persist them, so the next launch restores the window where the user
+/// left it. Reads `GetWindowPlacement` (not `GetWindowRect`) so the saved
+/// rectangle is always the *normal* restored rect even when the window is
+/// currently maximized, minimized, or hidden to the tray. On any failure
+/// the previously-saved values are left untouched. Mirrors upstream
+/// simplewall `_r_window_saveposition`.
+fn save_window_placement(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowPlacement, SW_SHOWMAXIMIZED, WINDOWPLACEMENT,
+    };
+
+    let Some(state) = (unsafe { state_ref(hwnd) }) else {
+        return;
+    };
+
+    let mut wp = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    if let Err(e) = unsafe { GetWindowPlacement(hwnd, &mut wp) } {
+        eprintln!("amwall: window placement: GetWindowPlacement failed, not saving: {e}");
+        return;
+    }
+    let r = wp.rcNormalPosition;
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    if w <= 0 || h <= 0 {
+        eprintln!("amwall: window placement: degenerate rect {w}x{h}, not saving");
+        return;
+    }
+    let maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
+
+    {
+        let mut s = state.app.settings.borrow_mut();
+        s.window_x = r.left;
+        s.window_y = r.top;
+        s.window_w = w;
+        s.window_h = h;
+        s.window_maximized = maximized;
+    }
+    eprintln!(
+        "amwall: window placement: saving {w}x{h} at ({},{}) maximized={maximized}",
+        r.left, r.top,
+    );
+    let path = state.app.settings_path.borrow().clone();
+    if let Err(e) = state.app.settings.borrow().save(&path) {
+        eprintln!(
+            "amwall: window placement: settings save failed for {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// Shove `rect` fully inside the work area of the monitor nearest to it,
+/// shrinking it if it is larger than that work area. Prevents a rect
+/// saved on a now-absent or resized monitor from restoring off-screen.
+/// Mirrors upstream `_r_wnd_adjustrectangletoworkingarea`.
+fn clamp_rect_to_work_area(rect: &mut RECT) {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
+    };
+
+    let hmon = unsafe { MonitorFromRect(&*rect, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(hmon, &mut mi) }.as_bool() {
+        return; // can't validate against a monitor — leave the rect as-is
+    }
+    let work = mi.rcWork;
+    let work_w = work.right - work.left;
+    let work_h = work.bottom - work.top;
+    // Never larger than the work area; never smaller than 1px.
+    let w = (rect.right - rect.left).min(work_w).max(1);
+    let h = (rect.bottom - rect.top).min(work_h).max(1);
+    // Clamp the top-left so the whole window sits inside the work area.
+    let x = rect.left.clamp(work.left, (work.right - w).max(work.left));
+    let y = rect.top.clamp(work.top, (work.bottom - h).max(work.top));
+    rect.left = x;
+    rect.top = y;
+    rect.right = x + w;
+    rect.bottom = y + h;
 }
 
 /// Edit → Purge unused apps. Mirrors upstream `_app_isappunused`
