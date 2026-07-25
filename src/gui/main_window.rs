@@ -9814,6 +9814,32 @@ fn populate_connections_tab(state: &WndState) {
         let mut monitor = state.traffic_monitor.borrow_mut();
         super::connections::enumerate_with_traffic(&mut monitor)
     };
+    // ESTATS covers TCP per-connection but exposes nothing for UDP. Fill
+    // the UDP rows (and any TCP row ESTATS couldn't stat) from the ETW
+    // per-endpoint meter, keyed by (is_udp, local_port) — so a µTP torrent
+    // finally shows its real UDP rate here too.
+    {
+        let etw = state
+            .net_meter
+            .borrow_mut()
+            .as_mut()
+            .map(|m| m.conn_rates())
+            .unwrap_or_default();
+        if !etw.is_empty() {
+            for c in conns.iter_mut() {
+                if c.has_stats {
+                    continue;
+                }
+                let is_udp = c.protocol == super::connections::Protocol::Udp;
+                if let Some(t) = etw.get(&(is_udp, c.local.port)) {
+                    c.download_speed = t.download;
+                    c.upload_speed = t.upload;
+                    c.total_bytes = t.total;
+                    c.has_stats = true;
+                }
+            }
+        }
+    }
     // Apply the user's column-header sort (default: enumeration order).
     // The row loop stamps each row's lParam with its index into this
     // now-sorted Vec, so right-click round-tripping stays consistent.

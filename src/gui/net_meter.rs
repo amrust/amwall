@@ -42,19 +42,47 @@ const PROVIDER_GUID: GUID = GUID::from_u128(0x7dd4_2a49_5329_4832_8dfd_43d9_7915
 /// Private real-time session name.
 const SESSION_NAME: &str = "amwall-netmeter";
 
-/// Kernel-Network event ids that carry a *received* datagram (download):
-/// TCP v4/v6 recv, UDP v4/v6 recv. Payload starts `{u32 pid, u32 size}`.
+// Kernel-Network data-event ids. Payload begins `{u32 pid, u32 size}`,
+// then for IPv4 `{u32 daddr, u32 saddr, u16 dport, u16 sport}` and for
+// IPv6 `{u8[16] daddr, u8[16] saddr, u16 dport, u16 sport}` — all in
+// network byte order.
+/// Received a datagram (download): TCP v4/v6 recv, UDP v4/v6 recv.
 const RECV_IDS: [u16; 4] = [11, 27, 43, 59];
-/// Event ids that carry a *sent* datagram (upload): TCP v4/v6, UDP v4/v6.
+/// Sent a datagram (upload): TCP v4/v6 send, UDP v4/v6 send.
 const SEND_IDS: [u16; 4] = [10, 26, 42, 58];
+/// UDP (rather than TCP) data events.
+const UDP_IDS: [u16; 4] = [42, 43, 58, 59];
+/// IPv6 (rather than IPv4) data events — their addresses are 16 bytes,
+/// so the port fields sit at a larger offset.
+const V6_IDS: [u16; 4] = [26, 27, 58, 59];
 
-/// Cumulative per-PID byte counters, shared between the ETW consumer
-/// thread (which adds to them from the callback) and the UI thread
-/// (which snapshots them via [`NetMeter::rates`]).
+/// Key identifying one connection/socket for per-endpoint metering:
+/// `(is_udp, local_port)`. The local (ephemeral) port uniquely identifies
+/// an outbound TCP connection, and cleanly aggregates a UDP socket's
+/// datagrams across all its peers (UDP is connectionless, so the OS
+/// connection table only lists the local bind anyway). `is_udp`
+/// separates a TCP and a UDP socket that happen to share a port number.
+pub type EndpointKey = (bool, u16);
+
+/// Per-endpoint throughput handed to the Connections tab.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EndpointTraffic {
+    pub download: u64,
+    pub upload: u64,
+    pub total: u64,
+}
+
+/// Cumulative byte counters, shared between the ETW consumer thread
+/// (which adds to them from the callback) and the UI thread (which
+/// snapshots them via [`NetMeter::rates`] / [`NetMeter::conn_rates`]).
 #[derive(Default)]
 struct Counters {
-    /// pid -> (bytes received total, bytes sent total) since session start.
+    /// pid -> (bytes received, bytes sent) since session start. Drives
+    /// the Apps tab's per-process Speed columns.
     pids: Mutex<HashMap<u32, (u64, u64)>>,
+    /// (is_udp, local_port) -> (bytes received, bytes sent). Drives the
+    /// Connections tab's per-connection Speed columns (TCP + UDP).
+    endpoints: Mutex<HashMap<EndpointKey, (u64, u64)>>,
 }
 
 /// A running per-process network meter. Owns the trace session and the
@@ -65,9 +93,13 @@ pub struct NetMeter {
     /// newtype isn't `Send`; we re-wrap it for the STOP call).
     session: u64,
     consumer: Option<std::thread::JoinHandle<()>>,
-    /// Previous cumulative snapshot + tick, for turning deltas into rates.
-    last: HashMap<u32, (u64, u64)>,
-    last_tick: u64,
+    /// Previous per-PID snapshot + tick, for turning deltas into rates.
+    last_pids: HashMap<u32, (u64, u64)>,
+    last_pids_tick: u64,
+    /// Previous per-endpoint snapshot + tick (separate baseline: the two
+    /// rate readers run on different tabs at different times).
+    last_endpoints: HashMap<EndpointKey, (u64, u64)>,
+    last_endpoints_tick: u64,
 }
 
 /// The ETW real-time callback. Runs on the consumer thread for every
@@ -93,7 +125,8 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     if rec.UserContext.is_null() {
         return;
     }
-    let data = unsafe { std::slice::from_raw_parts(rec.UserData as *const u8, 8) };
+    let data =
+        unsafe { std::slice::from_raw_parts(rec.UserData as *const u8, rec.UserDataLength as usize) };
     let pid = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     let size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as u64;
     // System-idle / kernel PID 0 is noise for a per-app view.
@@ -101,12 +134,40 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
         return;
     }
     let counters = unsafe { &*(rec.UserContext as *const Counters) };
+
+    // Per-process totals (Apps tab).
     if let Ok(mut map) = counters.pids.lock() {
         let entry = map.entry(pid).or_insert((0, 0));
         if is_recv {
             entry.0 = entry.0.saturating_add(size);
         } else {
             entry.1 = entry.1.saturating_add(size);
+        }
+    }
+
+    // Per-endpoint totals (Connections tab). The LOCAL port is the source
+    // port on a send and the destination port on a receive; its offset
+    // depends on IPv4 vs IPv6 (16-byte addresses push it back). Ports are
+    // network byte order in the payload.
+    let is_v6 = V6_IDS.contains(&id);
+    let port_off = match (is_send, is_v6) {
+        (true, false) => 18,  // sport, IPv4
+        (true, true) => 42,   // sport, IPv6
+        (false, false) => 16, // dport, IPv4
+        (false, true) => 40,  // dport, IPv6
+    };
+    if data.len() >= port_off + 2 {
+        let local_port = u16::from_be_bytes([data[port_off], data[port_off + 1]]);
+        if local_port != 0 {
+            let key = (UDP_IDS.contains(&id), local_port);
+            if let Ok(mut map) = counters.endpoints.lock() {
+                let entry = map.entry(key).or_insert((0, 0));
+                if is_recv {
+                    entry.0 = entry.0.saturating_add(size);
+                } else {
+                    entry.1 = entry.1.saturating_add(size);
+                }
+            }
         }
     }
 }
@@ -205,12 +266,15 @@ impl NetMeter {
             }
         };
 
+        let now = unsafe { GetTickCount64() };
         Some(NetMeter {
             counters,
             session: session.Value,
             consumer: Some(consumer),
-            last: HashMap::new(),
-            last_tick: unsafe { GetTickCount64() },
+            last_pids: HashMap::new(),
+            last_pids_tick: now,
+            last_endpoints: HashMap::new(),
+            last_endpoints_tick: now,
         })
     }
 
@@ -223,11 +287,11 @@ impl NetMeter {
             Ok(map) => map.clone(),
             Err(_) => return HashMap::new(),
         };
-        let elapsed = now.wrapping_sub(self.last_tick);
+        let elapsed = now.wrapping_sub(self.last_pids_tick);
         let mut out = HashMap::new();
-        if elapsed > 0 && !self.last.is_empty() {
+        if elapsed > 0 && !self.last_pids.is_empty() {
             for (&pid, &(recv, sent)) in &snapshot {
-                let (prev_recv, prev_sent) = self.last.get(&pid).copied().unwrap_or((0, 0));
+                let (prev_recv, prev_sent) = self.last_pids.get(&pid).copied().unwrap_or((0, 0));
                 let d_recv = recv.saturating_sub(prev_recv);
                 let d_sent = sent.saturating_sub(prev_sent);
                 if d_recv == 0 && d_sent == 0 {
@@ -239,8 +303,40 @@ impl NetMeter {
                 );
             }
         }
-        self.last = snapshot;
-        self.last_tick = now;
+        self.last_pids = snapshot;
+        self.last_pids_tick = now;
+        out
+    }
+
+    /// Per-endpoint throughput (download/upload rate + cumulative total)
+    /// keyed by `(is_udp, local_port)`, since the previous call. Covers
+    /// both TCP and UDP — this is what lets the Connections tab show UDP
+    /// speed that ESTATS could never provide. First call primes only.
+    pub fn conn_rates(&mut self) -> HashMap<EndpointKey, EndpointTraffic> {
+        let now = unsafe { GetTickCount64() };
+        let snapshot: HashMap<EndpointKey, (u64, u64)> = match self.counters.endpoints.lock() {
+            Ok(map) => map.clone(),
+            Err(_) => return HashMap::new(),
+        };
+        let elapsed = now.wrapping_sub(self.last_endpoints_tick);
+        let mut out = HashMap::new();
+        if elapsed > 0 && !self.last_endpoints.is_empty() {
+            for (&key, &(recv, sent)) in &snapshot {
+                let (prev_recv, prev_sent) = self.last_endpoints.get(&key).copied().unwrap_or((0, 0));
+                let d_recv = recv.saturating_sub(prev_recv);
+                let d_sent = sent.saturating_sub(prev_sent);
+                out.insert(
+                    key,
+                    EndpointTraffic {
+                        download: d_recv.saturating_mul(1000) / elapsed,
+                        upload: d_sent.saturating_mul(1000) / elapsed,
+                        total: recv.saturating_add(sent),
+                    },
+                );
+            }
+        }
+        self.last_endpoints = snapshot;
+        self.last_endpoints_tick = now;
         out
     }
 }

@@ -36,7 +36,7 @@ fn main() {
         }
         let mut rows: Vec<(u32, u64, u64)> =
             rates.iter().map(|(&pid, &(d, u))| (pid, d, u)).collect();
-        rows.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1 + r.2));
         let total_down: u64 = rows.iter().map(|r| r.1).sum();
         let total_up: u64 = rows.iter().map(|r| r.2).sum();
         peak_total_down = peak_total_down.max(total_down);
@@ -55,6 +55,23 @@ fn main() {
                     .unwrap_or_else(|| format!("pid {pid}"))
             });
             line!("    {:<24} ↓ {:>12}  ↑ {:>12}", name, format_speed(*down), format_speed(*up));
+        }
+
+        // Per-endpoint (Connections tab). Spotlight UDP — the new capability.
+        let conns = meter.conn_rates();
+        let mut udp: Vec<_> = conns
+            .iter()
+            .filter(|((is_udp, _), t)| *is_udp && (t.download > 0 || t.upload > 0))
+            .map(|((_, port), t)| (*port, t.download, t.upload))
+            .collect();
+        udp.sort_by_key(|e| std::cmp::Reverse(e.1 + e.2));
+        for (port, down, up) in udp.iter().take(4) {
+            line!(
+                "    UDP local:{:<5}          ↓ {:>12}  ↑ {:>12}",
+                port,
+                format_speed(*down),
+                format_speed(*up)
+            );
         }
     }
 
