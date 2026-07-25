@@ -108,14 +108,17 @@ impl std::fmt::Display for PortSpec {
 
 impl std::fmt::Display for RuleClause {
     /// Render as a string the parser would round-trip back to an
-    /// equal `RuleClause`. Bracketed form is required for IPv6 with
-    /// a port (since IPv6 itself uses colons), and for IPv6 CIDR
-    /// with a port (`[fe80::/10]:443`). Bare IPv6 addresses without
-    /// a port format unbracketed (`fe80::1`).
+    /// equal `RuleClause`. IPv6 is ALWAYS bracketed — with a port
+    /// (`[fe80::/10]:443`) because IPv6 uses colons, and WITHOUT a port
+    /// too, because an IPv4-mapped address (`::ffff:1.2.3.4`) renders
+    /// with embedded dots that the parser's `.`-first dispatch would
+    /// otherwise misroute to the IPv4 branch and reject, dropping the
+    /// rule on a save->load cycle.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (&self.addr, &self.port) {
             (Some(a), Some(p)) if a.is_ipv6() => write!(f, "[{a}]:{p}"),
             (Some(a), Some(p)) => write!(f, "{a}:{p}"),
+            (Some(a), None) if a.is_ipv6() => write!(f, "[{a}]"),
             (Some(a), None) => write!(f, "{a}"),
             (None, Some(p)) => write!(f, "{p}"),
             (None, None) => Ok(()),

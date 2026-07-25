@@ -407,6 +407,31 @@ mod tests {
         assert_eq!(cs.len(), 8);
     }
 
+    #[test]
+    fn address_only_ipv6_round_trips_bracketed() {
+        // Every address-only IPv6 form must render bracketed so it
+        // re-parses. The IPv4-mapped form is the one that regressed:
+        // `::ffff:1.2.3.4` rendered with dots and misrouted to the IPv4
+        // branch, dropping the rule on save->load.
+        for s in [
+            "[fe80::1]",
+            "[fe80::/10]",
+            "[2001:db8::1-2001:db8::10]",
+            "[::ffff:1.2.3.4]",
+            "[::ffff:1.2.3.4/120]",
+        ] {
+            let clause = parse_clause(s).unwrap_or_else(|e| panic!("parse {s}: {e:?}"));
+            let rendered = clause.to_string();
+            let reparsed = parse_clause(&rendered)
+                .unwrap_or_else(|e| panic!("re-parse of {s} -> `{rendered}` failed: {e:?}"));
+            assert_eq!(
+                reparsed.to_string(),
+                rendered,
+                "{s} did not round-trip (rendered `{rendered}`)"
+            );
+        }
+    }
+
     // ---- error paths ----
 
     #[test]
