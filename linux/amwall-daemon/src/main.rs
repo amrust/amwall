@@ -38,7 +38,7 @@ use aya::{Btf, Ebpf};
 use tokio::sync::mpsc;
 
 use amwall_abi::{ConnectEvent, RuleKey, RuleKeyV6, RuleValue};
-use amwall_core::rules::{Action, Rule, RulesFile};
+use amwall_core::rules::{Action, DestIp, Rule, RulesFile};
 
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
@@ -571,34 +571,43 @@ impl AmwallDaemon {
         let rule = Rule { comm, ip, port, action };
         let val = RuleValue { action: rule.action_byte(), _pad: [0; 7] };
 
-        // IPv4 map (always — "any" is dest_ip4=0 which is the v4 wildcard).
-        let key = RuleKey {
-            comm: rule.comm_bytes(),
-            dest_ip4: rule.ip4()?,
-            dest_port: rule.port,
-            _pad: 0,
-        };
-        {
-            let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
-            map.insert(key, val, 0)
-                .with_context(|| format!("inserting v4 via D-Bus: {:?}", rule))?;
-        }
-
-        // Phase 6.4.1: also mirror "any" rules into the v6 wildcard
-        // slot. Specific IPv6 addresses aren't supported via the
-        // current rules.toml schema (no v6 parsing path) — only "any"
-        // touches the v6 map for now. Future: add a v6 ip parsing
-        // branch alongside ip4().
-        if rule.ip == "any" {
-            let key6 = RuleKeyV6 {
-                comm: rule.comm_bytes(),
-                dest_ip6: [0; 16],
-                dest_port: rule.port,
-                _pad: [0; 6],
-            };
-            let mut map6 = self.rules_v6.lock().map_err(|_| anyhow::anyhow!("rules_v6 mutex poisoned"))?;
-            map6.insert(key6, val, 0)
-                .with_context(|| format!("inserting v6 wildcard via D-Bus: {:?}", rule))?;
+        // Route by destination family (same policy as reload_rules):
+        // "any" writes a wildcard slot into BOTH maps; a v4/v6 literal
+        // writes only its own map. A specific IPv6 address now routes to
+        // the v6 map instead of being dropped.
+        match rule.dest_ip()? {
+            DestIp::Any => {
+                let key = RuleKey {
+                    comm: rule.comm_bytes(), dest_ip4: 0, dest_port: rule.port, _pad: 0,
+                };
+                {
+                    let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
+                    map.insert(key, val, 0)
+                        .with_context(|| format!("inserting v4 wildcard via D-Bus: {:?}", rule))?;
+                }
+                let key6 = RuleKeyV6 {
+                    comm: rule.comm_bytes(), dest_ip6: [0; 16], dest_port: rule.port, _pad: [0; 6],
+                };
+                let mut map6 = self.rules_v6.lock().map_err(|_| anyhow::anyhow!("rules_v6 mutex poisoned"))?;
+                map6.insert(key6, val, 0)
+                    .with_context(|| format!("inserting v6 wildcard via D-Bus: {:?}", rule))?;
+            }
+            DestIp::V4(ip) => {
+                let key = RuleKey {
+                    comm: rule.comm_bytes(), dest_ip4: ip, dest_port: rule.port, _pad: 0,
+                };
+                let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
+                map.insert(key, val, 0)
+                    .with_context(|| format!("inserting v4 via D-Bus: {:?}", rule))?;
+            }
+            DestIp::V6(ip6) => {
+                let key6 = RuleKeyV6 {
+                    comm: rule.comm_bytes(), dest_ip6: ip6, dest_port: rule.port, _pad: [0; 6],
+                };
+                let mut map6 = self.rules_v6.lock().map_err(|_| anyhow::anyhow!("rules_v6 mutex poisoned"))?;
+                map6.insert(key6, val, 0)
+                    .with_context(|| format!("inserting v6 via D-Bus: {:?}", rule))?;
+            }
         }
         Ok(())
     }
@@ -616,28 +625,39 @@ impl AmwallDaemon {
 
         // Best-effort BPF map removal. Need a Rule to compute the key
         // — action doesn't matter for keying.
-        let was_any = ip == "any";
+        // Remove from whichever map(s) the rule was routed into — mirror
+        // of modify()/reload_rules(): "any" cleared from both wildcards,
+        // a v4/v6 literal from its own map.
         let dummy = Rule { comm, ip, port, action: Action::Allow };
-        let key = RuleKey {
-            comm: dummy.comm_bytes(),
-            dest_ip4: dummy.ip4()?,
-            dest_port: dummy.port,
-            _pad: 0,
-        };
-        {
-            let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
-            let _ = map.remove(&key);
-        }
-        // Mirror the "any" → v6-wildcard pairing on delete.
-        if was_any {
-            let key6 = RuleKeyV6 {
-                comm: dummy.comm_bytes(),
-                dest_ip6: [0; 16],
-                dest_port: dummy.port,
-                _pad: [0; 6],
-            };
-            let mut map6 = self.rules_v6.lock().map_err(|_| anyhow::anyhow!("rules_v6 mutex poisoned"))?;
-            let _ = map6.remove(&key6);
+        match dummy.dest_ip()? {
+            DestIp::Any => {
+                let key = RuleKey {
+                    comm: dummy.comm_bytes(), dest_ip4: 0, dest_port: dummy.port, _pad: 0,
+                };
+                {
+                    let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
+                    let _ = map.remove(&key);
+                }
+                let key6 = RuleKeyV6 {
+                    comm: dummy.comm_bytes(), dest_ip6: [0; 16], dest_port: dummy.port, _pad: [0; 6],
+                };
+                let mut map6 = self.rules_v6.lock().map_err(|_| anyhow::anyhow!("rules_v6 mutex poisoned"))?;
+                let _ = map6.remove(&key6);
+            }
+            DestIp::V4(ip4) => {
+                let key = RuleKey {
+                    comm: dummy.comm_bytes(), dest_ip4: ip4, dest_port: dummy.port, _pad: 0,
+                };
+                let mut map = self.rules.lock().map_err(|_| anyhow::anyhow!("rules mutex poisoned"))?;
+                let _ = map.remove(&key);
+            }
+            DestIp::V6(ip6) => {
+                let key6 = RuleKeyV6 {
+                    comm: dummy.comm_bytes(), dest_ip6: ip6, dest_port: dummy.port, _pad: [0; 6],
+                };
+                let mut map6 = self.rules_v6.lock().map_err(|_| anyhow::anyhow!("rules_v6 mutex poisoned"))?;
+                let _ = map6.remove(&key6);
+            }
         }
         Ok(())
     }
@@ -956,21 +976,33 @@ fn reload_rules(map: &mut RulesMap, map_v6: &mut RulesV6Map, path: &Path) -> Res
     let mut desired_v6: StdHashMap<RuleKeyV6, RuleValue> = StdHashMap::new();
     for r in &cfg.rules {
         let val = RuleValue { action: r.action_byte(), _pad: [0; 7] };
-        let key = RuleKey {
-            comm: r.comm_bytes(),
-            dest_ip4: r.ip4()?,
-            dest_port: r.port,
-            _pad: 0,
-        };
-        desired_v4.insert(key, val);
-        if r.ip == "any" {
-            let key6 = RuleKeyV6 {
-                comm: r.comm_bytes(),
-                dest_ip6: [0; 16],
-                dest_port: r.port,
-                _pad: [0; 6],
-            };
-            desired_v6.insert(key6, val);
+        // Route by destination family: "any" installs a wildcard slot in
+        // BOTH maps (one user rule covers v4 + v6); a v4/v6 literal routes
+        // to exactly its own map. A v6 literal used to fail the whole
+        // reload (ip4() errored on it) — dest_ip() handles all three.
+        match r.dest_ip()? {
+            DestIp::Any => {
+                desired_v4.insert(
+                    RuleKey { comm: r.comm_bytes(), dest_ip4: 0, dest_port: r.port, _pad: 0 },
+                    val,
+                );
+                desired_v6.insert(
+                    RuleKeyV6 { comm: r.comm_bytes(), dest_ip6: [0; 16], dest_port: r.port, _pad: [0; 6] },
+                    val,
+                );
+            }
+            DestIp::V4(ip) => {
+                desired_v4.insert(
+                    RuleKey { comm: r.comm_bytes(), dest_ip4: ip, dest_port: r.port, _pad: 0 },
+                    val,
+                );
+            }
+            DestIp::V6(ip6) => {
+                desired_v6.insert(
+                    RuleKeyV6 { comm: r.comm_bytes(), dest_ip6: ip6, dest_port: r.port, _pad: [0; 6] },
+                    val,
+                );
+            }
         }
     }
 

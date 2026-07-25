@@ -40,9 +40,9 @@ RuleEditorDialog::RuleEditorDialog(const RuleEntry *existing, QWidget *parent)
     m_action->addItem(tr("Deny"),  "deny");
     form->addRow(tr("Action:"), m_action);
 
-    // IP — "any" or IPv4 dotted-quad.
+    // IP — "any", an IPv4 literal, or an IPv6 literal.
     m_ip = new QLineEdit(this);
-    m_ip->setPlaceholderText(tr("any  or  192.168.1.1"));
+    m_ip->setPlaceholderText(tr("any  or  192.168.1.1  or  2001:db8::1"));
     form->addRow(tr("Destination IP:"), m_ip);
 
     // Port — 0 = any.
@@ -113,13 +113,12 @@ void RuleEditorDialog::validateAndAccept() {
         return;
     }
     if (ipv.compare(QStringLiteral("any"), Qt::CaseInsensitive) != 0) {
-        // Not "any" — must be a valid IPv4 dotted-quad string.
-        QHostAddress addr(ipv);
-        if (addr.isNull() || addr.protocol() != QAbstractSocket::IPv4Protocol) {
+        // Not "any" — must be a valid IPv4 or IPv6 literal.
+        QHostAddress addr;
+        if (!addr.setAddress(ipv)) {
             QMessageBox::warning(this, tr("Invalid rule"),
-                tr("Destination IP must be 'any' or a valid IPv4 address "
-                   "(e.g. 192.168.1.1).\n\nIPv6 isn't enforced by the BPF "
-                   "program yet."));
+                tr("Destination IP must be 'any' or a valid IP address "
+                   "(e.g. 192.168.1.1 or 2001:db8::1)."));
             m_ip->setFocus();
             return;
         }

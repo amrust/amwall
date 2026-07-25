@@ -7,6 +7,9 @@
 //!   amwall-cli del   <comm> <ip>:<port>
 //!   amwall-cli reset [--yes] [--keep-rules] [--keep-config]
 //!
+//! <ip> is "any", an IPv4 literal, or a bracketed IPv6 literal:
+//!   amwall-cli allow curl '[2001:db8::1]:443'
+//!
 //! Add `--dbus` to route the call through the daemon's
 //! org.amwall.Daemon1 interface on the SYSTEM bus instead of editing
 //! rules.toml. Requires amwall-daemon running and the policy file at
@@ -18,7 +21,7 @@
 //! config part honors $SUDO_USER so it still targets the invoking
 //! user's home directory rather than /root/.config/.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -281,14 +284,29 @@ fn upsert(file: &mut RulesFile, comm: String, dest: String, action: Action) -> R
 }
 
 fn parse_dest(s: &str) -> Result<(String, u16)> {
-    let (ip_s, port_s) = s.rsplit_once(':')
-        .with_context(|| format!("dest must be 'ip:port' (got '{}')", s))?;
+    // IPv6 destinations must be bracketed so the address colons don't
+    // collide with the ip:port separator, e.g. "[2001:db8::1]:443".
+    // Everything else (an IPv4 literal or "any") splits on the final ':'.
+    if let Some(rest) = s.strip_prefix('[') {
+        let (addr, port_s) = rest
+            .split_once("]:")
+            .with_context(|| format!("bracketed IPv6 dest must be '[addr]:port' (got '{}')", s))?;
+        let port: u16 = port_s.parse().context("port must be 0-65535")?;
+        let ip = Ipv6Addr::from_str(addr)
+            .with_context(|| format!("'{}' is not a valid IPv6 address", addr))?;
+        return Ok((ip.to_string(), port));
+    }
+    let (ip_s, port_s) = s
+        .rsplit_once(':')
+        .with_context(|| format!("dest must be 'ip:port' or '[v6]:port' (got '{}')", s))?;
     let port: u16 = port_s.parse().context("port must be 0-65535")?;
     let ip_norm = if ip_s.eq_ignore_ascii_case("any") || ip_s == "0.0.0.0" || ip_s.is_empty() {
         "any".to_string()
     } else {
         Ipv4Addr::from_str(ip_s)
-            .with_context(|| format!("ip '{}' is not 'any' or a v4 address", ip_s))?
+            .with_context(|| {
+                format!("ip '{}' is not 'any' or a v4 address (use [addr]:port for IPv6)", ip_s)
+            })?
             .to_string()
     };
     Ok((ip_norm, port))
