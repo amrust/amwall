@@ -18,8 +18,9 @@
 use std::path::PathBuf;
 
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK, FWP_CONDITION_FLAG_IS_IPSEC_SECURED,
-    FWP_CONDITION_FLAG_IS_LOOPBACK, FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4,
+    FWP_CONDITION_FLAG_IS_APPCONTAINER_LOOPBACK, FWP_CONDITION_FLAG_IS_INBOUND_PASS_THRU,
+    FWP_CONDITION_FLAG_IS_IPSEC_SECURED, FWP_CONDITION_FLAG_IS_LOOPBACK,
+    FWP_CONDITION_FLAG_IS_OUTBOUND_PASS_THRU, FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4,
     FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6, FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V4_SILENT_DROP,
     FWPM_CALLOUT_WFP_TRANSPORT_LAYER_V6_SILENT_DROP, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
     FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
@@ -1407,13 +1408,16 @@ fn install_default_deny(
     Ok(count)
 }
 
-/// Install the dedicated boot-time filter set (FWPM_FILTER_FLAG_BOOTTIME):
-/// loopback / appcontainer-loopback permits enforced during EARLY BOOT —
-/// before the Base Filtering Engine service starts and re-applies the
-/// persistent runtime filters. This closes the fail-open window between
-/// the network stack coming up at boot and BFE loading the runtime set.
-/// Mirrors upstream simplewall wfp.c:2143-2269 (permits at
-/// HIGHEST_IMPORTANT on the forward, recv-accept, and ICMP-error layers).
+/// Install the dedicated boot-time filter set (FWPM_FILTER_FLAG_BOOTTIME),
+/// enforced during EARLY BOOT — before the Base Filtering Engine service
+/// starts and re-applies the persistent runtime filters. Three parts,
+/// mirroring upstream simplewall wfp.c:2143-2388:
+///   A. loopback / appcontainer-loopback PERMITs at HIGHEST_IMPORTANT on
+///      the IPFORWARD, RECV_ACCEPT, and in/out ICMP-error layers.
+///   B. match-all BLOCK catch-alls at LOWEST on the RECV_ACCEPT + ICMP-
+///      error layers — the DENY that actually closes the fail-open window
+///      (WFP is default-permit; the permits alone can't close it).
+///   C. IPFORWARD BLOCKs at FW_WEIGHT_APP for non-pass-thru routed traffic.
 /// Only meaningful for permanent (persistent) installs, never `-temp`.
 ///
 /// NOTE: the early-boot ENFORCEMENT can only be observed by rebooting;
@@ -1445,6 +1449,58 @@ fn install_boottime_permits(engine: &WfpEngine, ids: &mut Vec<u64>) -> Result<u3
             std::slice::from_ref(&loop_flags),
             FilterAction::Permit,
             filter::weight::HIGHEST_IMPORTANT,
+        )?;
+        ids.push(f.runtime_id());
+        count += 1;
+    }
+
+    // Part B: match-all BLOCK catch-alls at FW_WEIGHT_LOWEST on the
+    // inbound / ICMP-error layers (upstream wfp.c:2271-2353). WFP is
+    // fundamentally default-PERMIT, so the loopback permits above cannot
+    // by themselves close the early-boot fail-open window — the DENY
+    // does. Without these, every non-loopback inbound / ICMP-error packet
+    // is permitted between the network stack coming up and BFE loading
+    // the runtime default-deny. No conditions, BOOTTIME flag.
+    let block_layers = [
+        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+        FWPM_LAYER_INBOUND_ICMP_ERROR_V4,
+        FWPM_LAYER_INBOUND_ICMP_ERROR_V6,
+        FWPM_LAYER_OUTBOUND_ICMP_ERROR_V4,
+        FWPM_LAYER_OUTBOUND_ICMP_ERROR_V6,
+    ];
+    for layer in &block_layers {
+        let f = filter::add_boottime(
+            engine,
+            "amwall boot-time block",
+            "amwall: boot-time default-deny catch-all",
+            layer,
+            &SUBLAYER_KEY,
+            Some(&PROVIDER_KEY),
+            &[],
+            FilterAction::Block,
+            filter::weight::LOWEST,
+        )?;
+        ids.push(f.runtime_id());
+        count += 1;
+    }
+
+    // Part C: block forwarded (routed) traffic that is NOT pass-thru at
+    // the IPFORWARD layers, at FW_WEIGHT_APP (upstream wfp.c:2361-2387).
+    let not_passthru = FilterCondition::FlagsNoneSet(
+        FWP_CONDITION_FLAG_IS_OUTBOUND_PASS_THRU | FWP_CONDITION_FLAG_IS_INBOUND_PASS_THRU,
+    );
+    for layer in &[FWPM_LAYER_IPFORWARD_V4, FWPM_LAYER_IPFORWARD_V6] {
+        let f = filter::add_boottime(
+            engine,
+            "amwall boot-time forward-block",
+            "amwall: boot-time IP-forward block (non-pass-thru)",
+            layer,
+            &SUBLAYER_KEY,
+            Some(&PROVIDER_KEY),
+            std::slice::from_ref(&not_passthru),
+            FilterAction::Block,
+            filter::weight::APP,
         )?;
         ids.push(f.runtime_id());
         count += 1;
