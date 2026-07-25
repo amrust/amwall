@@ -23,6 +23,16 @@ What's new in amwall v2.0.0 (current)\par
   - Custom rules now accept IPv6 address ranges (start-end),\par
     matching the existing IPv4 range support and upstream\par
     simplewall\par
+  - Firewall-correctness hardening. Default-deny now correctly\par
+    blocks an app you've blocked even when it talks to a\par
+    local/LAN address (the loopback allow no longer over-\par
+    permits the whole private-address space). Importing or\par
+    reloading a profile now re-applies the filters, so what the\par
+    window shows is what the kernel enforces. A partially-\par
+    corrupt or migrated profile no longer drops your entire app\par
+    list -- only the bad entries are skipped. Early-boot\par
+    protection now installs its block filters too, and loopback\par
+    permits are hardened so another firewall can't override them\par
   - Reliability: a pre-release test gate now proves the\par
     default-deny firewall actually blocks outbound traffic on a\par
     live system before any build is published, so the\par
