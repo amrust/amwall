@@ -314,7 +314,8 @@ impl NetMeter {
         };
         let elapsed = now.wrapping_sub(self.last_pids_tick);
         let mut out = HashMap::new();
-        if elapsed > 0 && !self.last_pids.is_empty() {
+        let priming = self.last_pids.is_empty();
+        if elapsed > 0 && !priming {
             for (&pid, &(recv, sent)) in &snapshot {
                 let (prev_recv, prev_sent) = self.last_pids.get(&pid).copied().unwrap_or((0, 0));
                 let d_recv = recv.saturating_sub(prev_recv);
@@ -328,7 +329,22 @@ impl NetMeter {
                 );
             }
         }
-        self.last_pids = snapshot;
+        if priming {
+            // Establish the full baseline; nothing to prune yet.
+            self.last_pids = snapshot;
+        } else {
+            // Bound the per-PID map: drop PIDs that moved no bytes this
+            // interval (dead or idle) from both the shared counter map and
+            // the baseline, so a long session's churn of short-lived PIDs
+            // can't grow it without bound. A re-activating app is simply
+            // re-baselined on its next tick (a 0-rate app displays 0
+            // regardless). The endpoints map is already bounded by its
+            // (bool, u16) key; this bounds the pids side.
+            if let Ok(mut map) = self.counters.pids.lock() {
+                map.retain(|pid, _| out.contains_key(pid));
+            }
+            self.last_pids = out.keys().map(|&pid| (pid, snapshot[&pid])).collect();
+        }
         self.last_pids_tick = now;
         out
     }
