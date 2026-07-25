@@ -61,6 +61,12 @@ private:
     void setupTrayIcon();
     void loadSettings();
 
+    // Writes window/geometry + window/state to QSettings with an
+    // explicit sync(). Called from closeEvent (hide-to-tray) and
+    // onQuit (real exit) — the tray-app lifecycle means either can
+    // be the last time the window is placed on screen.
+    void saveWindowGeometry();
+
     DbusClient        *m_dbus = nullptr;
     PromptCoordinator *m_prompts = nullptr;
     QTabWidget        *m_tabs = nullptr;

@@ -2,9 +2,10 @@
 // QListWidget of page names. Right: QStackedWidget of page bodies.
 // Matches simplewall's IDD_SETTINGS modal layout.
 //
-// Persists via QSettings (already used for window geometry and
-// Always-on-top). All keys are documented next to the spinbox /
-// checkbox creating them so the QSettings file is greppable.
+// Persists via QSettings — the same store MainWindow writes its
+// window/geometry + window/state and view/alwaysOnTop keys to. All
+// keys are documented next to the spinbox / checkbox creating them
+// so the QSettings file is greppable.
 //
 // Apply semantics: changes take effect on OK / Apply. Cancel restores
 // nothing — there's no undo stack, but the only side-effect of an

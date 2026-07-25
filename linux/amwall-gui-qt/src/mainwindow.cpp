@@ -12,6 +12,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QByteArray>
 #include <QCloseEvent>
 #include <QIcon>
 #include <QKeySequence>
@@ -32,7 +33,8 @@
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle("amwall");
-    resize(900, 600);
+    resize(900, 600);  // first-run default; loadSettings() restores
+                       // the saved geometry when one exists
 
     m_dbus = new DbusClient(this);
     connect(m_dbus, &DbusClient::stateChanged,
@@ -334,6 +336,36 @@ void MainWindow::loadSettings() {
         m_alwaysOnTopAction->setChecked(true);
         setWindowFlags(windowFlags() | Qt::WindowStaysOnTopHint);
     }
+
+    // Restore the last-run window position/size and toolbar layout
+    // (written by saveWindowGeometry() on hide-to-tray and on quit).
+    // loadSettings() runs after setupToolBar(), so restoreState()
+    // can match the toolbar by its "mainToolBar" objectName. On
+    // first run both keys are absent and the constructor's
+    // resize(900, 600) default stands; empty byte arrays are
+    // skipped so a blank key can't restore into a broken state.
+    // Placed after the alwaysOnTop setWindowFlags call above, which
+    // re-realizes the native window and would otherwise clobber a
+    // just-restored position.
+    const QByteArray geometry = s.value("window/geometry").toByteArray();
+    const QByteArray state    = s.value("window/state").toByteArray();
+    if (!geometry.isEmpty()) restoreGeometry(geometry);
+    if (!state.isEmpty())    restoreState(state);
+}
+
+void MainWindow::saveWindowGeometry() {
+    // Persist window position/size + toolbar layout so the next
+    // launch reopens where the user left it. Explicit sync() and a
+    // named QSettings so the qInfo log line surfaces both the file
+    // path and the actual write status — same tracing discipline as
+    // onAlwaysOnTopToggled and SettingsDialog::saveToSettings.
+    QSettings s;
+    s.setValue("window/geometry", saveGeometry());
+    s.setValue("window/state", saveState());
+    s.sync();
+    qInfo().noquote()
+        << "MainWindow::saveWindowGeometry wrote to" << s.fileName()
+        << "(status=" << int(s.status()) << ")";
 }
 
 void MainWindow::onTrayActivated(QSystemTrayIcon::ActivationReason reason) {
@@ -368,6 +400,10 @@ void MainWindow::onQuit() {
             QMessageBox::No);
         if (ans != QMessageBox::Yes) return;
     }
+    // Quit can come from the tray menu with the window hidden and
+    // closeEvent never fired this session — capture geometry here
+    // too so the last position persists no matter the exit path.
+    saveWindowGeometry();
     QApplication::quit();
 }
 
@@ -615,6 +651,10 @@ void MainWindow::onDbusStateChanged() {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
+    // Capture geometry on every close: for the tray branch this is
+    // the last moment the window is visibly placed before hide();
+    // for the no-tray branch this close IS the exit.
+    saveWindowGeometry();
     // Close-to-tray: hide instead of quit. The tray icon's Quit menu
     // item is the real exit path.
     if (m_trayIcon && m_trayIcon->isVisible()) {
