@@ -219,7 +219,11 @@ fn parse_port_or_range(s: &str) -> Result<PortSpec, ParseError> {
         let b: u16 = s[dash + 1..]
             .parse()
             .map_err(|_| ParseError::BadPort(s.to_string()))?;
-        if a > b {
+        // Upstream helper.c:1584-1604 rejects low < 1 and low >= high: an
+        // equal-endpoint range is a mis-typed single port, and port 0 is
+        // not a real port. Matching this keeps amwall from installing WFP
+        // filters a migrated profile's rule would never have produced.
+        if a < 1 || a >= b {
             return Err(ParseError::BadRange(s.to_string()));
         }
         return Ok(PortSpec::Range(a, b));
@@ -227,6 +231,9 @@ fn parse_port_or_range(s: &str) -> Result<PortSpec, ParseError> {
     let p: u16 = s
         .parse()
         .map_err(|_| ParseError::BadPort(s.to_string()))?;
+    if p < 1 {
+        return Err(ParseError::BadPort(s.to_string()));
+    }
     Ok(PortSpec::Single(p))
 }
 
