@@ -32,7 +32,9 @@ use windows::Win32::Foundation::{FILETIME, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_BYTE_BLOB, FWP_DIRECTION, FWP_DIRECTION_INBOUND, FWP_DIRECTION_OUTBOUND, FWP_IP_VERSION,
     FWP_IP_VERSION_V4, FWP_IP_VERSION_V6, FWP_UINT32, FWP_VALUE0, FWP_VALUE0_0,
-    FWPM_ENGINE_COLLECT_NET_EVENTS, FWPM_NET_EVENT1, FWPM_NET_EVENT_FLAG_APP_ID_SET,
+    FWPM_ENGINE_COLLECT_NET_EVENTS, FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS,
+    FWPM_NET_EVENT_KEYWORD_INBOUND_BCAST, FWPM_NET_EVENT_KEYWORD_INBOUND_MCAST,
+    FWPM_NET_EVENT_KEYWORD_PORT_SCANNING_DROP, FWPM_NET_EVENT1, FWPM_NET_EVENT_FLAG_APP_ID_SET,
     FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET, FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET,
     FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET, FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET,
     FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET, FWPM_NET_EVENT_HEADER1, FWPM_NET_EVENT_HEADER1_0,
@@ -181,6 +183,32 @@ fn enable_event_collection(engine: &WfpEngine) -> Result<(), String> {
         return Err(format!(
             "FwpmEngineSetOption0(COLLECT_NET_EVENTS) failed: {res:#010x}"
         ));
+    }
+
+    // Subscribe to the keyword-gated event categories upstream collects by
+    // default (log.c:460-496, _wfp_logsetoption): inbound multicast /
+    // broadcast drops and, on 19H1+, port-scanning drops. Without this
+    // mask the BFE never emits those events, so the Packets log silently
+    // omits every inbound bcast/mcast drop (the IsExcludeInbound / upstream
+    // issue #2111 gap). Ordinary unicast CLASSIFY_DROP events are not
+    // keyword-tagged and arrive regardless. Best-effort: a failure (e.g.
+    // PORT_SCANNING_DROP unknown on a pre-19H1 build) leaves unicast-drop
+    // collection working, so log and continue rather than abort.
+    let mask = FWPM_NET_EVENT_KEYWORD_INBOUND_MCAST
+        | FWPM_NET_EVENT_KEYWORD_INBOUND_BCAST
+        | FWPM_NET_EVENT_KEYWORD_PORT_SCANNING_DROP;
+    let mask_val = FWP_VALUE0 {
+        r#type: FWP_UINT32,
+        Anonymous: FWP_VALUE0_0 { uint32: mask },
+    };
+    let res = unsafe {
+        FwpmEngineSetOption0(engine.raw(), FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS, &mask_val)
+    };
+    if res != 0 {
+        eprintln!(
+            "amwall: FwpmEngineSetOption0(NET_EVENT_MATCH_ANY_KEYWORDS) failed: {res:#010x} \
+             (inbound mcast/bcast + port-scan drops won't be logged)"
+        );
     }
     Ok(())
 }
