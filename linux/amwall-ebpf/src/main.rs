@@ -11,6 +11,7 @@
 #![no_std]
 #![no_main]
 
+use amwall_abi::{ConnectEvent, RuleKey, RuleKeyV6, RuleValue};
 use aya_ebpf::{
     cty::c_void,
     helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_probe_read_kernel},
@@ -36,49 +37,6 @@ const ACT_ALLOW: u8 = 1;
 
 const VERDICT_ALLOW: i32 = 0;
 const VERDICT_DENY: i32 = -1;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ConnectEvent {
-    pub pid: u32,
-    pub comm: [u8; 16],
-    pub family: u16,
-    pub dest_port: u16,
-    pub dest_ip4: u32,
-    pub dest_ip6: [u8; 16],
-    pub action: u8,
-    pub _pad: [u8; 3],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct RuleKey {
-    pub comm: [u8; 16],
-    pub dest_ip4: u32,
-    pub dest_port: u16,
-    pub _pad: u16,
-}
-
-// Phase 6.4.1: parallel map for IPv6 lookups. dest_ip6 is the raw
-// 16-byte address (network byte order, same as in_addr6). Wildcard
-// slot is dest_ip6=[0; 16] + dest_port=0 — populated by the daemon
-// whenever the user sets a rule with ip="any" so that wildcard
-// allows/denies cover both IPv4 and IPv6 destinations.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct RuleKeyV6 {
-    pub comm: [u8; 16],
-    pub dest_ip6: [u8; 16],
-    pub dest_port: u16,
-    pub _pad: [u8; 6],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct RuleValue {
-    pub action: u8,
-    pub _pad: [u8; 7],
-}
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);

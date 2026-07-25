@@ -1,0 +1,29 @@
+# amwall-abi — the byte-exact #[repr(C)] layouts shared between the
+# in-kernel BPF program (amwall-ebpf, no_std, bpfel target) and the
+# userspace daemon (amwall-daemon, std). Lives at the repo root beside
+# amwall-core so both the standalone ebpf crate and the linux/ workspace
+# can path-depend on it. See docs/linux-logic-atlas.md gap #14.
+[package]
+name = "amwall-abi"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/amrust/amwall"
+description = "Shared #[repr(C)] BPF map/event struct layouts for amwall (kernel + userspace)"
+
+[lib]
+
+[dependencies]
+# Optional so the no_std BPF crate can depend on amwall-abi WITHOUT
+# pulling userspace aya into the bpfel build. Only the daemon enables
+# the `aya-pod` feature. Version pinned to match amwall-daemon's aya so
+# the `Pod` trait is the exact same item in both crates.
+aya = { version = "0.13", optional = true }
+
+[features]
+# Adds `unsafe impl aya::Pod` for the map key/value types. Kept in this
+# crate (which OWNS the types) rather than the daemon, because the
+# orphan rule forbids the daemon impl'ing a foreign trait (aya::Pod) for
+# a foreign type (these structs). Off by default → BPF build stays
+# aya-free and no_std.
+aya-pod = ["dep:aya"]

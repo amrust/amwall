@@ -34,9 +34,10 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use aya::maps::{Array as AyaArray, HashMap as AyaHashMap, MapData, RingBuf};
 use aya::programs::Lsm;
-use aya::{Btf, Ebpf, Pod};
+use aya::{Btf, Ebpf};
 use tokio::sync::mpsc;
 
+use amwall_abi::{ConnectEvent, RuleKey, RuleKeyV6, RuleValue};
 use amwall_core::rules::{Action, Rule, RulesFile};
 
 const AF_INET: u16 = 2;
@@ -44,51 +45,6 @@ const AF_INET6: u16 = 10;
 const ACT_ALLOW: u8 = 1;
 
 const POLKIT_ACTION_MODIFY: &str = "org.amwall.Daemon1.modify-rules";
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ConnectEvent {
-    pid: u32,
-    comm: [u8; 16],
-    family: u16,
-    dest_port: u16,
-    dest_ip4: u32,
-    dest_ip6: [u8; 16],
-    action: u8,
-    _pad: [u8; 3],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct RuleKey {
-    comm: [u8; 16],
-    dest_ip4: u32,
-    dest_port: u16,
-    _pad: u16,
-}
-
-// Phase 6.4.1: parallel IPv6 BPF map. Mirror layout of amwall-ebpf's
-// RuleKeyV6. The daemon installs a v6 wildcard entry for every "any"
-// rule so a single user click covers v4 + v6 destinations.
-#[repr(C)]
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct RuleKeyV6 {
-    comm: [u8; 16],
-    dest_ip6: [u8; 16],
-    dest_port: u16,
-    _pad: [u8; 6],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RuleValue {
-    action: u8,
-    _pad: [u8; 7],
-}
-
-unsafe impl Pod for RuleKey {}
-unsafe impl Pod for RuleKeyV6 {}
-unsafe impl Pod for RuleValue {}
 
 type RulesMap   = AyaHashMap<MapData, RuleKey,   RuleValue>;
 type RulesV6Map = AyaHashMap<MapData, RuleKeyV6, RuleValue>;

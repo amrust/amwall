@@ -7,6 +7,7 @@ repository.workspace = true
 description = "amwall firewall daemon — BPF LSM enforcement + D-Bus interface"
 
 [dependencies]
+amwall-abi = { path = "../../amwall-abi", features = ["aya-pod"] }
 amwall-core.workspace = true
 aya = "0.13"
 anyhow = "1"
