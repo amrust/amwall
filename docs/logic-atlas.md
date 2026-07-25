@@ -13,7 +13,7 @@
 > **Maintenance.** Regenerate a section when you materially change that subsystem. Line
 > numbers drift — trust the function *names* and *invariants*, verify positions against code.
 > Companion: the visual verification map (which stages are guarded vs. blind) and
-> `feedback_verify_by_running`. Snapshot: amwall @ v2.0.0 + branch feat/release-gate-and-prompt-dedup.
+> `feedback_verify_by_running`. Snapshot: amwall @ v2.0.1 (released on main).
 >
 > **Scope.** This atlas maps the *enforcement spine* (profile/config → WFP filters → drop →
 > prompt). The v2.0.0 network meter (`connections` traffic + `net_meter` ETW) is **observation**,
@@ -345,6 +345,15 @@ Highest-risk file (mostly `unsafe` Win32). Grouped by job:
 - **Lifecycle:** `create` (register class, create window/tabs/listviews/toolbar/status, park `App`),
   `build_main_menu`, `wnd_proc` (the message dispatcher), `on_create`, `on_size`, `on_dpi_changed`,
   `on_tab_change`, `on_command` (menu id → handler), `on_exit`, `restart_self`.
+- **Window placement (v2.0.1):** `restore_window_placement` (called in `create`, before show) and
+  `save_window_placement` (called in `on_exit`, the real-exit path — NOT `WM_CLOSE`, which only
+  hides to tray) persist the main window's position/size/maximized state to `settings.txt`
+  (`window_x/y/w/h` + `window_maximized`; `has_window_placement()` gates the unset sentinel). Uses
+  `GetWindowPlacement`/`SetWindowPlacement` (normal rect regardless of min/max/hidden) and
+  `clamp_rect_to_work_area` (`MonitorFromRect` + `GetMonitorInfoW`) so a rect saved on a
+  since-removed monitor can't strand the window off-screen. Mirrors upstream
+  `_r_window_saveposition`/`_r_window_restoreposition` (main.c:2201). Both paths log to the session
+  log; the persistence layer is guarded by a `settings.rs` round-trip unit test.
 - **Startup filter state:** `detect_initial_filter_state`, `try_auto_enable_filters_at_startup`
   (honors `filters_active_persisted`), `try_subscribe_events` (WFP net-event subscription),
   `refresh_amwall_filter_ids_with`, `apply_initial_settings`, `maybe_run_first_run_wizard`.
