@@ -137,7 +137,11 @@ fn decompress_profile(compressed: &[u8]) -> Result<Vec<u8>, ParseError> {
     const CAP: usize = 64 * 1024 * 1024;
 
     for &fmt in &[COMPRESSION_FORMAT_LZNT1, COMPRESSION_FORMAT_XPRESS] {
-        let mut size = compressed.len().max(4096).saturating_mul(4);
+        // Clamp the FIRST allocation to CAP too — for a compressed body
+        // over ~16 MiB, len*4 would blow past the 64 MiB safety bound the
+        // growth loop enforces and could drive a multi-GiB allocation while
+        // loading an untrusted / corrupt profile.
+        let mut size = compressed.len().max(4096).saturating_mul(4).min(CAP);
         loop {
             let mut out = vec![0u8; size];
             let mut final_size: u32 = 0;
