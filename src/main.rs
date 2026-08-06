@@ -79,6 +79,17 @@ mod cli {
         SkipUacRegister,
         /// `-skipuac-unregister` — remove the entry above.
         SkipUacUnregister,
+        /// `-diagnostics [profile.xml] [-out <file>]` — print a
+        /// read-only report of what amwall resolves, measures and has
+        /// installed on this machine. Does not require admin (the WFP
+        /// section is simply skipped without it) and changes nothing.
+        Diagnostics {
+            path: Option<PathBuf>,
+            /// Extra copy written here. The report always also goes to
+            /// `<data_dir>\amwall-diagnostics.txt`, because a
+            /// GUI-subsystem binary's stdout is easy to lose.
+            out: Option<PathBuf>,
+        },
         /// Argparse failed with a message — print to stderr, exit 2.
         Error(String),
     }
@@ -98,6 +109,7 @@ mod cli {
             "-uninstall" => parse_uninstall_flags(&args[2..]),
             "-skipuac-register" => Command::SkipUacRegister,
             "-skipuac-unregister" => Command::SkipUacUnregister,
+            "-diagnostics" => parse_diagnostics_flags(&args[2..]),
             other => Command::Error(format!("unknown command `{other}`")),
         }
     }
@@ -147,6 +159,35 @@ mod cli {
             }
         }
         Command::Uninstall { silent }
+    }
+
+    /// `-diagnostics [profile.xml] [-out <file>]`.
+    fn parse_diagnostics_flags(rest: &[String]) -> Command {
+        let mut path: Option<PathBuf> = None;
+        let mut out: Option<PathBuf> = None;
+        let mut it = rest.iter();
+        while let Some(tok) = it.next() {
+            match tok.as_str() {
+                "-out" => match it.next() {
+                    Some(p) => out = Some(PathBuf::from(p)),
+                    None => {
+                        return Command::Error("-out requires a file path".to_string());
+                    }
+                },
+                s if s.starts_with('-') => {
+                    return Command::Error(format!("unknown flag `{s}` for -diagnostics"));
+                }
+                s => {
+                    if path.is_some() {
+                        return Command::Error(format!(
+                            "unexpected second profile path `{s}` for -diagnostics"
+                        ));
+                    }
+                    path = Some(PathBuf::from(s));
+                }
+            }
+        }
+        Command::Diagnostics { path, out }
     }
 
     pub fn run(args: Vec<String>) -> ExitCode {
@@ -211,6 +252,7 @@ mod cli {
                     }
                 }
             }
+            Command::Diagnostics { path, out } => handle_diagnostics(path, out),
             Command::Error(msg) => {
                 eprintln!("amwall: {msg}");
                 print_usage();
@@ -536,6 +578,50 @@ mod cli {
         amwall::paths::profile_path()
     }
 
+    /// `-diagnostics`: gather, print, and save the self-check report.
+    ///
+    /// Deliberately NOT admin-gated. The whole point is that a user can
+    /// run it the same way they run amwall and see what amwall sees;
+    /// requiring elevation would change the very thing being measured.
+    /// The kernel section is skipped (and says so) when unelevated.
+    ///
+    /// The report is always written to a file as well as stdout,
+    /// because this binary is GUI-subsystem: its console output depends
+    /// on a parent-console attach and is discarded outright for an
+    /// elevated child. A file is what actually reaches a bug report.
+    ///
+    /// Exit code is 0 whenever the report was produced — it reports,
+    /// it does not judge. Callers script against the `[verdict]`
+    /// section.
+    fn handle_diagnostics(path: Option<PathBuf>, out: Option<PathBuf>) -> ExitCode {
+        let report = amwall::diagnostics::render(&amwall::diagnostics::collect(path));
+        println!("{report}");
+
+        let default_out = amwall::paths::data_dir().join("amwall-diagnostics.txt");
+        let mut wrote_any = false;
+        for target in [Some(default_out), out].into_iter().flatten() {
+            // The data dir may not exist yet — diagnostics is often the
+            // very first thing run on a fresh install, before the GUI
+            // has created it.
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&target, &report) {
+                Ok(()) => {
+                    println!("amwall: diagnostics written to {}", target.display());
+                    wrote_any = true;
+                }
+                Err(e) => {
+                    eprintln!("amwall: could not write {}: {e}", target.display());
+                }
+            }
+        }
+        if !wrote_any {
+            eprintln!("amwall: report printed above but no copy could be saved to disk");
+        }
+        ExitCode::from(0)
+    }
+
     fn print_usage() {
         println!("amwall — Rust port of simplewall (Windows Filtering Platform)");
         println!();
@@ -550,6 +636,14 @@ mod cli {
         println!("    amwall.exe -uninstall [-silent]");
         println!("        Remove every filter / sublayer / provider that");
         println!("        amwall has installed. Requires Administrator.");
+        println!();
+        println!("    amwall.exe -diagnostics [profile.xml] [-out <file>]");
+        println!("        Print a read-only self-check: how every app path");
+        println!("        resolves, whether each would get a firewall permit,");
+        println!("        whether any localized column header is too wide, and");
+        println!("        (when elevated) what amwall has in the kernel.");
+        println!("        Changes nothing. Also saved to");
+        println!("        %APPDATA%\\amwall\\amwall-diagnostics.txt");
         println!();
         println!("    amwall.exe -h | --help");
         println!("        Print this help.");

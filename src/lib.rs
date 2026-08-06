@@ -14,6 +14,8 @@ pub mod hash;
 pub mod logging;
 
 #[cfg(windows)]
+pub mod diagnostics;
+#[cfg(windows)]
 pub mod gui;
 #[cfg(windows)]
 pub mod install;
