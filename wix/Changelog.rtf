@@ -1,5 +1,43 @@
 {\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil Courier New;}}\fs18
-What's new in amwall v2.0.1 (current)\par
+What's new in amwall v2.0.2 (current)\par
+\par
+  - Programs listed with a Windows path shortcut now work. Entries\par
+    written as %ProgramFiles%\\..., %SystemRoot%\\..., %AppData%\\...\par
+    and similar -- which is how most entries in an imported\par
+    simplewall profile are stored -- were shown in red as "does\par
+    not exist" and, more seriously, never had their allow rule\par
+    installed, so those programs were blocked with nothing on\par
+    screen to explain why. amwall now resolves the shortcut to the\par
+    real file everywhere it matters: the allow rule, the file\par
+    check, the icon, the digital-signature and hash checks, and\par
+    the live-connection highlight\par
+  - Purge unused no longer deletes an imported profile. Because\par
+    those same entries looked missing, Edit > Purge unused counted\par
+    them as unused and would remove most of a freshly imported\par
+    profile in one click\par
+  - Your profile file is left exactly as it was. amwall resolves\par
+    path shortcuts only when it needs the real file; it never\par
+    rewrites them to fixed paths, so your profile stays portable\par
+    between machines and user accounts\par
+  - Column widths now fit their headings. Columns are sized to the\par
+    heading text and the content instead of fixed widths tuned for\par
+    English, so headings are no longer cut short -- most visible in\par
+    translated versions, but it affected English too. Sizing is on\par
+    by default and reapplies when you switch tabs, when a list\par
+    refreshes, and after you resize the window\par
+  - amwall now offers to restart with Administrator rights. It\par
+    needs them to manage the firewall at all; previously it opened\par
+    without them and quietly did nothing useful. You can still\par
+    decline, and turning on Settings > "Skip User Account Control\par
+    prompt warning" elevates silently from then on\par
+  - New: amwall.exe -diagnostics writes a plain-text report of what\par
+    amwall actually sees on your PC -- how every program path\par
+    resolves, which would get an allow rule, whether any column\par
+    heading is too wide, and what amwall has installed in Windows.\par
+    It changes nothing and is saved to\par
+    %APPDATA%\\amwall\\amwall-diagnostics.txt for bug reports\par
+\par
+What's new in amwall v2.0.1\par
 \par
   - The main window now remembers its position and size. amwall\par
     saves where you placed and sized the window and restores it\par

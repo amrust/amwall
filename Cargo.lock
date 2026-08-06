@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "amwall"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "embed-resource",
  "image",

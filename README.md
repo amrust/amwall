@@ -195,6 +195,26 @@ The first build chain runs on the just-pushed tag. If it fails, the tag points a
 
 The installer template is [`wix/main.wxs`](wix/main.wxs). It uses `WixUI_InstallDir` (Welcome → License → InstallDir → Verify → Progress → Finish), with the GPL-3.0 license text in [`wix/License.rtf`](wix/License.rtf) (regenerate from `LICENSE` with the PowerShell snippet at the top of that file's commit, if upstream's text changes). Stable GUIDs in `main.wxs` should not be regenerated — they're how the MSI recognises an upgrade vs. a fresh install.
 
+## Diagnostics
+
+```
+amwall.exe -diagnostics [profile.xml] [-out <file>]
+```
+
+Prints a read-only self-check and saves a copy to `%APPDATA%\amwall\amwall-diagnostics.txt`
+(next to the exe in portable mode). It reports how every app path in the profile resolves on
+*this* machine, whether each entry would get a WFP permit, whether any localized column header is
+wider than the width its column is created at, and — when elevated — what amwall currently has in
+the kernel, enumerated by `providerKey`.
+
+Nothing is installed, removed, or written to the profile. It is deliberately not admin-gated:
+requiring elevation would change the thing being measured, so the kernel section is simply skipped
+(and says so) when run as a normal user. The exit code is 0 whenever a report was produced —
+script against the `[verdict]` lines, not the exit status.
+
+This is the fastest way to confirm a build behaves correctly on real hardware, and the right thing
+to attach to a bug report.
+
 ## Roadmap
 
 Tracked in GitHub issues. The high-level milestones are:
@@ -202,7 +222,7 @@ Tracked in GitHub issues. The high-level milestones are:
 1. WFP bindings — wrap `fwpuclnt.dll` and provider/sublayer/filter primitives via `windows-rs`
 2. Profile I/O — read/write upstream `profile.xml` format
 3. Rules engine — parse rule strings, compile to WFP filter conditions
-4. CLI surface — `-install`, `-install -temp`, `-install -silent`, `-uninstall`
+4. CLI surface — `-install`, `-install -temp`, `-install -silent`, `-uninstall`, `-diagnostics`
 5. GUI — equivalent of the Win32 main window, rules editor, log viewer
 6. Notifications — packet-drop notifications and logging
 7. Internal blocklist — load `profile_internal.sp`

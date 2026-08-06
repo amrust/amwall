@@ -13,7 +13,7 @@
 > **Maintenance.** Regenerate a section when you materially change that subsystem. Line
 > numbers drift — trust the function *names* and *invariants*, verify positions against code.
 > Companion: the visual verification map (which stages are guarded vs. blind) and
-> `feedback_verify_by_running`. Snapshot: amwall @ v2.0.1 (released on main).
+> `feedback_verify_by_running`. Snapshot: amwall @ v2.0.2.
 >
 > **Scope.** This atlas maps the *enforcement spine* (profile/config → WFP filters → drop →
 > prompt). The v2.0.0 network meter (`connections` traffic + `net_meter` ETW) is **observation**,
@@ -84,7 +84,8 @@ parent-console attach and exit codes are the source of truth.
 **Flow:** `main` → `cli::run(argv)`:
 - `parse_args(Vec<String>) -> Command` (pure, unit-tested): `Gui{force_show}` (no args / `--show`),
   `Help` (`-h`/`--help`), `Install{path,temp,silent}`, `Uninstall{silent}`, `SkipUacRegister`/
-  `SkipUacUnregister`, `Error(msg)`. Helpers `parse_install_flags` / `parse_uninstall_flags`.
+  `SkipUacUnregister`, `Diagnostics{path,out}` (v2.0.2), `Error(msg)`. Helpers
+  `parse_install_flags` / `parse_uninstall_flags` / `parse_diagnostics_flags`.
 - `run` dispatches: GUI → `logging::init_debug_log()` then `gui::run(profile_path, force_show)`;
   CLI → `attach_to_parent_console()` first, then the handler.
 - `ensure_admin(silent)`: `IsUserAnAdmin`; if not, `relaunch_elevated()` (ShellExecuteExW `runas`,
@@ -94,6 +95,10 @@ parent-console attach and exit codes are the source of truth.
   persistent = !temp)`.
 - `handle_uninstall`: `skipuac::unregister()` (best-effort — CLI-only, NOT the GUI toggle path;
   finding E) → `WfpEngine::open` → `install::uninstall`.
+- `handle_diagnostics`: `diagnostics::collect` → `render` → stdout **and** a file copy (always
+  `<data_dir>\amwall-diagnostics.txt`, plus `-out <path>`). Deliberately **not** admin-gated, and
+  exits 0 whenever a report was produced — it reports, it does not judge; callers script against
+  the `[verdict]` lines.
 
 **Helpers:** `attach_to_parent_console` (AttachConsole + SetStdHandle re-bind; skips if stderr
 already redirected), `relaunch_elevated`, `current_exe_path_wide`, `build_command_line` (quotes/
@@ -138,6 +143,15 @@ format back (round-trip fidelity). Compiles on every platform (no Win32).
   address_family, apps, is_services, is_enabled, os_version, comment }`. `Direction` (Outbound,
   Inbound, Any, Other(raw)), `Action` (Permit, Block), `AddressFamily` (Ipv4, Ipv6, Other(raw)).
   Unknown enum values preserved as `Other(raw)` → **round-trip never drops data**.
+- **`App::resolved_path()` / `App::resolve(&Path)` (v2.0.2, issue #12).** `App.path` holds the
+  string exactly as stored; `resolved_path` expands `%VAR%` for `File` entries and returns
+  `Service`/`Uwp` entries (service short name / package SID) untouched. **Every consumer that
+  touches the filesystem or the kernel must use `resolved_path`, never `path`** — the app-id blob,
+  the "does not exist" highlight, `Purge unused`, hashing, `WinVerifyTrust`, icon extraction.
+  Identity comparisons (row → profile entry) keep using the raw `path`. Mirrors upstream's
+  `ITEM_APP.original_path` vs `real_path` split (helper.c:645-650). Guarded by a serialize test
+  asserting a `%ProgramFiles%\…` path round-trips byte-for-byte — resolving at parse time instead
+  would rewrite users' profiles into machine-specific absolutes.
 - `profile/parse.rs`: `decode_profile_bytes(&[u8]) -> String` (transparently inflates simplewall's
   compressed "profile2" container via ntdll `RtlDecompressBuffer`; Fable #25), then
   `parse_str(xml) -> Result<Profile, ParseError>` (quick-xml).
@@ -156,12 +170,18 @@ via checkbox) and `install` (consults via `effective_is_enabled`).
   `set(kind,name,enabled,default)` (**stores only DELTAS** — setting back to default removes the
   entry), `has_override`. File `<data_dir>\internal_rules_state.txt`, lines `<kind>:<name>=<bool>`.
 
-### `paths` — where per-user state lives + path-containment policy
+### `paths` — where per-user state lives + path-containment policy + env expansion
 **Job:** decide portable vs installed and route all per-user files; enforce the elevated-process
-path-containment policy (security finding D).
+path-containment policy (security finding D); expand `%VAR%` app paths.
 - `PORTABLE_MARKER = "amwall.ini"`. `is_portable()` (marker next to exe → portable). `exe_dir()`,
   `data_dir()` (portable: exe dir; installed: `%APPDATA%\amwall`). `settings_path`, `profile_path`,
   `default_log_path`, `error_log_path`.
+- **Env expansion (v2.0.2, issue #12):** `expand_env(s)` / `expand_env_with(s, lookup)` (pure,
+  unit-tested; unknown vars stay literal, matching `ExpandEnvironmentStringsW`) and
+  `resolve_app_path(&Path) -> Cow<Path>` (borrows when there's no `%`). **Moved here from
+  `install`**, where it only ever reached rule `apps=` tokens — the profile's own app list never
+  used it, so `%ProgramFiles%\…` entries resolved to nothing. It lives in `paths` now precisely so
+  the enforcement path and the GUI cannot disagree about whether an entry exists.
 - **Containment (pure, unit-tested):** `normalize_lexically` (fold `.`/`..` without FS),
   `path_is_contained(base, cand)` (whole-component, case-insensitive, rejects escaping `..`),
   `real_path_contained` (canonicalizes first — defeats junctions), `is_admin_only_location`.
@@ -226,7 +246,15 @@ but keeps engine/transaction errors **fatal**.
 
 **Apps model:** `parse_apps(Option<&str>) -> AppSet` splits the `apps=` attribute into
 `AppToken::Path` vs `AppToken::Service` (service names get a service-SID security descriptor via
-`service_security_descriptor` → `parse_sid_string`); `looks_like_path`, `expand_env` (`%VAR%`).
+`service_security_descriptor` → `parse_sid_string`); `looks_like_path`, `paths::expand_env` (`%VAR%`).
+
+**Per-app permits and `%VAR%` (v2.0.2, issue #12).** `install_per_app_filters` builds the
+`AppPath` condition from `app.resolved_path()`. Using the stored string meant
+`FwpmGetAppIdFromFileName0` failed on any `%ProgramFiles%\…` entry; the surrounding
+"first layer failed → count as skipped" path (correct for a genuinely uninstalled app) then
+swallowed it, so **the permit was never installed and the app was silently blocked by the
+default-deny catch-all**. The skip log now prints the resolved path alongside the stored one when
+they differ, because that difference is the entire diagnosis.
 
 **Layer selection (pure, now unit-tested):** `layer_guid(dir, family)` → ALE_AUTH_CONNECT_{V4,V6}
 (outbound) / ALE_AUTH_RECV_ACCEPT_{V4,V6} (inbound). `pick_layer_pairs` collapses `Any`→{out,in},
@@ -298,6 +326,26 @@ inline consts (`FWP_E_ALREADY_EXISTS = 0x8032_0009`, …). No `anyhow`/`thiserro
 
 ## Support subsystems
 
+### `diagnostics` — `-diagnostics`, the read-only self-check (v2.0.2)
+**Job:** answer "is this build actually doing the right thing on *this* machine" mechanically,
+in one command, without a GUI and without changing anything. Exists because the failures that
+matter here are invisible from the outside: a per-app permit that silently failed to install looks
+exactly like one that worked.
+- `collect(profile_path) -> Report` (touches the OS) and `render(&Report) -> String` (**pure**, 12
+  tests) are deliberately split so the report's judgements are testable.
+- Sections: `[environment]` · `[elevation]` (incl. what startup *would* do) · `[profile.apps]`
+  (per entry: stored path, resolved path, kind, exists, and whether it would get a permit) ·
+  `[columns]` (every localized header measured in an off-screen DC against the width it is created
+  at) · `[wfp]` (enumerate-only, by `providerKey`; skipped when unelevated) · `[verdict]`.
+- **`[verdict]` distinguishes expansion from existence.** `env_var_paths` fails only when a `%VAR%`
+  did not expand; an entry that expanded correctly but whose file is gone is an uninstalled app,
+  reported as `missing_files = INFO`. Conflating the two would make every profile with a stale
+  entry look broken.
+- Read-only by construction: no filter is added or removed, no profile written. Not admin-gated —
+  requiring elevation would change the very thing being measured. Always saves a copy to
+  `<data_dir>\amwall-diagnostics.txt` because this is a GUI-subsystem binary whose stdout is
+  discarded for an elevated child.
+
 ### `hash` — SHA-256 (BCrypt)
 `sha256_file(path) -> Option<String>`, `sha256_bytes(&[u8]) -> Option<String>`. Used by the
 `use_hashes` tamper-detection path in the GUI (`update_hashes_if_enabled`, `check_hash_drift`) to
@@ -332,12 +380,22 @@ menus, columns). Two state objects:
   (`dns_cache`, `connected_paths`, `categorized_filter_ids`, `amwall_filter_ids`), `apps_sort`, etc.
 
 ### `gui.rs` (root) — `run(profile_path, force_show)`
-DPI-aware (Per-Monitor v2) → COM STA → skipuac silent-relaunch if registered & unelevated → load
+DPI-aware (Per-Monitor v2) → COM STA → skipuac silent-relaunch if registered & unelevated →
+**elevation offer if still unelevated (v2.0.2, issue #12)** → load
 profile (`try_load_profile`/`decode_profile_bytes`) + settings + internal_rules_state → language
 resolution (`install_lcid_from_file` MSI override → `detect_system_locale` → `rust_i18n::set_locale`;
 `match_available_locale`, `lcid_to_available_locale`) → parse bundled `profile_internal.xml` →
 build `App` → `main_window::create` → accelerator message loop. Helpers `wide`, `post_quit`,
-`is_elevated` (cached `OnceLock` — the finding-D fail-safe gate).
+`is_elevated` (cached `OnceLock` — the finding-D fail-safe gate), `detect_system_locale`.
+
+**Runtime elevation (v2.0.2).** `should_offer_elevation(is_admin, skipuac_registered,
+skipuac_failed)` (pure, tested) → `offer_elevation()` (MB_YESNO) → `relaunch_self_elevated()`
+(`ShellExecuteExW "runas"`, **does not wait** — the GUI hands over and exits, unlike the CLI's
+`-install` path which blocks for the child's exit code). Declining is supported: an unelevated
+amwall still runs, with the status bar reporting what's unavailable.
+**The manifest is deliberately left at `asInvoker`** — upstream simplewall ships the same
+(`src/res/manifest.xml:12`), and `requireAdministrator` would force UAC on every launch and make
+the Skip-UAC feature (whose purpose is rights *without* a prompt) meaningless.
 
 ### `main_window.rs` (~7.3k lines, ~200 fns) — window proc + everything on screen
 Highest-risk file (mostly `unsafe` Win32). Grouped by job:
@@ -425,6 +483,27 @@ per-app properties sheet). `first_run_wizard` (`maybe_run_first_run_wizard` — 
 `target_from_source`), `rules_context_menu`, `net_log_context_menu` (`show_network`/`show_log` +
 `NetContextTarget`/`LogContextTarget`). Each returns the picked `IDM_*` back to `main_window`.
 
+**Column sizing:** `column_sizing` (v2.0.2, issue #11) — the single source of truth for what
+columns each tab has and how wide they end up.
+- `ColumnDef { key, prefix, legacy_width, right }` + the four tables (`APPS_COLUMNS`,
+  `RULES_COLUMNS`, `NETWORK_COLUMNS`, `LOG_COLUMNS`) + `columns_for(listview_id)`. Consumed by
+  `configure_listview` (creation), `rescale_listview_columns` (DPI change) **and** `diagnostics`,
+  so a column can't exist in one and be missing from another.
+- `plan_column_widths(header_px, widest_cell_px, max_width, total_width, general_col)` — pure,
+  11 tests. Mirrors `_app_listview_resize` (listview.c:857-920): each column starts at its
+  **header** width, may widen to its widest cell, clamps at `max_width` (158 logical px), and the
+  *general* column takes the remainder floored at `max_width`. `general_col` is 0 everywhere
+  except the Log tab, where column 0 is the fixed-width `#` and column 1 absorbs the slack.
+- `autosize_listview(lv, dpi, spec)` — the Win32 half: measures with the listview's and the
+  header's **own fonts** (a raw DC carries the System font and under-measures), `SM_CXSMICON`
+  spacing, and upstream's early-out once a cell reaches `max_width` (the difference between
+  measuring a dozen rows and thousands on the Log tab).
+- **The bug it replaced:** `LVSCW_AUTOSIZE` (-1) fits a column to its *items* and ignores the
+  header, so any locale whose header words are wider than the data clipped them. Three further
+  defects fixed alongside: the setting defaulted OFF (upstream defaults ON), it ran only on
+  settings-apply and menu-tick (upstream re-fits on tab change, every refill, and post-resize),
+  and there was no clamp or general column at all.
+
 **Listview / chrome:** `listview_groups` (group ids `GROUP_APP_BLOCKED/…/ALLOWED`,
 `GROUP_RULE_ENABLED/DISABLED`; `app_group_id`/`rule_group_id`; header insert/set). `toolbar`
 (`Toolbar`, `create`, layout/height/clip). `icons` (decode embedded Silk PNGs → BGRA → HICON via
@@ -491,6 +570,16 @@ bug and the v1.1.19 catalog bug were both *edges*, not functions).
    policy, kernel enforced another). All confirmed live at v2.0.0 via `release-gate.ps1` Tier 2 +
    `netsh wfp show filters` (loopback filters carry 2 conditions; boottime BLOCKs present).
 
+1b. **Stored path → real file (v2.0.2, issue #12).** `profile.xml` app entry → `App.path` (raw,
+   never rewritten) → `App::resolved_path()` → *everything that touches the OS*: the WFP app-id
+   blob, `is_file()` for the invalid highlight, `Purge unused`, SHA-256 drift, `WinVerifyTrust`,
+   `SHGetFileInfoW` icons, and the lowercased `path_match_key` used to match against OS-reported
+   image paths (connections, traffic rollup, rule cross-references). This edge was missing
+   entirely: one unresolved `%VAR%` produced a silently-unenforced app, a red "does not exist"
+   row, a dead speed/connected highlight, and — worst — classed the entry as purgeable, so
+   `Edit → Purge unused` would delete a freshly migrated profile. `is_app_unused` is now a pure,
+   tested predicate for exactly that reason.
+
 2. **Startup.** `gui::run → build App → main_window::create → on_create → detect_initial_filter_state
    → try_auto_enable_filters_at_startup (if filters_active_persisted) → try_subscribe_events →
    SetTimer(hash-drift, drain, DNS)`. If auto-enable or subscribe fails, the loop is silently dead
@@ -536,6 +625,23 @@ bug and the v1.1.19 catalog bug were both *edges*, not functions).
   standing automated guard.
 - **ETW net-meter payload offsets** (`net_meter::classify_event`) — CLOSED: the id → direction /
   protocol / local-port-offset table is pinned by `classify_event_table`.
+- **Stored-path → real-file resolution** — CLOSED (v2.0.2): `App::resolved_path` + a serialize
+  round-trip test; `-diagnostics` reports the resolution of every entry on the actual machine.
+- **Column sizing** — CLOSED (v2.0.2): `plan_column_widths` is pure and tested; `-diagnostics`
+  measures every localized header against the width its column is created at, so "does this
+  language clip" is now a command rather than a screenshot.
+- **`\device\…` app paths in the profile's `<item>` list** — STILL OPEN. Upstream converts NT
+  device paths to DOS form at parse time (db.c:253, `_r_path_dospathfromnt`); amwall only does the
+  reverse conversion for *drop events* (`nt_path_to_win32`). A profile entry stored in `\device\`
+  form therefore still won't resolve. Not reported by anyone yet, and out of scope for the v2.0.2
+  fix, which was about `%VAR%`.
+- **Whether upstream resolves `%VAR%` for app `<item>` entries at all** — UNKNOWN, and not
+  answerable from the vendored source: `db.c:253` does not call the expander (only the rules'
+  `apps=` path at db.c:468 does), and `_app_isappvalidpath` (helper.c:559-573) demands a `X:\`
+  form. The function that would settle it lives in the `routine` library, which is a separate
+  repository and is not vendored here. amwall fixes it regardless — the enforcement and data-loss
+  consequences stand on their own, and `install.rs` expanding for rule tokens but not for app
+  entries was an internal inconsistency either way.
 
 **v2.0.0 whole-tree audit:** an adversarial re-read of every subsystem (find → verify each finding)
 surfaced 17 real defects — 1 self-introduced regression (the TIMER collision), 3 high (loopback
