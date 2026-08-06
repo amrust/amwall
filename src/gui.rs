@@ -19,6 +19,7 @@ pub mod apps_context_menu;
 pub mod net_log_context_menu;
 pub mod rules_context_menu;
 pub mod connect_dialog;
+pub mod column_sizing;
 pub mod connections;
 pub mod net_meter;
 pub mod dialogs;
@@ -112,7 +113,9 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
     // Skipped when we're already elevated (no need) or when the
     // task isn't registered (toggle was never enabled, or was
     // unenabled).
-    if !admin && crate::skipuac::is_registered() {
+    let skipuac_registered = crate::skipuac::is_registered();
+    let mut skipuac_failed = false;
+    if !admin && skipuac_registered {
         match crate::skipuac::run_via_task() {
             Ok(()) => {
                 eprintln!("amwall: relaunching elevated via skipuac task; exiting unelevated copy");
@@ -122,6 +125,35 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
                 eprintln!(
                     "amwall: skipuac relaunch failed ({e}); continuing as unelevated GUI"
                 );
+                skipuac_failed = true;
+            }
+        }
+    }
+
+    // Still unelevated. Without the admin token the Base Filtering
+    // Engine will not open, so filter management, the WFP event
+    // subscription, connect prompts and the packets log are all dead —
+    // amwall is a firewall that cannot firewall. Offer to restart with
+    // rights rather than leaving the user in a silently crippled window
+    // with only a status-bar hint (issue #12).
+    //
+    // Deliberately NOT solved by putting `requestedExecutionLevel
+    // requireAdministrator` in the manifest: upstream simplewall ships
+    // `asInvoker` (simplewall-master/src/res/manifest.xml:12) and we
+    // match it, because a manifest requirement would force a UAC prompt
+    // on every launch and would make the Skip-UAC feature — whose whole
+    // purpose is to obtain rights *without* a prompt — meaningless.
+    if should_offer_elevation(admin, skipuac_registered, skipuac_failed) && offer_elevation() {
+        match relaunch_self_elevated(force_show) {
+            Ok(()) => {
+                eprintln!("amwall: relaunched elevated; exiting unelevated copy");
+                return ExitCode::from(0);
+            }
+            Err(e) => {
+                // Most often the user dismissed the UAC prompt. Carry
+                // on unelevated — the status bar surfaces what is
+                // unavailable, and File → Exit still works.
+                eprintln!("amwall: elevation declined or failed ({e}); continuing unelevated");
             }
         }
     }
@@ -291,7 +323,7 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
     ExitCode::from(msg.wParam.0 as u8)
 }
 
-fn detect_system_locale() -> Option<String> {
+pub(crate) fn detect_system_locale() -> Option<String> {
     let mut buf = [0u16; 85];
     let len = unsafe {
         windows::Win32::Globalization::GetUserDefaultLocaleName(&mut buf)
@@ -471,5 +503,129 @@ pub(crate) fn wide(s: &str) -> Vec<u16> {
 pub(crate) fn post_quit(code: i32) {
     unsafe {
         PostQuitMessage(code);
+    }
+}
+
+// ---- Runtime elevation (issue #12) ----------------------------------
+
+/// Should startup offer to restart with administrator rights?
+///
+/// Pure so the policy is pinned by tests rather than by reading the
+/// startup sequence. Offer only when we are genuinely stuck: not
+/// already elevated, and the silent Skip-UAC route either is not armed
+/// or has just failed. (When Skip-UAC works the process has already
+/// re-launched and exited, so this is never reached in that case; the
+/// parameter is kept so the decision is total rather than relying on
+/// control flow.)
+pub(crate) fn should_offer_elevation(
+    is_admin: bool,
+    skipuac_registered: bool,
+    skipuac_failed: bool,
+) -> bool {
+    if is_admin {
+        return false;
+    }
+    !skipuac_registered || skipuac_failed
+}
+
+/// Ask the user whether to restart elevated. `true` = yes.
+///
+/// Declining is a supported choice — upstream's manifest is
+/// `asInvoker`, so an unelevated amwall must remain usable (read-only:
+/// the app lists still populate, the window still runs). The user's
+/// permanent escape from this prompt is Settings → Skip UAC, which
+/// elevates silently on every later launch.
+fn offer_elevation() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_ICONWARNING, MB_YESNO, MessageBoxW,
+    };
+    use windows::core::PCWSTR;
+    let title = wide(&rust_i18n::t!("dialog.admin_required"));
+    let body = wide(&rust_i18n::t!("message.elevate_offer_body"));
+    let answer = unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_YESNO | MB_ICONWARNING,
+        )
+    };
+    answer == IDYES
+}
+
+/// Relaunch this exe elevated via the `runas` verb and return once the
+/// child has *started*.
+///
+/// Unlike the CLI's `-install` elevation (`main.rs`), which blocks and
+/// forwards the child's exit code because the caller needs the result,
+/// the GUI hands over and quits immediately — waiting would leave a
+/// dead unelevated process pinned for the entire session.
+fn relaunch_self_elevated(force_show: bool) -> Result<(), String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::UI::Shell::{
+        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
+    let exe_w = wide(&exe.to_string_lossy());
+    let verb = wide("runas");
+    // Preserve `--show` so an explicitly-shown window stays shown; any
+    // other argv means we are not on the GUI path at all.
+    let params = wide(if force_show { "--show" } else { "" });
+
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(exe_w.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+
+    // Fails with ERROR_CANCELLED when the user dismisses the UAC
+    // prompt — the common, non-exceptional case.
+    unsafe { ShellExecuteExW(&mut sei) }
+        .map_err(|e| format!("ShellExecuteExW(runas) failed: {e}"))?;
+
+    if sei.hProcess.0 != 0 {
+        // We do not wait; just release our handle to the child.
+        let _ = unsafe { CloseHandle(sei.hProcess) };
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_offer_elevation;
+
+    #[test]
+    fn elevated_process_is_never_offered_elevation() {
+        assert!(!should_offer_elevation(true, false, false));
+        assert!(!should_offer_elevation(true, true, true));
+    }
+
+    #[test]
+    fn unelevated_without_skipuac_is_offered() {
+        // The reported case: plain double-click, no Skip-UAC task, so
+        // nothing else is going to obtain rights for us.
+        assert!(should_offer_elevation(false, false, false));
+    }
+
+    #[test]
+    fn unelevated_with_working_skipuac_is_not_offered() {
+        // Skip-UAC handles it silently; prompting would be the very
+        // UAC interruption that feature exists to avoid.
+        assert!(!should_offer_elevation(false, true, false));
+    }
+
+    #[test]
+    fn unelevated_with_broken_skipuac_falls_back_to_the_offer() {
+        // Task registered but firing it failed (deleted task, policy).
+        // Without this the user would be stuck unelevated with no
+        // prompt at all.
+        assert!(should_offer_elevation(false, true, true));
     }
 }

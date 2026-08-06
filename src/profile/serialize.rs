@@ -293,6 +293,39 @@ mod tests {
         );
     }
 
+    /// Environment-variable app paths survive a load→save cycle
+    /// **verbatim** (issue #12).
+    ///
+    /// This is the guard on the design decision behind the fix: paths
+    /// are stored raw and resolved only at the point of use. If a
+    /// future change ever resolves at parse time instead, this test
+    /// fails — which is the point, because writing absolute paths back
+    /// would silently rewrite the user's profile and make it
+    /// non-portable between machines and user accounts (`%AppData%`
+    /// and `%USERPROFILE%` differ per user).
+    #[test]
+    fn env_var_app_paths_round_trip_verbatim() {
+        const FIXTURE: &str = "<?xml version=\"1.0\" ?>\n\
+<root timestamp=\"0\" type=\"4\" version=\"5\">\n\
+\t<apps>\n\
+\t\t<item path=\"%ProgramFiles%\\App\\app.exe\" is_enabled=\"true\" />\n\
+\t\t<item path=\"%SystemRoot%\\System32\\svchost.exe\" is_enabled=\"true\" />\n\
+\t\t<item path=\"%USERPROFILE%\\bin\\tool.exe\" is_enabled=\"true\" />\n\
+\t</apps>\n\
+</root>\n";
+        let parsed = parse_str(FIXTURE).expect("parse failed");
+        // Stored form is untouched by parsing.
+        assert_eq!(
+            parsed.apps[0].path.to_string_lossy(),
+            r"%ProgramFiles%\App\app.exe"
+        );
+        let written = to_string(&parsed);
+        assert_eq!(
+            written, FIXTURE,
+            "a variable path was rewritten on save:\n--- written ---\n{written}"
+        );
+    }
+
     /// Empty sections elide entirely. Profile with only timestamp /
     /// type / version → `<root .../>`-style minimal output.
     #[test]

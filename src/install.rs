@@ -1140,8 +1140,15 @@ fn install_per_app_filters(
         }
 
         let conds = match app.kind() {
+            // `resolved_path`, never `path`: a profile imported from
+            // simplewall stores entries like `%ProgramFiles%\App\app.exe`,
+            // and `FwpmGetAppIdFromFileName0` cannot resolve a literal
+            // `%VAR%`. Passing the raw string made the add fail, which
+            // the skip path below then swallowed — so the permit was
+            // never installed and the app was silently blocked by the
+            // default-deny catch-all (issue #12).
             AppKind::File => vec![crate::wfp::condition::FilterCondition::AppPath(
-                app.path.clone(),
+                app.resolved_path().into_owned(),
             )],
             AppKind::Uwp => {
                 // app.path holds the SID string ("S-1-15-2-…").
@@ -1242,10 +1249,24 @@ fn install_per_app_filters(
                     // First layer failed — typically AppPath
                     // resolution (file missing). Treat as
                     // skipped and skip remaining layers.
-                    eprintln!(
-                        "amwall: per-app permit skipped for {}: {e:?}",
-                        app.path.display()
-                    );
+                    //
+                    // Log the resolved path alongside the stored one:
+                    // when they differ, the stored form is a `%VAR%`
+                    // path and knowing what it expanded to is the
+                    // whole diagnosis.
+                    let resolved = app.resolved_path();
+                    if resolved.as_ref() == app.path.as_path() {
+                        eprintln!(
+                            "amwall: per-app permit skipped for {}: {e:?}",
+                            app.path.display()
+                        );
+                    } else {
+                        eprintln!(
+                            "amwall: per-app permit skipped for {} (resolved to {}): {e:?}",
+                            app.path.display(),
+                            resolved.display()
+                        );
+                    }
                     counts.skipped += 1;
                     layer_failed_first = true;
                     break;
@@ -1760,7 +1781,7 @@ fn parse_apps(s: Option<&str>) -> AppSet {
             continue;
         }
         if looks_like_path(tok) {
-            tokens.push(AppToken::Path(PathBuf::from(expand_env(tok))));
+            tokens.push(AppToken::Path(PathBuf::from(crate::paths::expand_env(tok))));
         } else {
             tokens.push(AppToken::Service(tok.to_string()));
         }
@@ -1786,53 +1807,6 @@ fn parse_apps(s: Option<&str>) -> AppSet {
 ///   - `\\server\share\app.exe` (UNC) → path (contains `\`).
 fn looks_like_path(s: &str) -> bool {
     s.contains('\\') || s.contains('/') || s.contains(':')
-}
-
-/// Expand `%VAR%` placeholders against `std::env`. Unknown variables
-/// are emitted literally (`%FOO%`) rather than dropped, matching
-/// Win32 `ExpandEnvironmentStringsW` semantics for unmatched names.
-fn expand_env(s: &str) -> String {
-    expand_env_with(s, |k| std::env::var(k).ok())
-}
-
-fn expand_env_with<F: Fn(&str) -> Option<String>>(s: &str, lookup: F) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        // Collect chars until the closing `%`. If no closing `%`
-        // appears, emit the buffered text literally (with the
-        // leading `%`).
-        let mut name = String::new();
-        let mut closed = false;
-        while let Some(&peek) = chars.peek() {
-            chars.next();
-            if peek == '%' {
-                closed = true;
-                break;
-            }
-            name.push(peek);
-        }
-        if closed {
-            match lookup(&name) {
-                Some(v) => out.push_str(&v),
-                None => {
-                    // Unknown var: emit `%NAME%` literally.
-                    out.push('%');
-                    out.push_str(&name);
-                    out.push('%');
-                }
-            }
-        } else {
-            // Unmatched `%`: emit `%NAME` literally.
-            out.push('%');
-            out.push_str(&name);
-        }
-    }
-    out
 }
 
 /// Decide which `(direction, address-family)` layer pairs a rule's
@@ -2350,35 +2324,8 @@ mod tests {
         assert_eq!(p, vec![PathBuf::from(r"\\server\share\app.exe")]);
     }
 
-    #[test]
-    fn expand_env_with_known_var() {
-        let out = expand_env_with(r"%FOO%\bar", |k| {
-            if k == "FOO" {
-                Some(r"C:\baz".to_string())
-            } else {
-                None
-            }
-        });
-        assert_eq!(out, r"C:\baz\bar");
-    }
-
-    #[test]
-    fn expand_env_with_unknown_var_keeps_literal() {
-        let out = expand_env_with("%missing%/end", |_| None);
-        assert_eq!(out, "%missing%/end");
-    }
-
-    #[test]
-    fn expand_env_with_unmatched_percent_keeps_literal() {
-        let out = expand_env_with("prefix %unmatched", |_| Some("X".into()));
-        assert_eq!(out, "prefix %unmatched");
-    }
-
-    #[test]
-    fn expand_env_with_no_percent_passes_through() {
-        let out = expand_env_with(r"C:\Windows\System32", |_| None);
-        assert_eq!(out, r"C:\Windows\System32");
-    }
+    // `expand_env` moved to `crate::paths` (issue #12) so the GUI and
+    // the enforcement path resolve identically; its tests moved with it.
 
     #[test]
     fn blocklist_action_for_routes_by_name_prefix() {

@@ -160,7 +160,11 @@ impl IconCache {
         if let Some(&idx) = self.inner.borrow().get(path) {
             return idx;
         }
-        let (_, idx) = lookup(path);
+        // Cache on the caller's key (a listview row carries the profile's
+        // *stored* path) but extract the icon from the resolved file —
+        // `SHGetFileInfoW` cannot open a literal `%ProgramFiles%\…`, so
+        // imported entries rendered with no icon at all (issue #12).
+        let (_, idx) = lookup(&crate::profile::App::resolve(path));
         self.inner.borrow_mut().insert(path.to_path_buf(), idx);
         idx
     }

@@ -303,7 +303,11 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             always_on_top: false,
-            autosize_columns: false,
+            // Upstream default is ON (`_r_config_getboolean
+            // (L"AutoSizeColumns", TRUE, …)`, listview.c:812). amwall
+            // shipped it OFF, so localized headers stayed clipped at
+            // their hardcoded English widths — issue #11.
+            autosize_columns: true,
             show_search_bar: true,
             show_filenames_only: true,
             use_dark_theme: false,

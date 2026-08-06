@@ -158,6 +158,35 @@ impl App {
         }
         AppKind::Service
     }
+
+    /// The file this entry actually refers to on this machine.
+    ///
+    /// simplewall profiles routinely store app paths in variable form
+    /// (`%ProgramFiles%\…`, `%SystemRoot%\…`). `path` keeps the stored
+    /// string verbatim so saving never rewrites the user's profile into
+    /// machine-specific absolutes; everything that needs a real file —
+    /// the "does not exist" highlight, `Purge unused`, hashing,
+    /// signature checks, and above all the WFP app-id blob — must go
+    /// through here instead. Issue #12: using `path` directly meant
+    /// those entries resolved to nothing, so their permits were never
+    /// installed and the apps were silently blocked.
+    ///
+    /// Mirrors upstream's `ITEM_APP.original_path` / `real_path` split
+    /// (simplewall-master/src/helper.c:645-650).
+    pub fn resolved_path(&self) -> std::borrow::Cow<'_, std::path::Path> {
+        Self::resolve(&self.path)
+    }
+
+    /// Stand-alone form of [`App::resolved_path`], for callers holding
+    /// a bare path (a listview row, a rule's app token) rather than an
+    /// `App`. Service short names and UWP package SIDs are not
+    /// filesystem paths and are returned untouched.
+    pub fn resolve(path: &std::path::Path) -> std::borrow::Cow<'_, std::path::Path> {
+        match Self::kind_for(path) {
+            AppKind::File => crate::paths::resolve_app_path(path),
+            AppKind::Service | AppKind::Uwp => std::borrow::Cow::Borrowed(path),
+        }
+    }
 }
 
 /// `<rules_config><item ...>` entry — overrides for a named rule
@@ -321,5 +350,53 @@ mod tests {
         // through to Service. Profile.xml shouldn't ship empty
         // paths but the heuristic shouldn't panic on one.
         assert_eq!(App::kind_for(Path::new("")), AppKind::Service);
+    }
+
+    // ---- resolved_path (issue #12) ---------------------------------
+
+    #[test]
+    fn resolve_expands_a_file_paths_variables() {
+        let resolved = App::resolve(Path::new(r"%SystemRoot%\System32\svchost.exe"));
+        assert!(
+            !resolved.to_string_lossy().contains('%'),
+            "expected expansion, got {}",
+            resolved.display()
+        );
+    }
+
+    #[test]
+    fn resolve_leaves_a_service_name_untouched() {
+        // A service short name is not a path; expanding it would be
+        // meaningless and could corrupt a name containing `%`.
+        assert_eq!(App::resolve(Path::new("Dnscache")).as_ref(), Path::new("Dnscache"));
+    }
+
+    #[test]
+    fn resolve_leaves_a_uwp_sid_untouched() {
+        let sid = Path::new("S-1-15-2-1234567890-987654321");
+        assert_eq!(App::resolve(sid).as_ref(), sid);
+    }
+
+    #[test]
+    fn resolved_path_does_not_mutate_the_stored_path() {
+        // The whole design: `path` stays exactly as loaded so saving
+        // never rewrites the user's profile.
+        let app = App {
+            path: PathBuf::from(r"%SystemRoot%\System32\svchost.exe"),
+            is_enabled: true,
+            is_silent: false,
+            is_undeletable: false,
+            timestamp: 0,
+            timer: 0,
+            hash: None,
+            comment: None,
+        };
+        let resolved = app.resolved_path().into_owned();
+        assert_ne!(resolved, app.path, "resolution should have changed something");
+        assert_eq!(
+            app.path,
+            PathBuf::from(r"%SystemRoot%\System32\svchost.exe"),
+            "stored path must be untouched"
+        );
     }
 }

@@ -98,6 +98,91 @@ fn appdata_amwall_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("amwall"))
 }
 
+// ---- Environment-variable expansion (issue #12) ----------------------
+//
+// simplewall profiles routinely store app paths in variable form
+// (`%ProgramFiles%\…`, `%SystemRoot%\…`, `%USERPROFILE%\…`). The stored
+// string is kept verbatim so a load→save round-trip never rewrites the
+// user's profile into absolute, machine-specific paths; instead every
+// consumer that needs a *real* file resolves it here at the point of
+// use. That mirrors upstream's split between `ITEM_APP.original_path`
+// and `ITEM_APP.real_path` (helper.c:645-650).
+//
+// This lives in `paths` rather than `install` because both the
+// enforcement path (app-id blobs) and the GUI (existence highlight,
+// purge, hashing, signatures) need the same answer, and they must never
+// disagree about whether a given entry exists.
+
+/// Expand `%VAR%` placeholders against `std::env`. Unknown variables
+/// are emitted literally (`%FOO%`) rather than dropped, matching
+/// Win32 `ExpandEnvironmentStringsW` semantics for unmatched names.
+pub fn expand_env(s: &str) -> String {
+    expand_env_with(s, |k| std::env::var(k).ok())
+}
+
+/// Testable core of [`expand_env`] — `lookup` stands in for the process
+/// environment so the expansion rules can be pinned without touching
+/// real variables.
+pub(crate) fn expand_env_with<F: Fn(&str) -> Option<String>>(s: &str, lookup: F) -> String {
+    // Fast path: the overwhelming majority of paths have no `%` at all.
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        // Collect chars until the closing `%`. If no closing `%`
+        // appears, emit the buffered text literally (with the
+        // leading `%`).
+        let mut name = String::new();
+        let mut closed = false;
+        while let Some(&peek) = chars.peek() {
+            chars.next();
+            if peek == '%' {
+                closed = true;
+                break;
+            }
+            name.push(peek);
+        }
+        if closed {
+            match lookup(&name) {
+                Some(v) => out.push_str(&v),
+                None => {
+                    // Unknown var: emit `%NAME%` literally.
+                    out.push('%');
+                    out.push_str(&name);
+                    out.push('%');
+                }
+            }
+        } else {
+            // Unmatched `%`: emit `%NAME` literally.
+            out.push('%');
+            out.push_str(&name);
+        }
+    }
+    out
+}
+
+/// Resolve a stored app path to the file the OS will actually open.
+///
+/// Only `%VAR%` expansion today; the input is returned unchanged when
+/// it contains no variables, so the common case allocates nothing new
+/// beyond the borrow. Callers must pass a *file* path — service short
+/// names and UWP package SIDs are not filesystem paths and are handled
+/// by [`crate::profile::App::resolved_path`], which checks the kind
+/// first.
+pub fn resolve_app_path(raw: &Path) -> std::borrow::Cow<'_, Path> {
+    let s = raw.to_string_lossy();
+    if !s.contains('%') {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    std::borrow::Cow::Owned(PathBuf::from(expand_env(&s)))
+}
+
 // ---- Path-containment policy (security audit finding D) -------------
 //
 // When amwall runs elevated it must not act on paths taken from the
@@ -401,5 +486,108 @@ mod tests {
         // Settings can be either `<dir>/amwall.ini` (portable) or
         // `<dir>/settings.txt` (installed) — both still under `dir`.
         assert!(settings_path().starts_with(&dir));
+    }
+
+    // ---- environment-variable expansion (issue #12) ----------------
+    //
+    // Moved here from `install` when the GUI began needing the same
+    // answer as the enforcement path.
+
+    #[test]
+    fn expand_env_with_known_var() {
+        let out = expand_env_with(r"%FOO%\bar", |k| {
+            if k == "FOO" {
+                Some(r"C:\baz".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(out, r"C:\baz\bar");
+    }
+
+    #[test]
+    fn expand_env_with_unknown_var_keeps_literal() {
+        let out = expand_env_with("%missing%/end", |_| None);
+        assert_eq!(out, "%missing%/end");
+    }
+
+    #[test]
+    fn expand_env_with_unmatched_percent_keeps_literal() {
+        let out = expand_env_with("prefix %unmatched", |_| Some("X".into()));
+        assert_eq!(out, "prefix %unmatched");
+    }
+
+    #[test]
+    fn expand_env_with_no_percent_passes_through() {
+        let out = expand_env_with(r"C:\Windows\System32", |_| None);
+        assert_eq!(out, r"C:\Windows\System32");
+    }
+
+    #[test]
+    fn expand_env_handles_the_forms_reported_in_issue_12() {
+        // The exact variable forms from the migration report.
+        let lookup = |k: &str| match k {
+            "SystemDrive" => Some(r"C:".to_string()),
+            "ProgramFiles" => Some(r"C:\Program Files".to_string()),
+            "AppData" => Some(r"C:\Users\u\AppData\Roaming".to_string()),
+            "SystemRoot" => Some(r"C:\Windows".to_string()),
+            "USERPROFILE" => Some(r"C:\Users\u".to_string()),
+            _ => None,
+        };
+        let cases = [
+            (r"%SystemDrive%\tools\t.exe", r"C:\tools\t.exe"),
+            (r"%ProgramFiles%\App\app.exe", r"C:\Program Files\App\app.exe"),
+            (r"%AppData%\App\app.exe", r"C:\Users\u\AppData\Roaming\App\app.exe"),
+            (r"%SystemRoot%\System32\svchost.exe", r"C:\Windows\System32\svchost.exe"),
+            (r"%USERPROFILE%\bin\b.exe", r"C:\Users\u\bin\b.exe"),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(expand_env_with(raw, lookup), want, "input {raw}");
+        }
+    }
+
+    #[test]
+    fn expand_env_var_names_are_case_insensitive_via_the_os() {
+        // simplewall profiles use `%systemroot%` lowercase as often as
+        // `%SystemRoot%`. Windows env lookups are case-insensitive, so
+        // the real `expand_env` handles both; pin that the expander
+        // itself passes the name through verbatim and does not, say,
+        // upper-case or trim it before lookup.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let _ = expand_env_with(r"%systemroot%\x", |k| {
+            seen.borrow_mut().push(k.to_string());
+            None
+        });
+        assert_eq!(seen.into_inner(), vec!["systemroot".to_string()]);
+    }
+
+    #[test]
+    fn resolve_app_path_borrows_when_there_is_nothing_to_expand() {
+        let raw = Path::new(r"C:\Program Files\App\app.exe");
+        let resolved = resolve_app_path(raw);
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(resolved.as_ref(), raw);
+    }
+
+    #[test]
+    fn resolve_app_path_expands_a_real_variable() {
+        // SystemRoot is guaranteed present on any Windows host.
+        let raw = PathBuf::from(r"%SystemRoot%\System32\svchost.exe");
+        let resolved = resolve_app_path(&raw);
+        assert!(
+            !resolved.to_string_lossy().contains('%'),
+            "expected expansion, got {}",
+            resolved.display()
+        );
+        assert!(resolved.to_string_lossy().ends_with(r"System32\svchost.exe"));
+    }
+
+    #[test]
+    fn resolve_app_path_keeps_an_unknown_variable_literal() {
+        // Never silently turn an unresolvable entry into a different
+        // path — leaving it literal keeps it failing visibly.
+        let raw = PathBuf::from(r"%AMWALL_NO_SUCH_VAR_5d9aa%\x.exe");
+        let resolved = resolve_app_path(&raw);
+        assert_eq!(resolved.as_ref(), raw.as_path());
     }
 }

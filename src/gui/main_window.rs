@@ -192,41 +192,12 @@ const REFERENCE_DPI: u32 = 96;
 const LOGICAL_INITIAL_W: i32 = 1024;
 const LOGICAL_INITIAL_H: i32 = 600;
 
-/// Logical column widths per tab type. Real pixel widths are
-/// computed at WM_CREATE time. Negative values in upstream were
-/// "percent-of-rect" hints; we translate them to fixed logical
-/// widths for the M5.2 baseline (M5.4 will revisit auto-sizing).
-// Name, Added (date+time), Path, ↓ Speed, ↑ Speed, Interface.
-const APPS_COL_WIDTHS: &[i32] = &[260, 130, 300, 85, 85, 130];
-const RULES_COL_WIDTHS: &[i32] = &[280, 80, 80]; // Name, Protocol, Direction
-const NETWORK_COL_WIDTHS: &[i32] = &[
-    180, // Name
-    110, // Address (Source)
-    140, // Host (Source)
-    60,  // Port (Source)
-    110, // Address (Destination)
-    140, // Host (Destination)
-    60,  // Port (Destination)
-    70,  // Protocol
-    70,  // State
-    90,  // ↓ Speed
-    90,  // ↑ Speed
-    90,  // Total
-];
-const LOG_COL_WIDTHS: &[i32] = &[
-    50,  // #
-    140, // Name
-    110, // Date
-    110, // Address (Source)
-    120, // Host (Source)
-    60,  // Port (Source)
-    110, // Address (Destination)
-    120, // Host (Destination)
-    60,  // Port (Destination)
-    70,  // Protocol
-    70,  // Direction
-    140, // Filter
-];
+// Per-tab column definitions (localized title, creation-time width,
+// alignment) now live in `gui::column_sizing` — one table shared by the
+// listview creator, the DPI rescaler, and the diagnostics report, so a
+// column added in one place cannot go missing in another. The widths
+// there are the creation-time starting point; upstream-parity
+// auto-sizing re-fits them to the actual header text on first paint.
 
 /// Per-window state pointed to from `GWLP_USERDATA`. Holds the App
 /// (heap-allocated by `gui::run`) plus cached child HWNDs and the
@@ -3437,7 +3408,7 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
     apply_view_settings(hwnd, state);
 
     if autosize {
-        autosize_active_listview_columns(state);
+        autosize_active_listview_columns(state, false);
     }
 }
 
@@ -3645,15 +3616,11 @@ fn on_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
 /// using the new DPI. Mirrors the per-tab column-width tables used
 /// by `configure_listview`.
 fn rescale_listview_columns(lv: HWND, id: i32, dpi: u32) {
-    let widths: &[i32] = match id {
-        IDC_APPS_PROFILE | IDC_APPS_SERVICE | IDC_APPS_UWP => APPS_COL_WIDTHS,
-        IDC_RULES_BLOCKLIST | IDC_RULES_SYSTEM | IDC_RULES_CUSTOM => RULES_COL_WIDTHS,
-        IDC_NETWORK => NETWORK_COL_WIDTHS,
-        IDC_LOG => LOG_COL_WIDTHS,
-        _ => return,
+    let Some(defs) = super::column_sizing::columns_for(id) else {
+        return;
     };
-    for (i, &logical) in widths.iter().enumerate() {
-        let pixels = scale_dpi(logical, dpi);
+    for (i, def) in defs.iter().enumerate() {
+        let pixels = scale_dpi(def.legacy_width, dpi);
         unsafe {
             let _ = SendMessageW(
                 lv,
@@ -3797,6 +3764,12 @@ fn on_tab_change(hwnd: HWND) {
         };
         set_status_text(state.status.get(), 1, &text);
     }
+
+    // Fit the newly-shown tab's columns to its own header text and
+    // content. Upstream does this at the end of its tab-change
+    // handler for the same reason (main.c:2609) — each tab has its
+    // own column set, so sizing only makes sense once it is visible.
+    autosize_active_listview_columns(state, false);
 }
 
 /// `WM_COMMAND` dispatch. `id` is LOWORD(wParam) — the menu /
@@ -5106,15 +5079,20 @@ fn pick_app_row_color(
 ) -> Option<windows::Win32::Foundation::COLORREF> {
     use windows::Win32::Foundation::COLORREF;
     let s = state.app.settings.borrow();
+    // Resolve `%VAR%` before touching the filesystem — a profile
+    // imported from simplewall stores most entries as
+    // `%ProgramFiles%\…`, and testing the literal string marked every
+    // one of them "does not exist" (issue #11's sibling, issue #12).
+    let resolved = crate::profile::App::resolve(path);
     // 1. Invalid (path doesn't exist on disk).
-    if s.highlight_invalid && !path.as_os_str().is_empty() && !path.is_file() {
+    if s.highlight_invalid && !path.as_os_str().is_empty() && !resolved.is_file() {
         return Some(COLORREF(s.color_invalid));
     }
     // 2. Active connection — refreshed by populate_apps_tab.
     //    Compare lowercased: connected_paths is stored lowercase to match
     //    the lowercase profile path (Windows paths are case-insensitive).
     if s.highlight_connection && !path.as_os_str().is_empty() {
-        let lc = std::path::PathBuf::from(path.to_string_lossy().to_ascii_lowercase());
+        let lc = std::path::PathBuf::from(path_match_key(path));
         if state.connected_paths.borrow().contains(&lc) {
             return Some(COLORREF(s.color_connection));
         }
@@ -5159,6 +5137,24 @@ fn pick_app_row_color(
 /// once the worker fills the cache. Verification itself happens
 /// on a background thread fed by `signed_tx` (queued from
 /// `populate_apps_tab`).
+/// Normalized key for matching a stored app path against some *other*
+/// path — an OS-reported image path, or a rule's `apps=` token.
+///
+/// Two normalizations, both load-bearing:
+///   * `%VAR%` expansion (issue #12) — a profile entry stored as
+///     `%ProgramFiles%\App\app.exe` never equalled the OS's
+///     `C:\Program Files\App\app.exe`, so the "talking now" highlight,
+///     the Speed/Interface columns and rule cross-references were all
+///     silently dead for every imported entry.
+///   * lowercasing — the profile stores lowercase while
+///     `process_full_path` returns the OS's real casing, and Windows
+///     paths are case-insensitive.
+fn path_match_key(path: &std::path::Path) -> String {
+    crate::profile::App::resolve(path)
+        .to_string_lossy()
+        .to_ascii_lowercase()
+}
+
 fn path_is_signed_cached(state: &WndState, path: &std::path::Path) -> bool {
     if path.as_os_str().is_empty() {
         return false;
@@ -5250,7 +5246,13 @@ fn verify_signature(
     };
     use windows::core::{GUID, PCWSTR};
 
-    let wpath: Vec<u16> = path
+    // WinVerifyTrust opens the file by name, so it needs the resolved
+    // path — a stored `%ProgramFiles%\…` string would simply fail to
+    // open and every imported app would read as unsigned (issue #12).
+    // Callers still key the cache on the *stored* path, which is what
+    // the listview rows carry.
+    let resolved = crate::profile::App::resolve(path);
+    let wpath: Vec<u16> = resolved
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -6634,7 +6636,9 @@ fn on_toggle(hwnd: HWND, id: u16) {
             populate_apps_tab(state);
         }
         IDM_AUTOSIZECOLUMNS_CHK if new_value => {
-            autosize_active_listview_columns(state);
+            // Explicit user request — apply immediately rather than
+            // waiting for the next refill (upstream's `is_forced`).
+            autosize_active_listview_columns(state, true);
         }
         IDM_LOADONSTARTUP_CHK => {
             // Write or remove the HKCU\...\Run\amwall registry
@@ -7221,30 +7225,61 @@ fn apply_search_bar_visibility(hwnd: HWND, visible: bool) {
     }
 }
 
-/// Auto-size every column on the currently-visible listview to
-/// fit its widest cell. LVSCW_AUTOSIZE = -1.
-fn autosize_active_listview_columns(state: &WndState) {
+/// Auto-size the currently-visible listview's columns to fit both
+/// their header text and their content.
+///
+/// Mirrors upstream `_app_listview_resize` (listview.c:789-925),
+/// including its `is_forced` escape hatch: the View menu item applies
+/// the sizing once even while the persisted setting is off, everything
+/// else respects the setting.
+///
+/// The previous implementation sent `LVSCW_AUTOSIZE`, which fits a
+/// column to its *items* and ignores the header — so a locale whose
+/// header words are wider than the data clipped them (issue #11).
+fn autosize_active_listview_columns(state: &WndState, force: bool) {
+    if !force && !state.app.settings.borrow().autosize_columns {
+        return;
+    }
     let tab = state.tab.get();
     if tab.0 == 0 {
         return;
     }
-    let sel =
-        unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
+    let sel = unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
     let slot = if sel < 0 { 0 } else { sel as usize };
-    let lv = state.listviews[slot].get();
+    autosize_listview_slot(state, slot);
+}
+
+/// Auto-size the listview in `slot` (index into `TAB_LISTVIEW_IDS`).
+/// Callers that already know which tab they just refilled use this
+/// directly so a background tab is not resized on another's behalf.
+fn autosize_listview_slot(state: &WndState, slot: usize) {
+    use super::column_sizing::AutosizeSpec;
+    let Some(lv) = state.listviews.get(slot).map(|c| c.get()) else {
+        return;
+    };
     if lv.0 == 0 {
         return;
     }
-    // Cap at 8 columns — Apps/Rules/Network/Log all fit.
-    for col in 0..12 {
-        unsafe {
-            let _ = SendMessageW(
-                lv,
-                LVM_SETCOLUMNWIDTH,
-                WPARAM(col),
-                LPARAM(-1), // LVSCW_AUTOSIZE
-            );
-        }
+    // The Log tab's column 0 is the `#` counter, so its Name column
+    // (1) absorbs the leftover width instead. Upstream listview.c:855.
+    let spec = match crate::gui::ids::TAB_LISTVIEW_IDS.get(slot) {
+        Some(&id) if id == IDC_LOG => &AutosizeSpec::LOG,
+        _ => &AutosizeSpec::DEFAULT,
+    };
+    super::column_sizing::autosize_listview(lv, state.dpi.get(), spec);
+}
+
+/// Re-fit the listview in `slot` after a repopulate, but only when the
+/// tab is the visible one — resizing a hidden listview measures an
+/// empty client rect and would give the general column a bogus width.
+fn autosize_slot_if_visible(state: &WndState, slot: usize) {
+    let tab = state.tab.get();
+    if tab.0 == 0 {
+        return;
+    }
+    let sel = unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
+    if sel >= 0 && sel as usize == slot && state.app.settings.borrow().autosize_columns {
+        autosize_listview_slot(state, slot);
     }
 }
 
@@ -7535,7 +7570,7 @@ fn update_hashes_if_enabled(state: &WndState) {
         if app.kind() != AppKind::File {
             continue;
         }
-        let Some(current) = crate::hash::sha256_file(&app.path) else {
+        let Some(current) = crate::hash::sha256_file(&app.resolved_path()) else {
             // Unreadable file — skip, leave any existing hash
             // alone. Don't surface as drift (the file might
             // simply have been uninstalled).
@@ -7620,7 +7655,7 @@ fn check_hash_drift(hwnd: HWND, state: &WndState) {
             if app.kind() != AppKind::File {
                 continue;
             }
-            let Some(current) = crate::hash::sha256_file(&app.path) else {
+            let Some(current) = crate::hash::sha256_file(&app.resolved_path()) else {
                 // Unreadable (perhaps uninstalled) — leave it alone;
                 // don't treat a missing file as drift.
                 continue;
@@ -8039,8 +8074,37 @@ fn clamp_rect_to_work_area(rect: &mut RECT) {
 /// `retain(|a| a.path.exists())` silently deleted exactly those. Confirms
 /// first, since it's destructive. Re-installs filters if active so the
 /// kernel forgets the deleted apps' permits.
+/// Should this app be removed by `Edit → Purge unused`?
+///
+/// Split out of `on_purge_unused` as a pure predicate because this is
+/// the most destructive decision in the program and the only one whose
+/// failure mode is silent data loss. Mirrors upstream `_app_isappunused`
+/// (simplewall-master/src/profile.c:1473-1500).
+///
+/// `resolved_exists` must be the filesystem answer for the app's
+/// **resolved** path. Issue #12: testing the stored `%VAR%` string
+/// reported every entry imported from simplewall as missing, and this
+/// predicate then classed them all as purgeable — a single menu click
+/// from deleting a freshly migrated profile.
+fn is_app_unused(
+    is_undeletable: bool,
+    kind: crate::profile::AppKind,
+    is_enabled: bool,
+    is_silent: bool,
+    resolved_exists: bool,
+    referenced_by_rule: bool,
+) -> bool {
+    if is_undeletable {
+        return false; // never purge
+    }
+    // Service / UWP apps have no on-disk file, so they never count as
+    // "missing"; only a File app can be gone.
+    let exists = kind != crate::profile::AppKind::File || resolved_exists;
+    let used = is_enabled || is_silent || referenced_by_rule;
+    !(exists && used)
+}
+
 fn on_purge_unused(hwnd: HWND) {
-    use crate::profile::AppKind;
     use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO};
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
@@ -8053,28 +8117,34 @@ fn on_purge_unused(hwnd: HWND) {
     // under it (case-insensitive, matching Windows path semantics).
     let doomed: Vec<std::path::PathBuf> = {
         let profile = state.app.profile.borrow();
+        // Normalize rule tokens the same way app paths are normalized,
+        // so a rule written with `%ProgramFiles%\…` still protects an
+        // app stored absolutely (and vice versa).
         let referenced: std::collections::HashSet<String> = profile
             .custom_rules
             .iter()
             .filter_map(|r| r.apps.as_deref())
             .flat_map(|apps| apps.split('|'))
-            .map(|tok| tok.trim().to_ascii_lowercase())
+            .map(|tok| tok.trim())
             .filter(|t| !t.is_empty())
+            .map(|tok| path_match_key(std::path::Path::new(tok)))
             .collect();
         profile
             .apps
             .iter()
             .filter(|a| {
-                if a.is_undeletable {
-                    return false; // never purge
-                }
-                // Service / UWP apps have no on-disk file, so they never
-                // count as "missing"; only a File app can be gone.
-                let exists = a.kind() != AppKind::File || a.path.exists();
-                let used = a.is_enabled
-                    || a.is_silent
-                    || referenced.contains(&a.path.to_string_lossy().to_ascii_lowercase());
-                !(exists && used) // unused == purge
+                is_app_unused(
+                    a.is_undeletable,
+                    a.kind(),
+                    a.is_enabled,
+                    a.is_silent,
+                    // `resolved_path`, not `path`: testing the literal
+                    // `%ProgramFiles%\…` string reported every imported
+                    // entry as missing, which classed the whole
+                    // migrated profile as purgeable (issue #12).
+                    a.resolved_path().exists(),
+                    referenced.contains(&path_match_key(&a.path)),
+                )
             })
             .map(|a| a.path.clone())
             .collect()
@@ -8896,83 +8966,45 @@ fn configure_listview(lv: HWND, id: i32, dpi: u32) -> Result<(), String> {
         );
     }
 
-    // Columns. Per upstream messages.c:385-465.
-    match id {
-        IDC_APPS_PROFILE | IDC_APPS_SERVICE | IDC_APPS_UWP => {
-            add_column(lv, 0, &t!("column.name"), scale_dpi(APPS_COL_WIDTHS[0], dpi), false)?;
-            add_column(lv, 1, &t!("column.added"), scale_dpi(APPS_COL_WIDTHS[1], dpi), true)?;
-            add_column(lv, 2, &t!("column.path"), scale_dpi(APPS_COL_WIDTHS[2], dpi), false)?;
-            add_column(lv, 3, &format!("\u{2193} {}", t!("column.speed")), scale_dpi(APPS_COL_WIDTHS[3], dpi), true)?;
-            add_column(lv, 4, &format!("\u{2191} {}", t!("column.speed")), scale_dpi(APPS_COL_WIDTHS[4], dpi), true)?;
-            add_column(lv, 5, &t!("column.interface"), scale_dpi(APPS_COL_WIDTHS[5], dpi), false)?;
+    // Columns. Per upstream messages.c:385-465. The definitions live
+    // in `column_sizing` so the creator and the diagnostics report
+    // measure the same headers.
+    let Some(defs) = super::column_sizing::columns_for(id) else {
+        return Err(format!("unknown listview id {id}"));
+    };
+    for (i, def) in defs.iter().enumerate() {
+        // Creation-time width only — auto-sizing re-fits these to the
+        // localized header on first paint (issue #11).
+        add_column(
+            lv,
+            i as i32,
+            &def.label(),
+            scale_dpi(def.legacy_width, dpi),
+            def.right,
+        )?;
+    }
 
-            // Attach the system small-icon imagelist so per-row
-            // LVITEMW.iImage indices resolve to whatever icon the
-            // shell would draw for that exe in Explorer. Free —
-            // we never own the imagelist, so no destroy needed.
-            let il = super::app_icons::system_small_imagelist();
-            if il != HIMAGELIST::default() {
-                unsafe {
-                    SendMessageW(
-                        lv,
-                        LVM_SETIMAGELIST,
-                        WPARAM(LVSIL_SMALL as usize),
-                        LPARAM(il.0),
-                    );
-                }
-            } else {
-                eprintln!(
-                    "amwall: system small-icon imagelist unavailable; \
-                     listview id {id} won't show per-row icons"
+    if matches!(id, IDC_APPS_PROFILE | IDC_APPS_SERVICE | IDC_APPS_UWP) {
+        // Attach the system small-icon imagelist so per-row
+        // LVITEMW.iImage indices resolve to whatever icon the
+        // shell would draw for that exe in Explorer. Free —
+        // we never own the imagelist, so no destroy needed.
+        let il = super::app_icons::system_small_imagelist();
+        if il != HIMAGELIST::default() {
+            unsafe {
+                SendMessageW(
+                    lv,
+                    LVM_SETIMAGELIST,
+                    WPARAM(LVSIL_SMALL as usize),
+                    LPARAM(il.0),
                 );
             }
+        } else {
+            eprintln!(
+                "amwall: system small-icon imagelist unavailable; \
+                 listview id {id} won't show per-row icons"
+            );
         }
-        IDC_RULES_BLOCKLIST | IDC_RULES_SYSTEM | IDC_RULES_CUSTOM => {
-            add_column(lv, 0, &t!("column.name"), scale_dpi(RULES_COL_WIDTHS[0], dpi), false)?;
-            add_column(lv, 1, &t!("column.protocol"), scale_dpi(RULES_COL_WIDTHS[1], dpi), true)?;
-            add_column(lv, 2, &t!("column.direction"), scale_dpi(RULES_COL_WIDTHS[2], dpi), true)?;
-        }
-        IDC_NETWORK => {
-            let cols: [String; 12] = [
-                t!("column.name").into(),
-                t!("column.address_src").into(),
-                t!("column.host_src").into(),
-                t!("column.port_src").into(),
-                t!("column.address_dst").into(),
-                t!("column.host_dst").into(),
-                t!("column.port_dst").into(),
-                t!("column.protocol").into(),
-                t!("column.state").into(),
-                format!("\u{2193} {}", t!("column.speed")),
-                format!("\u{2191} {}", t!("column.speed")),
-                t!("column.total").into(),
-            ];
-            for (i, label) in cols.iter().enumerate() {
-                let right = matches!(i, 3 | 6 | 7 | 8 | 9 | 10 | 11);
-                add_column(lv, i as i32, label, scale_dpi(NETWORK_COL_WIDTHS[i], dpi), right)?;
-            }
-        }
-        IDC_LOG => {
-            let cols: [String; 12] = [
-                t!("column.index").into(),
-                t!("column.name").into(),
-                t!("column.date").into(),
-                t!("column.address_src").into(),
-                t!("column.host_src").into(),
-                t!("column.port_src").into(),
-                t!("column.address_dst").into(),
-                t!("column.host_dst").into(),
-                t!("column.port_dst").into(),
-                t!("column.protocol").into(),
-                t!("column.direction").into(),
-                t!("column.filter").into(),
-            ];
-            for (i, label) in cols.iter().enumerate() {
-                let right = matches!(i, 0 | 5 | 8);
-                add_column(lv, i as i32, label, scale_dpi(LOG_COL_WIDTHS[i], dpi), right)?;
-            }
-        }
-        other => return Err(format!("unknown listview id {other}")),
     }
 
     // Group view (M5.4d): Apps tabs get the upstream 5-bucket
@@ -9542,7 +9574,7 @@ fn refresh_app_traffic(state: &WndState) {
 /// from `state.app_traffic`. An app with no live connection renders
 /// blank; a connected-but-idle app shows "0 B/s" plus its interface.
 fn set_app_traffic_subitems(state: &WndState, lv: HWND, row: i32, path: &std::path::Path) {
-    let key = path.to_string_lossy().to_ascii_lowercase();
+    let key = path_match_key(path);
     let at = state.app_traffic.borrow();
     if let Some(t) = at.get(&key) {
         set_subitem(lv, row, 3, &super::connections::format_speed(t.download_speed));
@@ -9629,8 +9661,11 @@ fn populate_apps_tab(state: &WndState) {
         .iter()
         .filter_map(|r| r.apps.as_deref())
         .flat_map(|apps| apps.split('|'))
-        .map(|tok| tok.trim().to_ascii_lowercase())
+        .map(|tok| tok.trim())
         .filter(|t| !t.is_empty())
+        // Same normalization as the app side, so a rule written with
+        // `%ProgramFiles%\…` still matches an app stored absolutely.
+        .map(|tok| path_match_key(std::path::Path::new(tok)))
         .collect();
 
     // Sort the iteration order per the user's last column-click
@@ -9648,7 +9683,7 @@ fn populate_apps_tab(state: &WndState) {
         // speed column is active so the ranking tracks changing rates.
         let app_traffic = state.app_traffic.borrow();
         let speed_of = |app: &crate::profile::App, upload: bool| -> u64 {
-            let key = app.path.to_string_lossy().to_ascii_lowercase();
+            let key = path_match_key(&app.path);
             app_traffic
                 .get(&key)
                 .map(|t| if upload { t.upload_speed } else { t.download_speed })
@@ -9730,7 +9765,7 @@ fn populate_apps_tab(state: &WndState) {
             state: LIST_VIEW_ITEM_STATE_FLAGS(state_image_index << 12),
             iGroupId: super::listview_groups::app_group_id_with(
                 app,
-                referenced_by_rule.contains(&app.path.to_string_lossy().to_ascii_lowercase()),
+                referenced_by_rule.contains(&path_match_key(&app.path)),
             ),
             iImage: icon_idx.max(0),
             lParam: LPARAM(orig_idx as isize),
@@ -10361,8 +10396,12 @@ fn repopulate_tab(state: &WndState, slot: usize) {
         5 => populate_user_rules(state),
         6 => populate_connections_tab(state),
         7 => populate_log_tab(state),
-        _ => {}
+        _ => return,
     }
+    // Content changed, so the widest cell may have too. Upstream
+    // re-fits from its listview update helpers for the same reason
+    // (listview.c:458, 524).
+    autosize_slot_if_visible(state, slot);
 }
 
 /// Case-insensitive substring match used by every populator.
@@ -10725,5 +10764,100 @@ mod tests {
     #[test]
     fn scale_dpi_handles_zero_logical() {
         assert_eq!(scale_dpi(0, 192), 0);
+    }
+
+    // ---- purge safety (issue #12) ---------------------------------
+    //
+    // `Edit → Purge unused` is the only irreversible action in the
+    // program, so its predicate is pinned here rather than trusted to
+    // review. The regression these guard against: a profile imported
+    // from simplewall stores `%ProgramFiles%\…` paths, the old code
+    // tested that literal string for existence, every entry read as
+    // missing, and one menu click deleted the lot.
+
+    use crate::profile::AppKind;
+
+    #[test]
+    fn purge_keeps_an_enabled_app_that_exists() {
+        assert!(!is_app_unused(false, AppKind::File, true, false, true, false));
+    }
+
+    #[test]
+    fn purge_removes_a_disabled_app_whose_file_is_gone() {
+        // The genuine "uninstalled app" case purge exists for.
+        assert!(is_app_unused(false, AppKind::File, false, false, false, false));
+    }
+
+    #[test]
+    fn purge_removes_an_existing_but_wholly_unreferenced_app() {
+        assert!(is_app_unused(false, AppKind::File, false, false, true, false));
+    }
+
+    #[test]
+    fn purge_never_touches_an_undeletable_app() {
+        // Undeletable wins over every other signal, including missing.
+        assert!(!is_app_unused(true, AppKind::File, false, false, false, false));
+    }
+
+    #[test]
+    fn purge_never_calls_a_service_or_uwp_entry_missing() {
+        // Their "path" is a service short name / package SID, so there
+        // is no file to find. Only the used/unused test may apply.
+        assert!(!is_app_unused(false, AppKind::Service, true, false, false, false));
+        assert!(!is_app_unused(false, AppKind::Uwp, true, false, false, false));
+    }
+
+    #[test]
+    fn purge_keeps_an_app_only_a_rule_references() {
+        assert!(!is_app_unused(false, AppKind::File, false, false, true, true));
+    }
+
+    #[test]
+    fn purge_keeps_a_silent_app() {
+        assert!(!is_app_unused(false, AppKind::File, false, true, true, false));
+    }
+
+    #[test]
+    fn purge_spares_an_enabled_env_var_app_whose_resolved_file_exists() {
+        // THE issue-#12 regression. `resolved_exists = true` is what
+        // the caller now passes for `%ProgramFiles%\App\app.exe` when
+        // the real file is present; before the fix it passed `false`
+        // and this returned "purge me".
+        assert!(
+            !is_app_unused(false, AppKind::File, true, false, true, false),
+            "an enabled app whose resolved file exists must never be purged"
+        );
+    }
+
+    // ---- path matching (issue #12) --------------------------------
+
+    #[test]
+    fn path_match_key_lowercases() {
+        assert_eq!(
+            path_match_key(std::path::Path::new(r"C:\Program Files\App\App.EXE")),
+            r"c:\program files\app\app.exe"
+        );
+    }
+
+    #[test]
+    fn path_match_key_expands_before_lowercasing() {
+        // A stored variable path and the OS's real path must collapse
+        // to the same key, or the "talking now" highlight and the
+        // Speed columns stay dark for every imported entry.
+        let stored = path_match_key(std::path::Path::new(r"%SystemRoot%\System32\svchost.exe"));
+        assert!(!stored.contains('%'), "expected expansion, got {stored}");
+        assert!(stored.ends_with(r"\system32\svchost.exe"));
+    }
+
+    #[test]
+    fn path_match_key_leaves_service_names_alone() {
+        // No separators → Service kind → not a filesystem path.
+        assert_eq!(path_match_key(std::path::Path::new("Dnscache")), "dnscache");
+    }
+
+    #[test]
+    fn path_match_key_leaves_uwp_sids_alone() {
+        let sid = "S-1-15-2-1234567890-1234567890";
+        assert_eq!(path_match_key(std::path::Path::new(sid)), sid.to_ascii_lowercase());
     }
 }

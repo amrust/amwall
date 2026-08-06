@@ -208,6 +208,7 @@ update_available_body = "amwall %{latest} is available (you're running %{current
 update_uptodate_body = "Current version: %{current}\nLatest version: %{latest}\n\nAlready up to date."
 update_error_body = "Could not reach GitHub to check for updates.\n\nPossible causes: no internet, the firewall blocking amwall from outbound HTTPS, or GitHub's API rate limit (60 anonymous requests per hour). Try again later."
 admin_required_body = "Filter management requires Administrator privileges.\n\nClose amwall and re-launch from an elevated shell\n(right-click → \"Run as administrator\")."
+elevate_offer_body = "amwall needs Administrator privileges to manage the Windows firewall.\n\nWithout them it cannot enable or disable filters, receive connection events, show connection prompts, or write the packets log.\n\nRestart amwall as Administrator now?\n\n(Tip: turn on Settings → \"Skip User Account Control prompt warning\" to elevate silently on future launches.)"
 delete_rule_confirm = "Delete the rule \"%{name}\"?"
 bulk_delete_confirm = "Remove %{count} entries from the profile?\n\nThis can't be undone."
 filter_update_failed = "amwall could not update the Windows firewall filters, so the previously installed rules are still active and may not match your latest change. Try Disable then Enable filters, or restart amwall."
