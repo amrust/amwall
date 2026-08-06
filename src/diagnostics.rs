@@ -103,6 +103,11 @@ pub struct Report {
     pub data_dir: String,
     pub profile_path: String,
     pub profile_status: String,
+    /// Did the profile actually load? Kept separate from
+    /// `apps.is_empty()` so the verdict can distinguish "checked, found
+    /// nothing to check" from "could not look" — reporting the second
+    /// as the first is a false all-clear, which is worse than no report.
+    pub profile_loaded: bool,
     pub locale: String,
     pub dpi: u32,
     pub skipuac_registered: bool,
@@ -133,7 +138,7 @@ pub fn collect(profile_path: Option<PathBuf>) -> Report {
     // measurements below reflect the headers this user actually sees.
     let locale = resolve_locale();
 
-    let (apps, profile_status) = collect_apps(&profile_path);
+    let (apps, profile_status, profile_loaded) = collect_apps(&profile_path);
     let dpi = system_dpi();
     let skipuac_registered = crate::skipuac::is_registered();
 
@@ -147,6 +152,7 @@ pub fn collect(profile_path: Option<PathBuf>) -> Report {
         data_dir: crate::paths::data_dir().display().to_string(),
         profile_path: profile_path.display().to_string(),
         profile_status,
+        profile_loaded,
         locale,
         dpi,
         skipuac_registered,
@@ -183,19 +189,26 @@ fn resolve_locale() -> String {
     }
 }
 
-fn collect_apps(profile_path: &Path) -> (Vec<AppRow>, String) {
+fn collect_apps(profile_path: &Path) -> (Vec<AppRow>, String, bool) {
     use crate::profile::AppKind;
     let bytes = match std::fs::read(profile_path) {
         Ok(b) => b,
-        Err(e) => return (Vec::new(), format!("unreadable ({e})")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                Vec::new(),
+                "no profile at this path yet (amwall has not saved one here)".to_string(),
+                false,
+            );
+        }
+        Err(e) => return (Vec::new(), format!("unreadable ({e})"), false),
     };
     let text = match crate::profile::decode_profile_bytes(&bytes) {
         Ok(t) => t,
-        Err(e) => return (Vec::new(), format!("decode failed ({e:?})")),
+        Err(e) => return (Vec::new(), format!("decode failed ({e:?})"), false),
     };
     let profile = match crate::profile::parse_str(&text) {
         Ok(p) => p,
-        Err(e) => return (Vec::new(), format!("parse failed ({e:?})")),
+        Err(e) => return (Vec::new(), format!("parse failed ({e:?})"), false),
     };
     let rows = profile
         .apps
@@ -221,7 +234,7 @@ fn collect_apps(profile_path: &Path) -> (Vec<AppRow>, String) {
         })
         .collect::<Vec<_>>();
     let status = format!("ok ({} entries)", rows.len());
-    (rows, status)
+    (rows, status, true)
 }
 
 /// Measure every tab's localized headers in an off-screen DC using the
@@ -514,10 +527,23 @@ fn render_verdict(s: &mut String, r: &Report) {
     // points at an uninstalled app is normal and is reported below as
     // information, not as a failure.
     let var_apps: Vec<&AppRow> = r.apps.iter().filter(|a| a.used_variables).collect();
-    if var_apps.is_empty() {
+    if !r.profile_loaded {
+        // NOT "N/A". Nothing was checked, and saying so plainly matters:
+        // a clean-looking line here would be a false all-clear.
         let _ = writeln!(
             s,
-            "env_var_paths        = N/A   (this profile has no %VAR% app paths to resolve)"
+            "env_var_paths        = UNCHECKED  (no profile was read: {})",
+            r.profile_status
+        );
+        let _ = writeln!(
+            s,
+            "    point -diagnostics at a profile to check it, e.g.\n\
+             \x20     amwall.exe -diagnostics \"C:\\path\\to\\profile.xml\""
+        );
+    } else if var_apps.is_empty() {
+        let _ = writeln!(
+            s,
+            "env_var_paths        = N/A   (profile read; it has no %VAR% app paths to resolve)"
         );
     } else {
         let stuck: Vec<&&AppRow> = var_apps
@@ -616,6 +642,7 @@ mod tests {
             data_dir: r"C:\data".into(),
             profile_path: r"C:\data\profile.xml".into(),
             profile_status: "ok".into(),
+            profile_loaded: true,
             locale: "en".into(),
             dpi: 96,
             skipuac_registered: false,
@@ -771,6 +798,25 @@ mod tests {
             true,
         );
         assert!(render(&r).contains("env_var_paths        = N/A"));
+    }
+
+    #[test]
+    fn an_unread_profile_reports_unchecked_not_not_applicable() {
+        // The false-all-clear guard. With no profile to read, nothing
+        // about %VAR% resolution has been established, and the report
+        // must not imply otherwise — "N/A" reads as "fine", "UNCHECKED"
+        // does not.
+        let mut r = base_report(vec![], vec![], true);
+        r.profile_loaded = false;
+        r.profile_status = "no profile at this path yet".into();
+        let out = render(&r);
+        assert!(out.contains("env_var_paths        = UNCHECKED"), "{out}");
+        assert!(
+            !out.contains("env_var_paths        = N/A"),
+            "an unread profile must never render as N/A:\n{out}"
+        );
+        // And it must tell the reader how to actually check one.
+        assert!(out.contains("-diagnostics \"C:\\path\\to\\profile.xml\""), "{out}");
     }
 
     #[test]

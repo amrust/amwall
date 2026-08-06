@@ -157,3 +157,97 @@ fn default_deny_actually_blocks_outbound() {
         "network did not recover after uninstall — cleanup may be incomplete"
     );
 }
+
+/// A profile app stored in `%VAR%` form must produce a real per-app
+/// permit in the kernel — issue #12.
+///
+/// This is the assertion `cargo test` structurally cannot make. The fix
+/// changed which string reaches `FwpmGetAppIdFromFileName0`, and that
+/// call only exists on a live Base Filtering Engine. Before the fix the
+/// literal `%SystemRoot%\…` failed to resolve, `install_per_app_filters`
+/// counted the app as skipped, and the app was left to the default-deny
+/// catch-all with nothing in the UI to say so — a green gate triad the
+/// entire time.
+///
+/// Written as a **delta** (guardrail #1) rather than an absolute count:
+/// what matters is that the variable form installs exactly as many
+/// filters as the absolute form, and strictly more than an empty
+/// profile. Absolute counts would drift with every change to the
+/// default-deny set.
+#[test]
+#[ignore = "requires elevated shell + live BFE — installs real filters"]
+fn env_var_app_path_installs_the_same_permits_as_an_absolute_path() {
+    // %SystemRoot%\System32\svchost.exe exists on every Windows box and
+    // is what a real simplewall profile stores for a service host.
+    let system_root = std::env::var("SystemRoot").expect("SystemRoot must be set on Windows");
+    let absolute = format!(r"{system_root}\System32\svchost.exe");
+    assert!(
+        std::path::Path::new(&absolute).is_file(),
+        "test precondition: {absolute} must exist"
+    );
+
+    let engine = WfpEngine::open().expect("open engine (are you elevated?)");
+    let _ = engine.cleanup_provider(&PROVIDER_KEY);
+    let guard = ProviderGuard { engine: &engine };
+
+    let install_and_count = |apps_xml: &str| -> u32 {
+        let xml = format!(
+            r#"<?xml version="1.0" ?><root timestamp="0" type="4" version="5">{apps_xml}<rules_custom/></root>"#
+        );
+        let profile = amwall::profile::parse_str(&xml).expect("fixture profile parses");
+        // Non-persistent: these filters die with this process.
+        let report = install::install_profile(&engine, &profile, false)
+            .expect("install should succeed");
+        let added = report.filters_added;
+        // Clear between measurements so each count is independent.
+        let _ = engine.cleanup_provider(&PROVIDER_KEY);
+        added
+    };
+
+    let empty = install_and_count("");
+    let with_var = install_and_count(
+        r#"<apps><item path="%SystemRoot%\System32\svchost.exe" is_enabled="true" /></apps>"#,
+    );
+    let with_abs = install_and_count(&format!(
+        r#"<apps><item path="{absolute}" is_enabled="true" /></apps>"#
+    ));
+    // An app path that cannot resolve at all: the genuine "uninstalled
+    // app" case, which must still be skipped rather than fail the
+    // install. This is the negative control that stops the test passing
+    // for the wrong reason (e.g. if every path silently "worked").
+    let with_bogus = install_and_count(
+        r#"<apps><item path="%AMWALL_NO_SUCH_VAR_5d9aa%\ghost.exe" is_enabled="true" /></apps>"#,
+    );
+
+    eprintln!(
+        "filters_added: empty={empty} var={with_var} abs={with_abs} bogus={with_bogus}"
+    );
+
+    assert_eq!(
+        with_var, with_abs,
+        "a %VAR% app path must install exactly the same filters as its \
+         resolved absolute equivalent — got {with_var} vs {with_abs} \
+         (this is the issue #12 regression: the variable form resolved \
+         to nothing and its permit was silently skipped)"
+    );
+    assert!(
+        with_var > empty,
+        "the per-app permit was not installed at all: a profile with one \
+         enabled app added {with_var} filters, the same as an empty \
+         profile ({empty})"
+    );
+    assert_eq!(
+        with_bogus, empty,
+        "an unresolvable app path must add no per-app filters (it should \
+         be skipped, not silently permitted) — got {with_bogus} vs {empty}"
+    );
+
+    drop(guard);
+    let leftover = engine
+        .cleanup_provider(&PROVIDER_KEY)
+        .expect("final cleanup_provider");
+    assert!(
+        !leftover.provider_deleted,
+        "provider should already be gone after the guard cleaned up"
+    );
+}
