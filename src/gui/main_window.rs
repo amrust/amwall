@@ -1187,6 +1187,23 @@ unsafe extern "system" fn wnd_proc(
             if wparam.0 == TIMER_CONNECTIONS_REFRESH {
                 if let Some(state) = unsafe { state_ref(hwnd) } {
                     populate_connections_tab(state);
+                    // Connections is the ONLY tab that does a full
+                    // refill (DELETEALLITEMS + re-insert) from a timer,
+                    // calling its populator directly rather than via
+                    // on_tab_change / repopulate_tab — so it is the only
+                    // one that never reaches the jiggle those paths run.
+                    //
+                    // Re-inserting items invalidates comctl32's
+                    // LVS_EX_DOUBLEBUFFER cache but does not make it
+                    // repaint; see the painting history recorded on the
+                    // WM_USER_SIGNED_REFRESH handler, where
+                    // InvalidateRect(bErase=false) and RedrawWindow with
+                    // RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW were both
+                    // measured too weak. Re-insert THEN jiggle is the
+                    // combination that actually paints. Without this the
+                    // tab looks right for two seconds after you switch
+                    // to it and then goes stale until moused over.
+                    jiggle_active_listview(state, 6);
                 }
             } else if wparam.0 == TIMER_APPS_REFRESH {
                 if let Some(state) = unsafe { state_ref(hwnd) } {
@@ -7267,6 +7284,42 @@ fn autosize_listview_slot(state: &WndState, slot: usize) {
         _ => &AutosizeSpec::DEFAULT,
     };
     super::column_sizing::autosize_listview(lv, state.dpi.get(), spec);
+
+    // Re-lay-out repaint. `LVM_SETCOLUMNWIDTH` moves the header's
+    // dividers and reflows every row, but under comctl6 that leaves the
+    // header and rows drawn-but-stale until the mouse passes over them
+    // and hot-tracking invalidates each element — the exact M5.9.5
+    // ghosting `force_listview_repaint` exists to cure.
+    //
+    // This bites specifically because sizing runs LAST: `on_tab_change`
+    // does its own jiggle when it shows the listview, long before the
+    // columns are measured, so without repairing here the freshly-shown
+    // tab paints blank until moused over.
+    jiggle_active_listview(state, slot);
+}
+
+/// Run the +1px `MoveWindow` jiggle on the listview in `slot`.
+///
+/// The one repaint primitive this codebase has found to reliably pierce
+/// comctl32's `LVS_EX_DOUBLEBUFFER` cache after the item array or the
+/// column layout has been mutated. Cheap — two `MoveWindow` calls that
+/// net to the listview's existing rect — but it must follow the
+/// mutation, not precede it.
+fn jiggle_active_listview(state: &WndState, slot: usize) {
+    use windows::Win32::UI::WindowsAndMessaging::GetParent;
+    let Some(lv) = state.listviews.get(slot).map(|c| c.get()) else {
+        return;
+    };
+    if lv.0 == 0 {
+        return;
+    }
+    let parent = unsafe { GetParent(lv) };
+    if parent.0 == 0 {
+        return;
+    }
+    if let Some((x, y, w, h)) = current_lv_rect_in_parent(lv, parent) {
+        force_listview_repaint(lv, x, y, w, h);
+    }
 }
 
 /// Re-fit the listview in `slot` after a repopulate, but only when the
