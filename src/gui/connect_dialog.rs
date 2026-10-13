@@ -226,7 +226,8 @@ fn create_prompt(owner: HWND, request: &host::Request) -> HWND {
     }
     unsafe {
         let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-        (&*(raw as *const DialogState)).shown_at.set(Instant::now());
+        let state = &*(raw as *const DialogState);
+        state.shown_at.set(Instant::now());
     }
     // SW_SHOWNA = "show without activating" — combined with the
     // template's WS_EX_NOACTIVATE, this is what keeps focus on

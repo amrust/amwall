@@ -1689,7 +1689,7 @@ mod tests {
                     hit.flags.0 & LVHT_EX_GROUP_COLLAPSE.0 != 0
                 })
                 .expect("native group collapse target");
-            let point = LPARAM(((y as u32) << 16 | x as u32) as isize);
+            let point = LPARAM((((y as u32) << 16) | x as u32) as isize);
             let click = || {
                 // MK_LBUTTON = 1 (Win32 SystemServices modifier flags).
                 // Native group tracking pumps messages inside LBUTTONDOWN;
