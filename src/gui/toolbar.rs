@@ -28,7 +28,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     BTNS_AUTOSIZE, BTNS_BUTTON, BTNS_SHOWTEXT, CCS_NODIVIDER, I_IMAGENONE, TBBUTTON,
     TBSTATE_ENABLED, TBSTYLE_EX_DOUBLEBUFFER, TBSTYLE_EX_MIXEDBUTTONS, TBSTYLE_FLAT, TBSTYLE_LIST,
-    TBSTYLE_TOOLTIPS, TBSTYLE_TRANSPARENT, TBSTYLE_WRAPABLE, TB_ADDBUTTONS, TB_AUTOSIZE,
+    TBSTYLE_TOOLTIPS, TBSTYLE_WRAPABLE, TB_ADDBUTTONS, TB_AUTOSIZE,
     TB_BUTTONSTRUCTSIZE, TB_SETEXTENDEDSTYLE, TOOLBARCLASSNAMEW, WC_EDITW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -101,73 +101,33 @@ pub fn toolbar_layout_height(toolbar: HWND) -> i32 {
     max_bottom.max(1)
 }
 
-/// Clip the toolbar's painted area to a rect of (0, 0, w, h) so
-/// the comctl32-internal trailing padding (~16 px) and any
-/// inter-row gap caused by separator-stretched row heights
-/// becomes transparent. The toolbar's logical window rect stays
-/// at whatever it auto-grew to during WM_SIZE — only painting is
-/// constrained.
-pub fn clip_to_content(toolbar: HWND, w: i32, h: i32) {
-    use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
-    if toolbar.0 == 0 || w <= 0 || h <= 0 {
-        return;
-    }
-    let hrgn = unsafe { CreateRectRgn(0, 0, w, h) };
-    if hrgn.0 == 0 {
-        return;
-    }
-    // SetWindowRgn takes ownership of the region — don't free it
-    // ourselves. bRedraw=true so the clipped area repaints.
+/// Lay out native wrapping buttons, then use their measured extent as the
+/// toolbar's real height. CCS_NORESIZE/NOPARENTALIGN keep ownership of the
+/// window rectangle with the parent; no clipping region is needed.
+pub fn layout(toolbar: HWND, width: i32) -> i32 {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, MoveWindow};
+    let mut rect = RECT::default();
     unsafe {
-        SetWindowRgn(toolbar, hrgn, true);
+        let _ = GetClientRect(toolbar, &mut rect);
+        let _ = MoveWindow(toolbar, 0, 0, width.max(0), rect.bottom.max(1), false);
+        SendMessageW(toolbar, TB_AUTOSIZE, WPARAM(0), LPARAM(0));
     }
+    let height = toolbar_layout_height(toolbar);
+    unsafe { let _ = MoveWindow(toolbar, 0, 0, width.max(0), height, true); }
+    height
 }
-
 
 fn create_toolbar(parent: HWND) -> Result<HWND, String> {
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null())
             .map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
-        // Style cocktail mirrors upstream:
-        //   FLAT       — flat (Office-style) buttons, no 3-D border
-        //   LIST       — text right-of-icon (we have no icon yet, so text is
-        //                button-shaped; M5.9 will swap in the imagelist)
-        //   TRANSPARENT — let the rebar's gradient show through
-        //   TOOLTIPS    — tooltip support (TBN_GETINFOTIP)
-        //   AUTOSIZE    — buttons size to their content
-        //   CCS_NOPARENTALIGN + NODIVIDER — defer positioning to the rebar
-        let style = WS_CHILD
-            | WS_VISIBLE
-            | WS_CLIPSIBLINGS
-            // CCS_NOPARENTALIGN intentionally NOT set: with it,
-            // the toolbar refuses to be repositioned by its parent
-            // (the rebar), so it keeps its create-time width and
-            // never sees a "you're now narrower" WM_SIZE — which
-            // means TBSTYLE_WRAPABLE never fires. Without it, the
-            // rebar sizes the toolbar to the band's width on
-            // resize and the toolbar wraps its buttons to multiple
-            // rows when needed.
-            | WINDOW_STYLE(CCS_NODIVIDER as u32)
-            | WINDOW_STYLE(TBSTYLE_FLAT)
-            | WINDOW_STYLE(TBSTYLE_LIST)
-            | WINDOW_STYLE(TBSTYLE_TRANSPARENT)
-            | WINDOW_STYLE(TBSTYLE_TOOLTIPS)
-            // TBSTYLE_AUTOSIZE intentionally NOT set: it makes the
-            // toolbar's WM_SIZE handler grow the window back to
-            // its preferred (rows × 2 - 1 with our separators)
-            // height after we MoveWindow it to a smaller value,
-            // leaving an extra blank row below the wrapped
-            // buttons. Without AUTOSIZE the size we set sticks
-            // and the toolbar paints inside whatever rect we give.
-            // TBSTYLE_WRAPABLE: when the band is too narrow for
-            // all buttons to fit on a single line, the toolbar
-            // wraps the overflow buttons to a second (third, …)
-            // line. Combined with RBBS_VARIABLEHEIGHT on the
-            // band, the rebar's reported height grows to match,
-            // and main_window's on_size reads that height to
-            // shift the tab control down accordingly. Resizing
-            // wider snaps the wrapped buttons back up.
-            | WINDOW_STYLE(TBSTYLE_WRAPABLE);
+        // Parent owns placement; the toolbar owns button wrapping. These
+        // documented styles stop WM_SIZE from fighting the parent's height.
+        let style = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS
+            | WINDOW_STYLE((CCS_NODIVIDER | windows::Win32::UI::Controls::CCS_NORESIZE
+                | windows::Win32::UI::Controls::CCS_NOPARENTALIGN) as u32)
+            | WINDOW_STYLE(TBSTYLE_FLAT | TBSTYLE_LIST | TBSTYLE_TOOLTIPS | TBSTYLE_WRAPABLE);
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             TOOLBARCLASSNAMEW,

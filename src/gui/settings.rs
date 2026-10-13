@@ -129,6 +129,10 @@ pub struct Settings {
     pub always_on_top: bool,
     /// View → Autosize columns.
     pub autosize_columns: bool,
+    /// Per-tab widths and display order. Missing entries use first-show sizing.
+    pub column_layouts: [Option<super::column_layout::ColumnLayout>; 8],
+    /// Logical columns the user resized explicitly; other columns keep fitting content.
+    pub manual_columns: [Vec<bool>; 8],
     /// View → Show search bar.
     pub show_search_bar: bool,
     /// View → Show filenames only.
@@ -203,15 +207,6 @@ pub struct Settings {
     pub use_certificates: bool,
     pub use_hashes: bool,
     pub use_network_resolution: bool,
-    /// Auto-allow Microsoft-signed binaries on first connection
-    /// without prompting. New feature beyond upstream simplewall
-    /// — addresses the longstanding upstream issue where users
-    /// have to Allow svchost / Experience Host / etc. one by
-    /// one. When on, the auto-catalog flow checks the leaf
-    /// signature subject; if it starts with "Microsoft ", the
-    /// app is added with is_enabled=true (Allowed) and the
-    /// connect prompt is skipped.
-    pub auto_allow_microsoft_signed: bool,
 
     // ---- Settings → Highlighting (row colors, Fable #31) ----
     // Per-category enable flags + packed COLORREF colors, mirroring
@@ -308,6 +303,8 @@ impl Default for Settings {
             // shipped it OFF, so localized headers stayed clipped at
             // their hardcoded English widths — issue #11.
             autosize_columns: true,
+            column_layouts: Default::default(),
+            manual_columns: Default::default(),
             show_search_bar: true,
             show_filenames_only: true,
             use_dark_theme: false,
@@ -357,7 +354,6 @@ impl Default for Settings {
             // explicit off in settings.txt is still honoured.
             use_hashes: true,
             use_network_resolution: false,
-            auto_allow_microsoft_signed: false,
             // Match upstream simplewall's defaults: Spy = Block (the
             // WindowsSpyBlocker telemetry blocks are the headline
             // reason most users install simplewall in the first place);
@@ -434,10 +430,7 @@ impl Settings {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return s,
             Err(e) => {
-                eprintln!(
-                    "amwall: settings: read failed for {}: {e}",
-                    path.display()
-                );
+                eprintln!("amwall: settings: read failed for {}: {e}", path.display());
                 return s;
             }
         };
@@ -504,6 +497,18 @@ impl Settings {
         buf.push_str("# amwall settings — edited by hand at your own risk\n");
         kv(&mut buf, "always_on_top", self.always_on_top);
         kv(&mut buf, "autosize_columns", self.autosize_columns);
+        for (slot, key) in super::column_layout::VIEW_KEYS.iter().enumerate() {
+            if let Some(layout) = &self.column_layouts[slot] {
+                kv_str(&mut buf, &format!("columns_{key}"), &layout.encode());
+            }
+            let manual = self.manual_columns[slot]
+                .iter()
+                .enumerate()
+                .filter_map(|(col, &fixed)| fixed.then_some(col.to_string()))
+                .collect::<Vec<_>>()
+                .join(",");
+            kv_str(&mut buf, &format!("manual_columns_{key}"), &manual);
+        }
         kv(&mut buf, "show_search_bar", self.show_search_bar);
         kv(&mut buf, "show_filenames_only", self.show_filenames_only);
         kv(&mut buf, "use_dark_theme", self.use_dark_theme);
@@ -538,15 +543,22 @@ impl Settings {
             self.rule_allow_windows_update,
         );
         kv(&mut buf, "use_stealth_mode", self.use_stealth_mode);
-        kv(&mut buf, "install_boottime_filters", self.install_boottime_filters);
-        kv(&mut buf, "filters_active_persisted", self.filters_active_persisted);
-        kv(&mut buf, "use_certificates", self.use_certificates);
-        kv(&mut buf, "use_hashes", self.use_hashes);
-        kv(&mut buf, "use_network_resolution", self.use_network_resolution);
         kv(
             &mut buf,
-            "auto_allow_microsoft_signed",
-            self.auto_allow_microsoft_signed,
+            "install_boottime_filters",
+            self.install_boottime_filters,
+        );
+        kv(
+            &mut buf,
+            "filters_active_persisted",
+            self.filters_active_persisted,
+        );
+        kv(&mut buf, "use_certificates", self.use_certificates);
+        kv(&mut buf, "use_hashes", self.use_hashes);
+        kv(
+            &mut buf,
+            "use_network_resolution",
+            self.use_network_resolution,
         );
         kv(&mut buf, "highlight_invalid", self.highlight_invalid);
         kv(&mut buf, "highlight_special", self.highlight_special);
@@ -589,13 +601,55 @@ impl Settings {
         kv(&mut buf, "exclude_blocklist", self.exclude_blocklist);
         kv(&mut buf, "exclude_custom", self.exclude_custom);
         kv(&mut buf, "exclude_stealth", self.exclude_stealth);
-        kv(&mut buf, "exclude_classify_allow", self.exclude_classify_allow);
+        kv(
+            &mut buf,
+            "exclude_classify_allow",
+            self.exclude_classify_allow,
+        );
         kv(&mut buf, "first_run_done", self.first_run_done);
         std::fs::write(path, buf)
     }
 }
 
 fn apply_kv(s: &mut Settings, key: &str, value: &str) {
+    if let Some(view) = key.strip_prefix("manual_columns_") {
+        if let Some(slot) = super::column_layout::VIEW_KEYS
+            .iter()
+            .position(|v| *v == view)
+        {
+            if let Some(columns) =
+                super::column_sizing::columns_for(super::ids::TAB_LISTVIEW_IDS[slot])
+            {
+                let mut manual = vec![false; columns.len()];
+                for col in value
+                    .split(',')
+                    .filter_map(|v| v.trim().parse::<usize>().ok())
+                {
+                    if let Some(fixed) = manual.get_mut(col) {
+                        *fixed = true;
+                    }
+                }
+                if manual.iter().any(|fixed| *fixed) {
+                    s.manual_columns[slot] = manual;
+                }
+            }
+        }
+        return;
+    }
+    if let Some(view) = key.strip_prefix("columns_") {
+        if let Some(slot) = super::column_layout::VIEW_KEYS
+            .iter()
+            .position(|v| *v == view)
+        {
+            if let Some(columns) =
+                super::column_sizing::columns_for(super::ids::TAB_LISTVIEW_IDS[slot])
+            {
+                s.column_layouts[slot] =
+                    super::column_layout::ColumnLayout::decode(value, columns.len());
+            }
+        }
+        return;
+    }
     // String / numeric / enum keys first; they don't go through
     // parse_bool so handle before the bool branch.
     match key {
@@ -789,7 +843,6 @@ fn apply_kv(s: &mut Settings, key: &str, value: &str) {
         "use_certificates" => s.use_certificates = b,
         "use_hashes" => s.use_hashes = b,
         "use_network_resolution" => s.use_network_resolution = b,
-        "auto_allow_microsoft_signed" => s.auto_allow_microsoft_signed = b,
         "highlight_invalid" => s.highlight_invalid = b,
         "highlight_special" => s.highlight_special = b,
         "highlight_signed" => s.highlight_signed = b,
@@ -906,8 +959,11 @@ mod tests {
         let dir = std::env::temp_dir().join("amwall-tests");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("settings_catchall_migrate.txt");
-        std::fs::write(&path, "rule_block_outbound=false\nrule_block_inbound=false\n")
-            .unwrap();
+        std::fs::write(
+            &path,
+            "rule_block_outbound=false\nrule_block_inbound=false\n",
+        )
+        .unwrap();
 
         let loaded = Settings::load(&path);
         assert!(loaded.rule_block_outbound, "outbound must migrate to true");
@@ -1055,6 +1111,19 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let s = Settings::load(&path);
         assert_eq!(s, Settings::default());
+    }
+
+    #[test]
+    fn legacy_automatic_allow_setting_is_ignored_and_not_saved() {
+        let dir = std::env::temp_dir().join("amwall-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings_legacy_auto_allow.txt");
+        std::fs::write(&path, "auto_allow_microsoft_signed=true\n").unwrap();
+        let settings = Settings::load(&path);
+        assert_eq!(settings, Settings::default(), "a legacy key cannot enable automatic permission grants");
+        settings.save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("auto_allow_microsoft_signed"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -60,26 +60,9 @@ pub fn load_message_font() -> HFONT {
     unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }
 }
 
-/// Toggle Windows 10/11's "immersive dark mode" on the title bar
-/// of `hwnd`. Effects:
-///   - Title bar + caption buttons render dark.
-///   - Default text color flips to light.
-///
-/// On older Windows or when DWM doesn't expose the attribute the
-/// call returns Err — we silently ignore.
+/// Theme the complete native window and its controls, including its frame.
 pub fn set_dark_mode(hwnd: HWND, on: bool) {
-    use windows::Win32::Graphics::Dwm::{
-        DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
-    };
-    let value: i32 = if on { 1 } else { 0 };
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            &value as *const _ as *const _,
-            std::mem::size_of::<i32>() as u32,
-        );
-    }
+    super::theme::apply(hwnd, on);
 }
 
 /// Build an HFONT from a stored face name + height (LOGFONT

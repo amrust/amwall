@@ -30,7 +30,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, HMENU, IsIconic, IsWindowVisible,
     LoadIconW, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    RegisterWindowMessageW, SW_HIDE, SW_RESTORE, SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN,
+    RegisterWindowMessageW, SetForegroundWindow, TPM_BOTTOMALIGN,
     TPM_RIGHTBUTTON, TrackPopupMenu, WM_USER,
 };
 use windows::core::PCWSTR;
@@ -233,19 +233,14 @@ pub fn show_balloon(hwnd: HWND, title: &str, body: &str) {
 /// Hide / restore the main window in response to a tray click.
 /// Mirrors upstream's `_r_wnd_toggle`: if the window is visible
 /// and not minimized, hide it (taskbar entry disappears, only
-/// the tray icon remains); otherwise SW_RESTORE + foreground.
+/// the tray icon remains); otherwise reveal its previous normal/maximized state.
 pub fn toggle_main_window(hwnd: HWND) {
     let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
     let iconic = unsafe { IsIconic(hwnd).as_bool() };
     if visible && !iconic {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
+        super::window_state::hide(hwnd);
     } else {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = SetForegroundWindow(hwnd);
-        }
+        super::window_state::show(hwnd);
     }
 }
 

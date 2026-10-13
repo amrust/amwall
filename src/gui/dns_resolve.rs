@@ -20,8 +20,8 @@
 //   - Worker calls `GetNameInfoW` with `NI_NAMEREQD` (so it
 //     fails-fast for IPs with no PTR record rather than echoing
 //     the address). Each successful lookup goes into the cache;
-//     after every BATCH_FOR_REFRESH resolutions (or on idle
-//     drain) the worker posts WM_USER_DNS_REFRESH so the visible
+//     after each small batch (including the final idle batch)
+//     the worker posts WM_USER_DNS_REFRESH so the visible
 //     tab repaints.
 //   - Cache stores Option<String>: None means "queried, no PTR
 //     record", which lets the populator skip re-enqueuing dead
@@ -41,14 +41,15 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, IN6_ADDR, IN6_ADDR_0, IN_ADDR, IN_ADDR_0, NI_MAXHOST, NI_NAMEREQD,
-    SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0, WSADATA, WSACleanup, WSAStartup,
-    GetNameInfoW, socklen_t,
+    AF_INET, AF_INET6, GetNameInfoW, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, NI_MAXHOST,
+    NI_NAMEREQD, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0, WSACleanup, WSADATA,
+    WSAStartup, socklen_t,
 };
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_USER};
 
@@ -66,10 +67,7 @@ pub type DnsCacheMap = HashMap<IpAddr, Option<String>>;
 /// Spawn the reverse-DNS worker. Returns the `Sender` the GUI
 /// drops new IPs into. Worker shuts down when the sender is
 /// dropped (channel closed).
-pub fn spawn_worker(
-    main_hwnd: HWND,
-    cache: Arc<Mutex<DnsCacheMap>>,
-) -> Sender<IpAddr> {
+pub fn spawn_worker(main_hwnd: HWND, cache: Arc<Mutex<DnsCacheMap>>) -> Sender<IpAddr> {
     let (tx, rx): (Sender<IpAddr>, Receiver<IpAddr>) = channel();
     let hwnd_raw = main_hwnd.0 as usize;
     std::thread::spawn(move || {
@@ -80,26 +78,38 @@ pub fn spawn_worker(
         let mut wsa: WSADATA = unsafe { std::mem::zeroed() };
         let started = unsafe { WSAStartup(0x0202, &mut wsa) } == 0;
 
-        const BATCH_FOR_REFRESH: u32 = 8;
-        let mut since_last_post = 0u32;
-        while let Ok(ip) = rx.recv() {
+        let mut refresh = super::refresh_batch::RefreshBatch::new();
+        loop {
+            let ip = match refresh.recv(&rx) {
+                Ok(ip) => ip,
+                Err(RecvTimeoutError::Timeout) => {
+                    if refresh.flush(Instant::now(), false) {
+                        post_refresh(hwnd_raw);
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
             // Skip if cached.
             if let Ok(g) = cache.lock() {
                 if g.contains_key(&ip) {
                     continue;
                 }
             }
+            // Do not leave a completed lookup waiting behind another address's
+            // DNS timeout; queued cached duplicates remain cheap to batch.
+            if refresh.flush(Instant::now(), true) {
+                post_refresh(hwnd_raw);
+            }
             let result = reverse_lookup(ip);
             if let Ok(mut g) = cache.lock() {
                 g.insert(ip, result);
             }
-            since_last_post += 1;
-            if since_last_post >= BATCH_FOR_REFRESH {
-                since_last_post = 0;
+            if refresh.changed(Instant::now()) {
                 post_refresh(hwnd_raw);
             }
         }
-        if since_last_post > 0 {
+        if refresh.flush(Instant::now(), true) {
             post_refresh(hwnd_raw);
         }
         if started {
@@ -133,7 +143,9 @@ fn reverse_lookup(ip: IpAddr) -> Option<String> {
                 sin_family: AF_INET,
                 sin_port: 0,
                 sin_addr: IN_ADDR {
-                    S_un: IN_ADDR_0 { S_addr: s_addr.to_be() },
+                    S_un: IN_ADDR_0 {
+                        S_addr: s_addr.to_be(),
+                    },
                 },
                 sin_zero: [0; 8],
             };

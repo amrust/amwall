@@ -22,7 +22,11 @@
 # target\x86_64-pc-windows-msvc\release\amwall.exe - call sites are
 # expected to run cargo build first.
 
+[CmdletBinding()]
+param([switch]$AllowSameVersionUpgrades)
+
 $ErrorActionPreference = 'Stop'
+$sameVersionUpgrade = if ($AllowSameVersionUpgrades) { 'yes' } else { 'no' }
 
 if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
     Write-Error @"
@@ -53,6 +57,7 @@ New-Item -ItemType Directory -Path $langDir -Force | Out-Null
 candle.exe -nologo `
     -arch x64 `
     "-dVersion=$version" `
+    "-dAllowSameVersionUpgrades=$sameVersionUpgrade" `
     "-dCargoTargetBinDir=$targetBin" `
     -ext WixUIExtension `
     -out "$wixDir\main.wixobj" `

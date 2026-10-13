@@ -15,6 +15,8 @@ fn main() {
         println!("cargo:rerun-if-changed=assets/amwall.rc");
         println!("cargo:rerun-if-changed=assets/manifest.xml");
         println!("cargo:rerun-if-changed=assets/icons/100.ico");
-        embed_resource::compile("assets/amwall.rc", embed_resource::NONE);
+        // Native UI tests must load the same ComCtl32 v6 assembly as the app.
+        // The bin-only form leaves unit tests on the legacy common controls.
+        embed_resource::compile_for_everything("assets/amwall.rc", embed_resource::NONE);
     }
 }

@@ -22,14 +22,17 @@
 // Block sets `is_silent=true` on the app so subsequent drops for
 // the same exe don't re-prompt (matches upstream simplewall
 // `notifications.c:87`: `ptr_app->is_silent = (button_id == IDC_BLOCK_BTN);`).
-// X / dismiss just destroys the window without setting is_silent —
-// the App already sits at `is_enabled=false` from auto-catalog, so
-// "close without choosing" naturally means "stay blocked, may re-prompt".
+// Closing with X, Alt+F4 or Escape records the same Block choice. Only
+// explicit Allow can enable an app. Internal cancellation of a stale prompt
+// destroys its window directly without changing the newer app decision.
 
 #![cfg(windows)]
 
 use std::cell::Cell;
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+mod host;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -44,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetDlgItem, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOPMOST, KillTimer, MF_STRING,
     PostMessageW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetTimer, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN,
-    TrackPopupMenu, WM_COMMAND, WM_CONTEXTMENU, WM_DRAWITEM, WM_INITDIALOG, WM_NCDESTROY,
+    TrackPopupMenu, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DRAWITEM, WM_INITDIALOG, WM_NCDESTROY,
     WM_TIMER,
 };
 use windows::core::PCWSTR;
@@ -85,8 +88,7 @@ const TIMER_SAFETY: usize = 0x1A1A;
 /// `wparam` holds a `Box<PathBuf>` cast to `usize` — the parent
 /// reclaims it via `Box::from_raw` and uses the path to flip
 /// `is_enabled = true` on the matching `profile.apps` entry.
-pub const WM_USER_CONNECT_ALLOW: u32 =
-    windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x102;
+pub const WM_USER_CONNECT_ALLOW: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x102;
 
 /// Posted when the user clicks Block. Same `Box<PathBuf>`
 /// payload shape as Allow; the parent flips `is_silent = true`
@@ -95,8 +97,7 @@ pub const WM_USER_CONNECT_ALLOW: u32 =
 /// from auto-catalog, so the user stays blocked — Block here is
 /// the "stop bothering me about this app" signal, not a
 /// state change to the block decision itself.
-pub const WM_USER_CONNECT_BLOCK: u32 =
-    windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x103;
+pub const WM_USER_CONNECT_BLOCK: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x103;
 
 /// Posted from the dialog's `WM_NCDESTROY` when the prompt window
 /// closes for ANY reason — Allow, Block, or a plain dismiss (X). The
@@ -114,8 +115,15 @@ pub const WM_USER_CONNECT_PROMPT_CLOSED: u32 =
 /// State stashed in the dialog's GWLP_USERDATA. Heap-allocated
 /// because the dialog is modeless and lives past `show_async`'s
 /// return; reclaimed on WM_NCDESTROY.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct PromptEvent {
+    pub path: std::path::PathBuf,
+    pub id: u64,
+}
+
 struct DialogState {
     parent: HWND,
+    id: u64,
     path: std::path::PathBuf,
     path_text: String,
     remote: String,
@@ -125,9 +133,8 @@ struct DialogState {
     /// dialog state is borrowed re-entrantly across paint and
     /// timer callbacks.
     armed: Cell<bool>,
-    /// Remaining countdown in milliseconds. Drives the
-    /// "Click in N.Ns..." status text. 0 = armed.
-    remaining_ms: Cell<u32>,
+    /// Elapsed wall time, independent of delayed/coalesced WM_TIMER messages.
+    shown_at: Cell<Instant>,
 }
 
 /// Show the centered Allow/Block prompt for `app_path`
@@ -146,46 +153,80 @@ struct DialogState {
 /// remote endpoint so the user can decide based on whether the
 /// publisher is trusted, not just the path. `None` falls back to
 /// the prior behaviour (no signer line).
-pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&str>) -> bool {
-    let displayed_remote = match signer {
+pub fn show_async(
+    parent: HWND,
+    app_path: &Path,
+    remote: &str,
+    signer: Option<&str>,
+    id: u64,
+) -> bool {
+    host::post(host::Request {
+        parent: parent.0,
+        id,
+        dark: super::theme::requested(parent),
+        path: app_path.to_path_buf(),
+        remote: remote.to_owned(),
+        signer: signer.map(str::to_owned),
+        visible: true,
+        #[cfg(test)]
+        reply: None,
+    })
+}
+
+pub(super) fn shutdown() {
+    host::shutdown();
+}
+
+pub(super) fn cancel(parent: HWND, id: u64) {
+    host::cancel(parent, id);
+}
+
+pub(super) fn set_dark_mode(dark: bool) {
+    host::set_dark_mode(dark);
+}
+
+fn create_prompt(owner: HWND, request: &host::Request) -> HWND {
+    let parent = HWND(request.parent);
+    let app_path = &request.path;
+    let remote = &request.remote;
+    let displayed_remote = match request.signer.as_deref() {
         Some(s) if !s.is_empty() => format!("{remote}\nSigned by {s}"),
         _ => remote.to_string(),
     };
-    let state = Box::new(DialogState {
+    let mut state = Some(Box::new(DialogState {
         parent,
+        id: request.id,
         path: app_path.to_path_buf(),
         path_text: wrap_path_for_display(&app_path.display().to_string(), 60),
         remote: displayed_remote,
         armed: Cell::new(false),
-        remaining_ms: Cell::new(SAFETY_TIMEOUT_MS),
-    });
-    let raw = Box::into_raw(state) as isize;
+        shown_at: Cell::new(Instant::now()),
+    }));
 
     let hi = match unsafe { GetModuleHandleW(PCWSTR::null()) } {
         Ok(h) => h,
-        Err(_) => {
-            // Reclaim so we don't leak.
-            unsafe {
-                let _ = Box::from_raw(raw as *mut DialogState);
-            }
-            return false;
-        }
+        Err(_) => return HWND::default(),
     };
 
     let hwnd = unsafe {
         CreateDialogParamW(
             hi,
             PCWSTR(IDD_CONNECT_PROMPT as usize as *const u16),
-            parent,
+            owner,
             Some(dialog_proc),
-            LPARAM(raw),
+            LPARAM(&mut state as *mut Option<Box<DialogState>> as isize),
         )
     };
     if hwnd.0 == 0 {
-        unsafe {
-            let _ = Box::from_raw(raw as *mut DialogState);
-        }
-        return false;
+        return HWND::default();
+    }
+    super::theme::apply(hwnd, request.dark);
+    if !request.visible {
+        return hwnd;
+    }
+    unsafe {
+        let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        (&*(raw as *const DialogState)).shown_at.set(Instant::now());
     }
     // SW_SHOWNA = "show without activating" — combined with the
     // template's WS_EX_NOACTIVATE, this is what keeps focus on
@@ -225,7 +266,7 @@ pub fn show_async(parent: HWND, app_path: &Path, remote: &str, signer: Option<&s
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
-    true
+    hwnd
 }
 
 unsafe extern "system" fn dialog_proc(
@@ -236,17 +277,34 @@ unsafe extern "system" fn dialog_proc(
 ) -> isize {
     match msg {
         WM_INITDIALOG => {
+            // Transfer ownership only once initialization begins. If creation
+            // fails before/after this point either the caller or NCDESTROY frees it.
+            let pending = unsafe { &mut *(lparam.0 as *mut Option<Box<DialogState>>) };
+            let Some(state) = pending.take() else {
+                return 0;
+            };
+            let raw = Box::into_raw(state);
             unsafe {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, lparam.0);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw as isize);
             }
-            let state = unsafe { &*(lparam.0 as *const DialogState) };
+            let state = unsafe { &*raw };
             set_text(hwnd, IDC_PROMPT_PATH, &state.path_text);
             set_text(hwnd, IDC_PROMPT_REMOTE, &state.remote);
-            set_text(hwnd, IDC_PROMPT_COUNTDOWN, &countdown_label(state.remaining_ms.get()));
+            set_text(
+                hwnd,
+                IDC_PROMPT_COUNTDOWN,
+                &countdown_label(SAFETY_TIMEOUT_MS),
+            );
             set_text(hwnd, IDC_PROMPT_HEADER, &rust_i18n::t!("rc_prompt.header"));
-            set_text(hwnd, IDC_PROMPT_QUESTION, &rust_i18n::t!("rc_prompt.question"));
+            set_text(
+                hwnd,
+                IDC_PROMPT_QUESTION,
+                &rust_i18n::t!("rc_prompt.question"),
+            );
             let title_w = wide(&rust_i18n::t!("rc_prompt.title"));
-            unsafe { let _ = SetWindowTextW(hwnd, PCWSTR(title_w.as_ptr())); }
+            unsafe {
+                let _ = SetWindowTextW(hwnd, PCWSTR(title_w.as_ptr()));
+            }
             // Start the safety countdown. Buttons render greyed
             // (paint_action_button reads state.armed) until the
             // timer ticks down.
@@ -259,6 +317,11 @@ unsafe extern "system" fn dialog_proc(
             // current focus.
             0
         }
+        WM_CLOSE => {
+            // Dismissal means Block and must never wait for the safety timer.
+            block_and_close(hwnd);
+            1
+        }
         WM_TIMER => {
             if wparam.0 != TIMER_SAFETY {
                 return 0;
@@ -268,8 +331,7 @@ unsafe extern "system" fn dialog_proc(
                 return 0;
             }
             let state = unsafe { &*(raw as *const DialogState) };
-            let remaining = state.remaining_ms.get().saturating_sub(COUNTDOWN_TICK_MS);
-            state.remaining_ms.set(remaining);
+            let remaining = remaining_safety_ms(state.shown_at.get().elapsed());
             if remaining == 0 {
                 state.armed.set(true);
                 set_text(hwnd, IDC_PROMPT_COUNTDOWN, "");
@@ -287,6 +349,13 @@ unsafe extern "system" fn dialog_proc(
         }
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
+            // The dialog manager also routes title-bar Close and keyboard
+            // cancellation through IDCANCEL (2), our Block button's ID.
+            // Only an actual button notification carries its HWND in lParam.
+            if id == IDC_PROMPT_BLOCK && lparam.0 == 0 {
+                block_and_close(hwnd);
+                return 1;
+            }
             let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
             if raw == 0 {
                 return 0;
@@ -295,9 +364,7 @@ unsafe extern "system" fn dialog_proc(
             // Safety gate: ignore button clicks until the
             // countdown completes. Cheap and avoids the user
             // accidentally Allow'ing something on a stray click.
-            if !state.armed.get()
-                && (id == IDC_PROMPT_ALLOW || id == IDC_PROMPT_BLOCK)
-            {
+            if !state.armed.get() && (id == IDC_PROMPT_ALLOW || id == IDC_PROMPT_BLOCK) {
                 return 0;
             }
             match id {
@@ -306,7 +373,10 @@ unsafe extern "system" fn dialog_proc(
                     // a WM_USER wparam is forgeable, and the parent used
                     // to Box::from_raw it. The parent's handler take()s
                     // the token to find the right App slot. Fable sweep #19.
-                    let token = super::msg_slab::stash(state.path.clone());
+                    let token = super::msg_slab::stash(PromptEvent {
+                        path: state.path.clone(),
+                        id: state.id,
+                    });
                     unsafe {
                         if PostMessageW(
                             state.parent,
@@ -318,31 +388,14 @@ unsafe extern "system" fn dialog_proc(
                         {
                             // Post failed (parent gone / queue full) — reclaim
                             // the stashed token so it can't leak in the slab.
-                            let _ = super::msg_slab::take::<std::path::PathBuf>(token);
+                            let _ = super::msg_slab::take::<PromptEvent>(token);
                         }
                         let _ = DestroyWindow(hwnd);
                     }
                     1
                 }
                 IDC_PROMPT_BLOCK => {
-                    // App already at is_enabled=false from the
-                    // catalog step. Posting BLOCK tells the
-                    // parent to also set is_silent=true so
-                    // future drops for this exe don't re-prompt.
-                    let token = super::msg_slab::stash(state.path.clone());
-                    unsafe {
-                        if PostMessageW(
-                            state.parent,
-                            WM_USER_CONNECT_BLOCK,
-                            WPARAM(token),
-                            LPARAM(0),
-                        )
-                        .is_err()
-                        {
-                            let _ = super::msg_slab::take::<std::path::PathBuf>(token);
-                        }
-                        let _ = DestroyWindow(hwnd);
-                    }
+                    block_and_close(hwnd);
                     1
                 }
                 _ => 0,
@@ -374,6 +427,10 @@ unsafe extern "system" fn dialog_proc(
                 return 0;
             }
             let state = unsafe { &*(raw as *const DialogState) };
+            // TrackPopupMenu pumps messages; cancellation can destroy this
+            // dialog and its state while the menu is open.
+            let bundle = format!("Path: {}\n{}", state.path.display(), state.remote);
+            let clipboard_owner = state.parent;
             // lparam packs cursor coords (LOWORD = x, HIWORD = y) in
             // screen coordinates already, which is what TrackPopupMenu
             // wants.
@@ -428,12 +485,7 @@ unsafe extern "system" fn dialog_proc(
                 // by X" to it at construction time, matching what
                 // the dialog displays. So just stitch the path
                 // and the (possibly multi-line) remote together.
-                let bundle = format!(
-                    "Path: {}\n{}",
-                    state.path.display(),
-                    state.remote
-                );
-                super::main_window::set_clipboard_text(state.parent, &bundle);
+                super::main_window::set_clipboard_text(clipboard_owner, &bundle);
             }
             1
         }
@@ -448,19 +500,8 @@ unsafe extern "system" fn dialog_proc(
                 // window would suppress the app's prompt for the rest of
                 // the session.
                 let state = unsafe { &*(raw as *const DialogState) };
-                let token = super::msg_slab::stash(state.path.clone());
-                unsafe {
-                    if PostMessageW(
-                        state.parent,
-                        WM_USER_CONNECT_PROMPT_CLOSED,
-                        WPARAM(token),
-                        LPARAM(0),
-                    )
-                    .is_err()
-                    {
-                        let _ = super::msg_slab::take::<std::path::PathBuf>(token);
-                    }
-                }
+                host::forget(state.parent, state.id);
+                notify_closed(state.parent, state.path.clone(), state.id);
                 unsafe {
                     let _ = Box::from_raw(raw as *mut DialogState);
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -474,6 +515,27 @@ unsafe extern "system" fn dialog_proc(
 
 fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(((b as u32) << 16) | ((g as u32) << 8) | (r as u32))
+}
+
+/// User dismissal and the Block button share exactly one generation-tagged
+/// outcome. Host cancellation bypasses this function and only destroys the UI.
+fn block_and_close(hwnd: HWND) {
+    let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+    if raw != 0 {
+        let state = unsafe { &*(raw as *const DialogState) };
+        let parent = state.parent;
+        let token = super::msg_slab::stash(PromptEvent {
+            path: state.path.clone(),
+            id: state.id,
+        });
+        if unsafe { PostMessageW(parent, WM_USER_CONNECT_BLOCK, WPARAM(token), LPARAM(0)) }.is_err()
+        {
+            let _ = super::msg_slab::take::<PromptEvent>(token);
+        }
+    }
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
 }
 
 /// Paint a BS_OWNERDRAW Allow / Block button green / red. Three
@@ -593,6 +655,26 @@ fn countdown_label(remaining_ms: u32) -> String {
     }
 }
 
+fn remaining_safety_ms(elapsed: Duration) -> u32 {
+    u128::from(SAFETY_TIMEOUT_MS).saturating_sub(elapsed.as_millis()) as u32
+}
+
+fn notify_closed(parent: HWND, path: std::path::PathBuf, id: u64) {
+    let token = super::msg_slab::stash(PromptEvent { path, id });
+    if unsafe {
+        PostMessageW(
+            parent,
+            WM_USER_CONNECT_PROMPT_CLOSED,
+            WPARAM(token),
+            LPARAM(0),
+        )
+    }
+    .is_err()
+    {
+        let _ = super::msg_slab::take::<PromptEvent>(token);
+    }
+}
+
 fn invalidate_button(parent: HWND, id: i32) {
     use windows::Win32::Graphics::Gdi::InvalidateRect;
     let ctrl = unsafe { GetDlgItem(parent, id) };
@@ -617,7 +699,201 @@ fn set_text(hwnd: HWND, id: i32, text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_path_for_display;
+    use super::*;
+
+    #[test]
+    fn delayed_timer_uses_elapsed_time_and_keeps_initial_click_guard() {
+        assert_eq!(remaining_safety_ms(Duration::from_millis(0)), 900);
+        assert_eq!(remaining_safety_ms(Duration::from_millis(899)), 1);
+        assert_eq!(remaining_safety_ms(Duration::from_millis(900)), 0);
+        assert_eq!(remaining_safety_ms(Duration::from_secs(5)), 0);
+    }
+
+    #[test]
+    fn native_close_records_block_immediately_without_allowing_the_app() {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::core::w;
+        unsafe {
+            let parent = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("prompt close regression"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                0,
+                0,
+                HWND::default(),
+                HMENU::default(),
+                None,
+                None,
+            );
+            assert_ne!(parent.0, 0);
+            for (id, message, command) in [
+                (901, WM_CLOSE, 0),
+                (902, WM_COMMAND, IDC_PROMPT_BLOCK as usize),
+                (903, WM_SYSCOMMAND, SC_CLOSE as usize),
+            ] {
+                let (reply, receive) = std::sync::mpsc::channel();
+                assert!(host::post(host::Request {
+                    parent: parent.0,
+                    path: r"C:\close-test.exe".into(),
+                    remote: "127.0.0.1".into(),
+                    signer: None,
+                    visible: false,
+                    id,
+                    dark: false,
+                    reply: Some(reply),
+                }));
+                let dialog = HWND(receive.recv_timeout(Duration::from_secs(3)).unwrap());
+                assert_ne!(dialog.0, 0);
+                assert_ne!(
+                    SendMessageTimeoutW(
+                        dialog,
+                        message,
+                        WPARAM(command),
+                        LPARAM(0),
+                        SMTO_ABORTIFHUNG,
+                        1000,
+                        None
+                    )
+                    .0,
+                    0
+                );
+                assert!(
+                    !IsWindow(dialog).as_bool(),
+                    "dismiss must not wait for the safety countdown"
+                );
+                let mut msg = MSG::default();
+                assert!(
+                    PeekMessageW(
+                        &mut msg,
+                        parent,
+                        WM_USER_CONNECT_ALLOW,
+                        WM_USER_CONNECT_BLOCK,
+                        PM_REMOVE
+                    )
+                    .as_bool(),
+                    "Close must record Block before closing"
+                );
+                assert_eq!(msg.message, WM_USER_CONNECT_BLOCK, "Close must never Allow");
+                assert_eq!(
+                    super::super::msg_slab::take::<PromptEvent>(msg.wParam.0),
+                    Some(PromptEvent {
+                        path: r"C:\close-test.exe".into(),
+                        id
+                    })
+                );
+                assert!(
+                    PeekMessageW(
+                        &mut msg,
+                        parent,
+                        WM_USER_CONNECT_PROMPT_CLOSED,
+                        WM_USER_CONNECT_PROMPT_CLOSED,
+                        PM_REMOVE
+                    )
+                    .as_bool()
+                );
+                assert_eq!(
+                    super::super::msg_slab::take::<PromptEvent>(msg.wParam.0),
+                    Some(PromptEvent {
+                        path: r"C:\close-test.exe".into(),
+                        id
+                    })
+                );
+            }
+            DestroyWindow(parent).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_prompt_runs_while_parent_thread_does_not_pump_messages() {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::core::w;
+        unsafe {
+            let parent = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("prompt test"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                0,
+                0,
+                HWND::default(),
+                HMENU::default(),
+                GetModuleHandleW(PCWSTR::null()).unwrap(),
+                None,
+            );
+            assert_ne!(parent.0, 0);
+            let (reply, receive) = std::sync::mpsc::channel();
+            assert!(host::post(host::Request {
+                parent: parent.0,
+                path: r"C:\test.exe".into(),
+                remote: "127.0.0.1:443".into(),
+                signer: None,
+                visible: false,
+                id: 900,
+                dark: false,
+                reply: Some(reply)
+            }));
+            // Deliberately block the owning/main thread, as profile hashing or
+            // rebuilding filters used to do. The hidden real dialog must still initialize.
+            let dialog = HWND(receive.recv_timeout(Duration::from_secs(3)).unwrap());
+            assert_ne!(dialog.0, 0);
+            assert!(!IsWindowVisible(dialog).as_bool());
+            let send = |msg, wp, lp| {
+                assert_ne!(
+                    SendMessageTimeoutW(dialog, msg, wp, lp, SMTO_ABORTIFHUNG, 1000, None).0,
+                    0,
+                    "prompt message loop must stay responsive"
+                );
+            };
+            send(WM_COMMAND, WPARAM(IDC_PROMPT_ALLOW as usize), LPARAM(0));
+            assert!(
+                IsWindow(dialog).as_bool(),
+                "early Allow click must be ignored"
+            );
+            std::thread::sleep(Duration::from_millis(1200));
+            // WM_TIMER coalescing must not extend the 900ms safety gate.
+            send(
+                WM_COMMAND,
+                WPARAM(IDC_PROMPT_BLOCK as usize),
+                LPARAM(GetDlgItem(dialog, IDC_PROMPT_BLOCK).0),
+            );
+            assert!(!IsWindow(dialog).as_bool());
+            let mut msg = MSG::default();
+            assert!(
+                PeekMessageW(
+                    &mut msg,
+                    parent,
+                    WM_USER_CONNECT_BLOCK,
+                    WM_USER_CONNECT_BLOCK,
+                    PM_REMOVE
+                )
+                .as_bool()
+            );
+            assert_eq!(
+                super::super::msg_slab::take::<PromptEvent>(msg.wParam.0),
+                Some(PromptEvent {
+                    path: r"C:\test.exe".into(),
+                    id: 900
+                })
+            );
+            assert!(
+                PeekMessageW(
+                    &mut msg,
+                    parent,
+                    WM_USER_CONNECT_PROMPT_CLOSED,
+                    WM_USER_CONNECT_PROMPT_CLOSED,
+                    PM_REMOVE
+                )
+                .as_bool()
+            );
+            let _ = super::super::msg_slab::take::<PromptEvent>(msg.wParam.0);
+            DestroyWindow(parent).unwrap();
+        }
+    }
 
     #[test]
     fn short_path_unchanged() {

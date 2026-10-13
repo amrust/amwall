@@ -7,7 +7,7 @@
 # main don't run this workflow.
 #
 # Output: target\wix\amwall-<version>-x86_64.msi attached to the
-# tag's GitHub Release as the only asset.
+# tag's GitHub Release alongside the portable ZIP.
 
 name: release
 
@@ -48,10 +48,8 @@ jobs:
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          # Includes the cargo-wix install we run below so the
-          # tool isn't re-downloaded on every release. The key
-          # changes when Cargo.lock or rust-toolchain changes,
-          # invalidating the cache automatically.
+          # The key changes with the lockfile/toolchain so incompatible
+          # build artifacts are not reused between release builds.
           cache-on-failure: true
 
       - name: Run gates
@@ -86,6 +84,9 @@ jobs:
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
                       ForEach-Object { $_.Matches[0].Groups[1].Value })
           $needle = "v$version (current)"
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version."
+          }
           $rtf = Get-Content -Raw wix/Changelog.rtf
           if ($rtf -notmatch [regex]::Escape($needle)) {
             Write-Error "wix/Changelog.rtf does not pin '$needle'. Update the installer 'What's new' page for this release before tagging."
@@ -94,22 +95,21 @@ jobs:
           Write-Host "Installer changelog pins $needle"
 
       - name: Ensure WiX Toolset 3.x is on PATH
-        # windows-latest typically ships with WiX 3.11 preinstalled
-        # under "C:\Program Files (x86)\WiX Toolset v3.11\bin", but
-        # GitHub's runner image contents drift over time. choco
-        # treats an already-installed package as a no-op (~2s),
-        # so this is cheap insurance against a runner-image update
-        # that drops WiX. cargo-wix invokes candle.exe / light.exe
-        # by name, so they need to be on PATH.
+        # Discover the installed 3.x version instead of assuming a runner path.
+        # Install it only if absent; the shared script needs candle/light/torch.
         shell: pwsh
         run: |
-          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+          $wixBin = Get-ChildItem "${env:ProgramFiles(x86)}/WiX Toolset v3*/bin/candle.exe" -ErrorAction SilentlyContinue |
+                    Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty DirectoryName
+          if (-not $wixBin) {
             choco install wixtoolset --no-progress -y
-            Write-Host "Added WiX bin dir to GITHUB_PATH"
-            "C:\Program Files (x86)\WiX Toolset v3.11\bin" >> $env:GITHUB_PATH
-          } else {
-            Write-Host "candle.exe already on PATH"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $wixBin = Get-ChildItem "${env:ProgramFiles(x86)}/WiX Toolset v3*/bin/candle.exe" -ErrorAction SilentlyContinue |
+                      Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty DirectoryName
           }
+          if (-not $wixBin) { throw 'WiX Toolset 3.x was not found after installation.' }
+          $wixBin >> $env:GITHUB_PATH
+          Write-Host "Using WiX from $wixBin"
 
       - name: Build multilingual MSI with embedded transforms
         # Delegated to scripts/build-msi.ps1 so this workflow and the
@@ -117,10 +117,11 @@ jobs:
         # byte-identical — Ctrl+Shift+B and a tag push produce the
         # same MSI from the same script.
         shell: pwsh
-        run: ./scripts/build-msi.ps1
+        # Replace local test installations that carry the release version too.
+        run: ./scripts/build-msi.ps1 -AllowSameVersionUpgrades
 
       - name: Locate MSI + create stable-named copy
-        # cargo-wix names its output `amwall-<version>-x86_64.msi`,
+        # The build script names its output `amwall-<version>-x86_64.msi`,
         # which is great for the asset list (users can tell which
         # version they're grabbing) but breaks
         # `releases/latest/download/<filename>` URLs in the README
@@ -131,7 +132,9 @@ jobs:
         id: msi
         shell: pwsh
         run: |
-          $msi = Get-ChildItem -Path "target/wix" -Filter "amwall-*-x86_64.msi" | Select-Object -First 1
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
+                      ForEach-Object { $_.Matches[0].Groups[1].Value })
+          $msi = Get-Item "target/wix/amwall-$version-x86_64.msi" -ErrorAction SilentlyContinue
           if (-not $msi) {
             Write-Error "No MSI found under target/wix"
             exit 1
@@ -160,8 +163,7 @@ jobs:
         id: portable
         shell: pwsh
         run: |
-          $stage = Join-Path $env:RUNNER_TEMP "amwall-portable"
-          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          $stage = Join-Path $env:RUNNER_TEMP ("amwall-portable-" + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/amwall.exe" $stage
           # Empty file IS the marker — paths::is_portable only checks
@@ -195,7 +197,7 @@ jobs:
         id: notes
         shell: pwsh
         run: |
-          $tag = '${{ github.ref_name }}'
+          $tag = $env:GITHUB_REF_NAME
           # actions/checkout@v4 fetches only the tagged COMMIT and writes
           # a LIGHTWEIGHT local tag pointing at it — so `git tag -l
           # --format='%(contents)'` returns the COMMIT message, not the
@@ -205,6 +207,7 @@ jobs:
           # so the same bug looked correct. Force-fetch the real annotated
           # tag object from origin so %(contents) resolves the tag message.
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Only read %(contents) when the object is a genuine annotated
           # tag; a lightweight tag would otherwise fall through to the
           # commit message and mask the mistake.
@@ -215,7 +218,7 @@ jobs:
             $body = ''
           }
           if (-not $body) {
-            $body = "No release description — the tag is lightweight. Annotate with ``git tag -a $tag -m '...'`` and re-push to get focused notes."
+            throw 'Release tags must be annotated with the user-facing changelog.'
           }
           # Multi-line GitHub Actions output via the heredoc-style
           # EOF marker; GHA enforces no-marker-in-content via a

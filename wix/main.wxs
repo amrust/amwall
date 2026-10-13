@@ -27,6 +27,9 @@
   than literal `option-name` syntax.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <?ifndef AllowSameVersionUpgrades?>
+    <?define AllowSameVersionUpgrades="no"?>
+  <?endif?>
   <Product
     Id="*"
     Name="amwall"
@@ -49,6 +52,7 @@
 
     <MajorUpgrade
       Schedule="afterInstallInitialize"
+      AllowSameVersionUpgrades="$(var.AllowSameVersionUpgrades)"
       DowngradeErrorMessage="A newer version of amwall is already installed. Uninstall it first if you want to downgrade." />
 
     <Media Id="1" Cabinet="amwall.cab" EmbedCab="yes" />

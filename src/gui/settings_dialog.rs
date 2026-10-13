@@ -289,7 +289,16 @@ unsafe fn install_state(hwnd: HWND, lparam: LPARAM) -> Option<&'static DialogSta
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw);
     }
     let ptr = raw as *const DialogState;
-    if ptr.is_null() { None } else { Some(unsafe { &*ptr }) }
+    if ptr.is_null() {
+        None
+    } else {
+        let state = unsafe { &*ptr };
+        // Property-sheet pages are created lazily. Reapply to the sheet so
+        // the title, navigation, and newly created page share one preference.
+        let sheet = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) };
+        super::theme::apply(sheet, state.initial.use_dark_theme);
+        Some(state)
+    }
 }
 
 /// Inspect a WM_NOTIFY message; if it's PSN_APPLY, return TRUE so

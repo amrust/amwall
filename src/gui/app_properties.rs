@@ -151,6 +151,7 @@ unsafe extern "system" fn dialog_proc(
             set_item(IDC_SAVE, "rc_properties.save");
             set_item(IDC_CLOSE, "rc_properties.close");
 
+            super::theme::inherit(hwnd, unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) });
             1
         }
         WM_COMMAND => {

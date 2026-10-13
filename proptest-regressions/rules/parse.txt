@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 38b2dbcccfa6ad54c643843e13eb22f9b5704ec7d1adf16b0548e652eb78e7c3 # shrinks to clauses = [RuleClause { addr: None, port: Some(Range(0, 0)) }], extra_trailing = 0, extra_inner_spaces = 0

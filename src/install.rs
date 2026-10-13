@@ -241,6 +241,11 @@ pub enum InstallError {
         rule_name: String,
         source: rules::ParseError,
     },
+    /// A single-app update could not install its complete four-layer permit.
+    AppPermitIncomplete {
+        app_path: PathBuf,
+        filters_added: u32,
+    },
 }
 
 impl std::fmt::Display for InstallError {
@@ -249,6 +254,16 @@ impl std::fmt::Display for InstallError {
             Self::Wfp(e) => write!(f, "wfp: {e}"),
             Self::RuleParse { rule_name, source } => {
                 write!(f, "rule `{rule_name}`: {source}")
+            }
+            Self::AppPermitIncomplete {
+                app_path,
+                filters_added,
+            } => {
+                write!(
+                    f,
+                    "app `{}`: installed {filters_added} of 4 permit filters; update rolled back",
+                    app_path.display()
+                )
             }
         }
     }
@@ -809,7 +824,10 @@ fn install_global_rules(
             (Ipv4Addr::new(255, 255, 255, 255), 32),
         ];
         for &(addr, prefix) in LOOPBACK_V4 {
-            let remote = FilterCondition::RemoteAddrV4 { addr, prefix: Some(prefix) };
+            let remote = FilterCondition::RemoteAddrV4 {
+                addr,
+                prefix: Some(prefix),
+            };
             let f = filter::add(
                 engine,
                 "amwall allow-loopback-v4",
@@ -825,7 +843,10 @@ fn install_global_rules(
             ids.push(f.runtime_id());
             count += 1;
 
-            let local = FilterCondition::LocalAddrV4 { addr, prefix: Some(prefix) };
+            let local = FilterCondition::LocalAddrV4 {
+                addr,
+                prefix: Some(prefix),
+            };
             let f = filter::add(
                 engine,
                 "amwall allow-loopback-v4",
@@ -859,7 +880,10 @@ fn install_global_rules(
             (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
         ];
         for &(addr, prefix) in LOOPBACK_V6 {
-            let remote = FilterCondition::RemoteAddrV6 { addr, prefix: Some(prefix) };
+            let remote = FilterCondition::RemoteAddrV6 {
+                addr,
+                prefix: Some(prefix),
+            };
             let f = filter::add(
                 engine,
                 "amwall allow-loopback-v6",
@@ -875,7 +899,10 @@ fn install_global_rules(
             ids.push(f.runtime_id());
             count += 1;
 
-            let local = FilterCondition::LocalAddrV6 { addr, prefix: Some(prefix) };
+            let local = FilterCondition::LocalAddrV6 {
+                addr,
+                prefix: Some(prefix),
+            };
             let f = filter::add(
                 engine,
                 "amwall allow-loopback-v6",
@@ -956,9 +983,7 @@ fn install_global_rules(
         //    IPPROTO_IPV6. Carried by IpProto::Other(41) since
         //    our IpProto::IcmpV6 (58) is the v6 control plane,
         //    not the encapsulating outer protocol.
-        let ipv6_in_ipv4 = FilterCondition::Protocol(
-            crate::wfp::condition::IpProto::Other(41),
-        );
+        let ipv6_in_ipv4 = FilterCondition::Protocol(crate::wfp::condition::IpProto::Other(41));
         let f = filter::add(
             engine,
             "amwall allow-6to4-ipv6-encap",
@@ -1116,17 +1141,88 @@ fn install_stealth_filters(
     Ok(count)
 }
 
-/// Walk `apps` and install a Permit filter for each enabled
-/// entry. File entries use `AppPath`; UWP entries use
-/// `PackageSid`. Service-shaped entries still skip with
-/// `skipped += 1` (M11 follow-up territory). Any underlying WFP
-/// error short-circuits the whole walk so the caller's
-/// accumulated counts stay accurate.
+const APP_PERMIT_LAYERS: [GUID; 4] = [
+    FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+];
+
+#[derive(Clone, Copy)]
+struct AppPermitTarget<'a> {
+    provider: &'a GUID,
+    sublayer: &'a GUID,
+    layers: &'a [GUID],
+}
+
+const APP_PERMIT_TARGET: AppPermitTarget<'static> = AppPermitTarget {
+    provider: &PROVIDER_KEY,
+    sublayer: &SUBLAYER_KEY,
+    layers: &APP_PERMIT_LAYERS,
+};
+
+/// Atomically permit one newly enabled app without rebuilding the firewall.
+///
+/// The provider and sublayer must already be installed. The app must be enabled
+/// and must not already have per-app permits. The returned four runtime IDs can
+/// be appended directly to the caller's filter-ID caches. Errors leave all
+/// existing filters untouched, including default-deny and higher-priority rules.
+///
+/// Mirrors simplewall's per-app transaction in `src/wfp.c:1603-1712`; this path
+/// only adds permits because its caller handles a disabled-to-enabled decision.
+pub fn install_app_permit(
+    engine: &WfpEngine,
+    app: &crate::profile::App,
+    persistent: bool,
+) -> Result<Vec<u64>, InstallError> {
+    install_app_permit_at(engine, app, persistent, APP_PERMIT_TARGET)
+}
+
+fn install_app_permit_at(
+    engine: &WfpEngine,
+    app: &crate::profile::App,
+    persistent: bool,
+    target: AppPermitTarget<'_>,
+) -> Result<Vec<u64>, InstallError> {
+    let tx = engine.transaction_begin()?;
+    let mut ids = Vec::with_capacity(APP_PERMIT_LAYERS.len());
+    let counts = install_per_app_filters_at(
+        engine,
+        std::slice::from_ref(app),
+        persistent,
+        &mut ids,
+        target,
+        true,
+    )?;
+    if counts.added != APP_PERMIT_LAYERS.len() as u32 || counts.skipped != 0 {
+        return Err(InstallError::AppPermitIncomplete {
+            app_path: app.path.clone(),
+            filters_added: counts.added,
+        });
+    }
+    tx.commit()?;
+    Ok(ids)
+}
+
+/// Walk enabled entries using their file, package SID, or service identity.
+/// Full installs tolerate stale app identities; explicit single-app decisions
+/// use the strict path so they cannot report a permit that was never installed.
 fn install_per_app_filters(
     engine: &WfpEngine,
     apps: &[crate::profile::App],
     persistent: bool,
     ids: &mut Vec<u64>,
+) -> Result<PerAppCounts, InstallError> {
+    install_per_app_filters_at(engine, apps, persistent, ids, APP_PERMIT_TARGET, false)
+}
+
+fn install_per_app_filters_at(
+    engine: &WfpEngine,
+    apps: &[crate::profile::App],
+    persistent: bool,
+    ids: &mut Vec<u64>,
+    target: AppPermitTarget<'_>,
+    strict: bool,
 ) -> Result<PerAppCounts, InstallError> {
     use crate::profile::AppKind;
 
@@ -1160,9 +1256,7 @@ fn install_per_app_filters(
                 // at filter-add time.
                 let sid_string = app.path.to_string_lossy().into_owned();
                 match parse_sid_string(&sid_string) {
-                    Some(bytes) => vec![
-                        crate::wfp::condition::FilterCondition::PackageSid(bytes),
-                    ],
+                    Some(bytes) => vec![crate::wfp::condition::FilterCondition::PackageSid(bytes)],
                     None => {
                         // Malformed SID — surface but don't abort
                         // the rest of the install. Count as skipped
@@ -1215,23 +1309,14 @@ fn install_per_app_filters(
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| app.path.display().to_string());
-        let mut layer_failed_first = false;
-        for (idx, layer) in [
-            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
-        ]
-        .iter()
-        .enumerate()
-        {
+        for (idx, layer) in target.layers.iter().enumerate() {
             let result = filter::add(
                 engine,
                 &format!("Allow {display}"),
                 "amwall: per-app permit",
                 layer,
-                &SUBLAYER_KEY,
-                Some(&PROVIDER_KEY),
+                target.sublayer,
+                Some(target.provider),
                 &conds,
                 FilterAction::Permit,
                 persistent,
@@ -1245,7 +1330,7 @@ fn install_per_app_filters(
                     ids.push(f.runtime_id());
                     counts.added += 1;
                 }
-                Err(e) if idx == 0 => {
+                Err(e) if idx == 0 && !strict => {
                     // First layer failed — typically AppPath
                     // resolution (file missing). Treat as
                     // skipped and skip remaining layers.
@@ -1268,20 +1353,16 @@ fn install_per_app_filters(
                         );
                     }
                     counts.skipped += 1;
-                    layer_failed_first = true;
                     break;
                 }
                 Err(e) => {
-                    // Layers 2+ failed despite layer 1 succeeding
-                    // — shouldn't happen since they share the
-                    // same AppPath. Bubble it; rolling back the
-                    // partial install is the caller's job via
-                    // cleanup_provider on the next disable.
+                    // A strict update propagates even the first failure.
+                    // Dropping the caller's transaction rolls back every
+                    // previously added layer instead of leaving a partial permit.
                     return Err(e.into());
                 }
             }
         }
-        let _ = layer_failed_first; // silence unused: communicates intent above
     }
     Ok(counts)
 }
@@ -1361,14 +1442,22 @@ fn default_deny_plan(block_outbound: bool, block_inbound: bool) -> Vec<DefaultDe
     // 1. TCP-templates terminating callouts FIRST.
     if block_outbound {
         for (family, callout) in [
-            (AddressFamily::Ipv4, FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4),
-            (AddressFamily::Ipv6, FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6),
+            (
+                AddressFamily::Ipv4,
+                FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V4,
+            ),
+            (
+                AddressFamily::Ipv6,
+                FWPM_CALLOUT_TCP_TEMPLATES_CONNECT_LAYER_V6,
+            ),
         ] {
             plan.push(DefaultDenyStep {
                 name: "amwall block-connection-tcp-templates",
                 description: "amwall: TCP-templates terminating callout (outbound block, #689)",
                 layer: default_deny_layer(Direction::Outbound, family),
-                action: FilterAction::CalloutTerminating { callout_key: callout },
+                action: FilterAction::CalloutTerminating {
+                    callout_key: callout,
+                },
                 weight: filter::weight::LOWEST,
             });
         }
@@ -1639,8 +1728,9 @@ fn install_one_rule(
                         resolved.push(Some(FilterCondition::AppPath(p)));
                     }
                     AppToken::Service(name) => match service_security_descriptor(&name) {
-                        Some(sd) => resolved
-                            .push(Some(FilterCondition::ServiceSecurityDescriptor(sd))),
+                        Some(sd) => {
+                            resolved.push(Some(FilterCondition::ServiceSecurityDescriptor(sd)))
+                        }
                         None => eprintln!(
                             "amwall: rule `{}` service `{name}` skipped (could not resolve service SID)",
                             rule.name
@@ -1956,6 +2046,357 @@ mod tests {
                 "engine/transaction errors must stay fatal, not be skipped",
             );
         }
+        assert!(!is_single_rule_error(&InstallError::AppPermitIncomplete {
+            app_path: PathBuf::from("disabled.exe"),
+            filters_added: 0,
+        }));
+    }
+
+    fn test_app() -> crate::profile::App {
+        crate::profile::App {
+            path: std::env::current_exe().expect("test executable path"),
+            is_enabled: true,
+            is_silent: false,
+            is_undeletable: false,
+            timestamp: 0,
+            timer: 0,
+            hash: None,
+            comment: None,
+        }
+    }
+
+    fn installed_amwall_ids(engine: &WfpEngine) -> Vec<u64> {
+        let mut ids = engine
+            .enumerate_filter_ids_for_provider(&PROVIDER_KEY)
+            .expect("read installed Amwall filter IDs");
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Only this fixture's freshly generated provider is ever cleaned up.
+    struct IsolatedAppPermit<'a> {
+        engine: &'a WfpEngine,
+        provider: GUID,
+        sublayer: GUID,
+    }
+
+    impl<'a> IsolatedAppPermit<'a> {
+        fn new(engine: &'a WfpEngine) -> Self {
+            let provider = provider::add(engine, "amwall isolated permit test", "test", false)
+                .expect("isolated provider add; requires Administrator")
+                .key();
+            // Establish the cleanup guard before the next fallible operation.
+            let mut fixture = Self {
+                engine,
+                provider,
+                sublayer: GUID::zeroed(),
+            };
+            fixture.sublayer = sublayer::add(
+                engine,
+                "amwall isolated permit test",
+                "test",
+                SUBLAYER_WEIGHT,
+                Some(&provider),
+                false,
+            )
+            .expect("isolated sublayer add")
+            .key();
+            fixture
+        }
+
+        fn target(&self) -> AppPermitTarget<'_> {
+            AppPermitTarget {
+                provider: &self.provider,
+                sublayer: &self.sublayer,
+                layers: &APP_PERMIT_LAYERS,
+            }
+        }
+
+        fn ids(&self) -> Vec<u64> {
+            let mut ids = self
+                .engine
+                .enumerate_filter_ids_for_provider(&self.provider)
+                .expect("enumerate isolated provider");
+            ids.sort_unstable();
+            ids
+        }
+    }
+
+    impl Drop for IsolatedAppPermit<'_> {
+        fn drop(&mut self) {
+            if let Err(error) = self.engine.cleanup_provider(&self.provider) {
+                eprintln!("isolated app-permit fixture cleanup failed: {error}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires elevated shell; uses only a fresh isolated WFP provider"]
+    fn incremental_app_permit_is_atomic_and_preserves_existing_filters() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
+            FWP_ACTION_PERMIT, FWP_BYTE_BLOB_TYPE, FWP_UINT8, FWPM_CONDITION_ALE_APP_ID,
+            FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT, FwpmFilterGetById0, FwpmFreeMemory0,
+            FwpmGetAppIdFromFileName0,
+        };
+
+        struct NativeAllocation<T>(*mut T);
+        impl<T> Drop for NativeAllocation<T> {
+            fn drop(&mut self) {
+                unsafe {
+                    FwpmFreeMemory0(&mut self.0 as *mut _ as *mut *mut std::ffi::c_void);
+                }
+            }
+        }
+
+        let engine = WfpEngine::open().expect("engine open");
+        let installed_before = installed_amwall_ids(&engine);
+        let fixture = IsolatedAppPermit::new(&engine);
+        let app = test_app();
+        // An unrelated block remains present through every successful/failed update.
+        let sentinel = filter::add(
+            &engine,
+            "isolated sentinel",
+            "test",
+            &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            &fixture.sublayer,
+            Some(&fixture.provider),
+            &[
+                FilterCondition::AppPath(app.path.clone()),
+                FilterCondition::RemotePort(0),
+            ],
+            FilterAction::Block,
+            false,
+            filter::weight::LOWEST,
+        )
+        .expect("sentinel add");
+        let before = vec![sentinel.runtime_id()];
+
+        let bad_layers = [FWPM_LAYER_ALE_AUTH_CONNECT_V4, GUID::zeroed()];
+        let failed = install_app_permit_at(
+            &engine,
+            &app,
+            false,
+            AppPermitTarget {
+                layers: &bad_layers,
+                ..fixture.target()
+            },
+        );
+        assert!(matches!(
+            failed,
+            Err(InstallError::Wfp(WfpError::FilterAdd(_)))
+        ));
+        assert_eq!(
+            fixture.ids(),
+            before,
+            "failed second layer must roll back the first"
+        );
+
+        let incomplete = install_app_permit_at(
+            &engine,
+            &app,
+            false,
+            AppPermitTarget {
+                layers: &APP_PERMIT_LAYERS[..1],
+                ..fixture.target()
+            },
+        );
+        assert!(matches!(
+            incomplete,
+            Err(InstallError::AppPermitIncomplete {
+                filters_added: 1,
+                ..
+            })
+        ));
+        assert_eq!(
+            fixture.ids(),
+            before,
+            "incomplete successful adds must roll back"
+        );
+
+        let mut disabled = app.clone();
+        disabled.is_enabled = false;
+        assert!(matches!(
+            install_app_permit_at(&engine, &disabled, false, fixture.target()),
+            Err(InstallError::AppPermitIncomplete {
+                filters_added: 0,
+                ..
+            })
+        ));
+        let mut invalid_sid = app.clone();
+        invalid_sid.path = PathBuf::from("S-1-15-2-not-a-sid");
+        assert!(matches!(
+            install_app_permit_at(&engine, &invalid_sid, false, fixture.target()),
+            Err(InstallError::AppPermitIncomplete {
+                filters_added: 0,
+                ..
+            })
+        ));
+        assert_eq!(fixture.ids(), before);
+
+        let started = std::time::Instant::now();
+        let added = install_app_permit_at(&engine, &app, false, fixture.target())
+            .expect("atomic four-layer permit");
+        eprintln!(
+            "isolated incremental permit committed in {:?}",
+            started.elapsed()
+        );
+        assert_eq!(added.len(), 4);
+        let app_path: Vec<u16> = app.path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut expected = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                FwpmGetAppIdFromFileName0(windows::core::PCWSTR(app_path.as_ptr()), &mut expected)
+            },
+            0
+        );
+        let expected = NativeAllocation(expected);
+        assert!(!expected.0.is_null());
+        for (&id, &layer) in added.iter().zip(&APP_PERMIT_LAYERS) {
+            let mut native = std::ptr::null_mut();
+            assert_eq!(
+                unsafe { FwpmFilterGetById0(engine.raw(), id, &mut native) },
+                0
+            );
+            let allocation = NativeAllocation(native);
+            assert!(!allocation.0.is_null());
+            let native = unsafe { &*allocation.0 };
+            assert_eq!(native.layerKey, layer);
+            assert_eq!(native.subLayerKey, fixture.sublayer);
+            assert!(!native.providerKey.is_null());
+            assert_eq!(unsafe { *native.providerKey }, fixture.provider);
+            assert_eq!(native.action.r#type, FWP_ACTION_PERMIT);
+            assert_eq!(native.weight.r#type, FWP_UINT8);
+            assert_eq!(
+                unsafe { native.weight.Anonymous.uint8 },
+                filter::weight::APP
+            );
+            assert_eq!((native.flags & FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT).0, 0);
+            assert_eq!(native.numFilterConditions, 1);
+            assert!(!native.filterCondition.is_null());
+            let condition = unsafe { &*native.filterCondition };
+            assert_eq!(condition.fieldKey, FWPM_CONDITION_ALE_APP_ID);
+            assert_eq!(condition.conditionValue.r#type, FWP_BYTE_BLOB_TYPE);
+            unsafe {
+                let blob = &*condition.conditionValue.Anonymous.byteBlob;
+                let expected_blob = &*expected.0;
+                assert_eq!(
+                    std::slice::from_raw_parts(blob.data, blob.size as usize),
+                    std::slice::from_raw_parts(expected_blob.data, expected_blob.size as usize),
+                    "kernel app identity must match the requested executable",
+                );
+            }
+        }
+        let mut after = added;
+        after.extend_from_slice(&before);
+        after.sort_unstable();
+        assert_eq!(
+            fixture.ids(),
+            after,
+            "adding permits must retain unrelated filters"
+        );
+        engine
+            .cleanup_provider(&fixture.provider)
+            .expect("explicit fixture cleanup");
+        assert!(
+            fixture.ids().is_empty(),
+            "fixture must leave no filters behind"
+        );
+        assert_eq!(
+            installed_amwall_ids(&engine), installed_before,
+            "isolated verification must not change installed Amwall filters"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires elevated shell, installed Amwall sublayer, and TCP access to 1.1.1.1:443; only isolated-provider filters are changed"]
+    fn incremental_app_permit_restores_only_its_blocked_test_connection() {
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::Duration;
+
+        // Loopback is deliberately hard-permitted by Amwall, above APP weight.
+        // Use a public TCP endpoint without sending any application data. Every
+        // fixture block and baseline permit matches only this test executable,
+        // this IPv4 address and this port. Ownership stays with a fresh provider;
+        // sharing the installed sublayer merely exercises real rule arbitration.
+        let remote = Ipv4Addr::new(1, 1, 1, 1);
+        let address = SocketAddr::from((remote, 443));
+        let connect = || TcpStream::connect_timeout(&address, Duration::from_secs(2));
+        let engine = WfpEngine::open().expect("engine open");
+        let installed_before = installed_amwall_ids(&engine);
+        let fixture = IsolatedAppPermit::new(&engine);
+        let target = AppPermitTarget { sublayer: &SUBLAYER_KEY, ..fixture.target() };
+        let app = test_app();
+        let conditions = [
+            FilterCondition::AppPath(app.path.clone()),
+            FilterCondition::Protocol(IpProto::Tcp),
+            FilterCondition::RemoteAddrV4 {
+                addr: remote,
+                prefix: None,
+            },
+            FilterCondition::RemotePort(address.port()),
+        ];
+        let baseline = filter::add(
+            &engine, "isolated endpoint baseline permit", "test", &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            target.sublayer, Some(&fixture.provider), &conditions,
+            FilterAction::Permit, false, filter::weight::HIGHEST_IMPORTANT,
+        ).expect("scoped baseline permit; installed Amwall sublayer is required");
+        assert!(connect().is_ok(), "1.1.1.1:443 must be reachable with the scoped baseline permit");
+        baseline.delete(&engine).expect("remove scoped baseline permit");
+        let deny = filter::add(
+            &engine,
+            "isolated test-connection deny",
+            "test",
+            &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            target.sublayer,
+            Some(&fixture.provider),
+            &conditions,
+            FilterAction::Block,
+            false,
+            filter::weight::LOWEST,
+        )
+        .expect("scoped deny");
+        assert!(
+            connect().is_err(),
+            "scoped external deny must block before the app is permitted"
+        );
+        let started = std::time::Instant::now();
+        install_app_permit_at(&engine, &app, false, target).expect("incremental permit");
+        eprintln!("external-test incremental permit committed in {:?}", started.elapsed());
+        assert!(
+            connect().is_ok(),
+            "new app permit must override existing lower-weight deny"
+        );
+        assert!(
+            fixture.ids().contains(&deny.runtime_id()),
+            "deny must remain installed"
+        );
+        filter::add(
+            &engine,
+            "isolated higher-priority rule",
+            "test",
+            &FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            target.sublayer,
+            Some(&fixture.provider),
+            &conditions,
+            FilterAction::Block,
+            false,
+            filter::weight::HIGHEST,
+        )
+        .expect("higher-priority deny");
+        assert!(
+            connect().is_err(),
+            "app permit must not bypass a higher-priority block"
+        );
+        engine
+            .cleanup_provider(&fixture.provider)
+            .expect("explicit fixture cleanup");
+        assert!(fixture.ids().is_empty());
+        assert_eq!(
+            installed_amwall_ids(&engine), installed_before,
+            "isolated traffic verification must not change installed Amwall filters"
+        );
+        eprintln!("1.1.1.1:443: baseline reachable -> scoped deny blocked -> app permit reachable -> higher-priority deny blocked; fixture removed");
     }
 
     fn port_only_clause(port: u16) -> RuleClause {
@@ -2180,12 +2621,7 @@ mod tests {
 
     #[test]
     fn pick_layers_outbound_port_only_fans_out_to_v4_and_v6() {
-        let pairs = pick_layer_pairs(
-            Direction::Outbound,
-            None,
-            Some(&port_only_clause(80)),
-            None,
-        );
+        let pairs = pick_layer_pairs(Direction::Outbound, None, Some(&port_only_clause(80)), None);
         assert_eq!(
             pairs,
             vec![
@@ -2208,12 +2644,7 @@ mod tests {
 
     #[test]
     fn pick_layers_any_with_v6_clause_yields_outbound_and_inbound_v6() {
-        let pairs = pick_layer_pairs(
-            Direction::Any,
-            None,
-            Some(&v6_clause("fc00::")),
-            None,
-        );
+        let pairs = pick_layer_pairs(Direction::Any, None, Some(&v6_clause("fc00::")), None);
         assert_eq!(
             pairs,
             vec![

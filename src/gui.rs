@@ -16,35 +16,45 @@ pub mod app;
 pub mod app_icons;
 pub mod app_properties;
 pub mod apps_context_menu;
-pub mod net_log_context_menu;
-pub mod rules_context_menu;
-pub mod connect_dialog;
+pub mod column_layout;
 pub mod column_sizing;
+pub mod connect_dialog;
 pub mod connections;
-pub mod net_meter;
 pub mod dialogs;
 pub mod dns_resolve;
 pub mod event_log;
 pub mod first_run_wizard;
 pub mod font;
+mod hash_baseline;
 pub mod icons;
 pub mod ids;
 pub mod listview_groups;
 pub mod main_window;
 pub mod msg_slab;
+pub mod net_log_context_menu;
+pub mod net_meter;
+mod network_snapshot;
 pub mod notification;
+mod prompt_checks;
+mod refresh_batch;
 pub mod rule_editor;
+pub mod rules_context_menu;
 pub mod services_enum;
 pub mod settings;
 pub mod settings_dialog;
+mod single_instance;
+mod snapshot_worker;
 pub mod startup;
+pub mod theme;
 pub mod toolbar;
 pub mod tray;
 pub mod update_check;
 pub mod uwp_enum;
+mod window_state;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
@@ -61,6 +71,20 @@ use windows::core::PCWSTR;
 
 use crate::profile::{self, Profile};
 use app::App;
+
+static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// End the current GUI normally before starting its replacement. In particular,
+/// the old window and instance guard must be gone before the new process checks
+/// for an existing GUI, or it can activate this window and exit during restart.
+/// The caller saves window placement and settings before requesting shutdown.
+pub(super) fn request_restart(hwnd: HWND) {
+    RESTART_REQUESTED.store(true, Ordering::Relaxed);
+    if let Err(error) = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd) } {
+        RESTART_REQUESTED.store(false, Ordering::Relaxed);
+        eprintln!("amwall: cannot close the current window for restart: {error}");
+    }
+}
 
 /// Cached process-elevation check. `IsUserAnAdmin()` is stable for the
 /// process lifetime (UAC elevation is decided at launch), so cache it
@@ -103,6 +127,10 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
         v
     };
 
+    if single_instance::try_activate(admin) {
+        return ExitCode::SUCCESS;
+    }
+
     // "Skip UAC warning" silent elevation. When the user has
     // previously enabled this option (one-time UAC prompt to
     // register a Task Scheduler task with RunLevel = HIGHEST),
@@ -122,9 +150,7 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
                 return ExitCode::from(0);
             }
             Err(e) => {
-                eprintln!(
-                    "amwall: skipuac relaunch failed ({e}); continuing as unelevated GUI"
-                );
+                eprintln!("amwall: skipuac relaunch failed ({e}); continuing as unelevated GUI");
                 skipuac_failed = true;
             }
         }
@@ -157,6 +183,27 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
             }
         }
     }
+
+    // Acquire only after the elevation handoff so the unelevated launcher
+    // cannot prevent its elevated replacement from starting.
+    let instance_guard = match single_instance::acquire(admin) {
+        Ok(Some(guard)) => guard,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("amwall: {error}");
+            let message = wide(&error);
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+                MessageBoxW(
+                    HWND::default(),
+                    PCWSTR(message.as_ptr()),
+                    windows::core::w!("amwall"),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Per-Monitor v2 DPI awareness: hi-DPI displays (4K @ 200%+ scaling)
     // get sharp text and correctly-scaled controls. Must be set before
@@ -197,8 +244,7 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
     // Blocklist rules, preset User Rules). Empty file on fresh
     // install — every rule starts at its bundled `is_enabled`
     // default; the user's checkbox clicks populate it from there.
-    let internal_rules_state_path =
-        crate::internal_rules_state::default_state_path();
+    let internal_rules_state_path = crate::internal_rules_state::default_state_path();
     let internal_rules_state =
         crate::internal_rules_state::InternalRulesState::load(&internal_rules_state_path);
 
@@ -266,9 +312,7 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
         settings: std::cell::RefCell::new(settings),
         settings_path: std::cell::RefCell::new(settings_path),
         internal_rules_state: std::cell::RefCell::new(internal_rules_state),
-        internal_rules_state_path: std::cell::RefCell::new(
-            internal_rules_state_path,
-        ),
+        internal_rules_state_path: std::cell::RefCell::new(internal_rules_state_path),
     });
 
     let hwnd = match main_window::create(app, force_show) {
@@ -278,6 +322,7 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    instance_guard.bind(hwnd, admin);
     // hwnd kept alive by Win32 until WM_DESTROY → PostQuitMessage.
     let _ = hwnd;
 
@@ -320,14 +365,24 @@ pub fn run(default_profile_path: PathBuf, force_show: bool) -> ExitCode {
         }
     }
 
+    // WM_NCDESTROY has already released the App and its worker handles. Release
+    // the final single-instance handle before the replacement can start.
+    drop(instance_guard);
+    if RESTART_REQUESTED.swap(false, Ordering::Relaxed) {
+        let restarted = std::env::current_exe()
+            .and_then(|exe| std::process::Command::new(exe).arg("--show").spawn());
+        if let Err(error) = restarted {
+            eprintln!("amwall: cannot restart the GUI: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     ExitCode::from(msg.wParam.0 as u8)
 }
 
 pub(crate) fn detect_system_locale() -> Option<String> {
     let mut buf = [0u16; 85];
-    let len = unsafe {
-        windows::Win32::Globalization::GetUserDefaultLocaleName(&mut buf)
-    };
+    let len = unsafe { windows::Win32::Globalization::GetUserDefaultLocaleName(&mut buf) };
     if len <= 0 {
         return None;
     }
@@ -422,10 +477,7 @@ fn install_lcid_from_file() -> Option<u32> {
             let trimmed = value.trim();
             return match trimmed.parse::<u32>() {
                 Ok(n) if n > 0 => {
-                    eprintln!(
-                        "amwall: install-lcid: read {n} from {}",
-                        path.display()
-                    );
+                    eprintln!("amwall: install-lcid: read {n} from {}", path.display());
                     Some(n)
                 }
                 Ok(_) => {
@@ -458,9 +510,7 @@ fn install_lcid_from_file() -> Option<u32> {
 /// same fuzzy match as system-locale detection.
 fn lcid_to_available_locale(lcid: u32) -> Option<String> {
     let mut buf = [0u16; 85];
-    let len = unsafe {
-        windows::Win32::Globalization::LCIDToLocaleName(lcid, Some(&mut buf), 0)
-    };
+    let len = unsafe { windows::Win32::Globalization::LCIDToLocaleName(lcid, Some(&mut buf), 0) };
     if len <= 0 {
         return None;
     }
@@ -536,9 +586,7 @@ pub(crate) fn should_offer_elevation(
 /// permanent escape from this prompt is Settings → Skip UAC, which
 /// elevates silently on every later launch.
 fn offer_elevation() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        IDYES, MB_ICONWARNING, MB_YESNO, MessageBoxW,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONWARNING, MB_YESNO, MessageBoxW};
     use windows::core::PCWSTR;
     let title = wide(&rust_i18n::t!("dialog.admin_required"));
     let body = wide(&rust_i18n::t!("message.elevate_offer_body"));
@@ -562,9 +610,7 @@ fn offer_elevation() -> bool {
 /// dead unelevated process pinned for the entire session.
 fn relaunch_self_elevated(force_show: bool) -> Result<(), String> {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::UI::Shell::{
-        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
-    };
+    use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::PCWSTR;
 
@@ -600,6 +646,42 @@ fn relaunch_self_elevated(force_show: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::should_offer_elevation;
+
+    #[test]
+    fn restart_destroys_the_old_window_before_a_replacement_is_requested() {
+        use super::{Ordering, RESTART_REQUESTED, request_restart};
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, HMENU, IsWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+        };
+        use windows::core::w;
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("amwall restart regression"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                100,
+                HWND::default(),
+                HMENU::default(),
+                None,
+                None,
+            )
+        };
+        assert_ne!(hwnd.0, 0);
+        request_restart(hwnd);
+        assert!(!unsafe { IsWindow(hwnd) }.as_bool());
+        assert!(RESTART_REQUESTED.swap(false, Ordering::Relaxed));
+
+        // A failed shutdown must not leave a delayed restart armed for some
+        // later ordinary exit. No child process is spawned by this request.
+        request_restart(HWND::default());
+        assert!(!RESTART_REQUESTED.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn elevated_process_is_never_offered_elevation() {

@@ -52,6 +52,30 @@ GPL-3.0-or-later, same as upstream simplewall. As a derivative work, this licens
 
 Original simplewall © 2016-2026 Henry++.
 
+## Column layouts
+
+Each Windows tab remembers its column widths and left-to-right order. Drag a
+heading to move a column or drag its divider to resize it. Layouts survive
+restarts and monitor DPI changes. Automatic columns fit their longest entry or
+heading, including padding for icons and checkboxes. Once you resize a column
+manually, its saved width takes precedence. Turning **View → Autosize columns**
+off and back on re-fits the current view while keeping its column order.
+
+**View → Use dark theme** applies the simplewall-inspired palette to the main
+window, lists, headers, tabs, toolbar, status bar and dialogs. Windows high
+contrast settings take precedence. Hiding to the tray or reopening the app
+preserves its maximized state; a second launch activates the existing window.
+
+Newly discovered apps stay blocked until you explicitly allow them. Closing a
+firewall notification records the same Block decision as its Block button and
+suppresses repeat notifications for that app. Publisher signatures are shown
+for information and do not grant permission automatically.
+
+For repeated local testing of the same version, build the MSI with
+`./scripts/build-msi.ps1 -AllowSameVersionUpgrades`. This makes the test installer
+replace an earlier build of that version. The release workflow also uses this
+switch so a finished release can replace a local test build.
+
 ## Building
 
 ### Quick build (just the binary)
@@ -149,7 +173,7 @@ Tracked in the trailing banner of [`linux-build.sh`](linux-build.sh). High level
 
 ## Releasing
 
-Releases are produced by the [`release` workflow](.github/workflows/release.yml) running on `windows-latest`. It fires **only on tag push**, not on every commit. The workflow runs the full gating triad (`cargo build --release`, `cargo clippy --all-targets -- -D warnings`, `cargo test`), then `cargo wix`, then attaches the MSI to a **draft** GitHub Release.
+Releases are produced by the [`release` workflow](.github/workflows/release.yml) running on `windows-latest`. It fires **only on tag push**, not on every commit. The workflow runs the full gating triad (`cargo build --release`, `cargo clippy --all-targets -- -D warnings`, `cargo test`), then `scripts/build-msi.ps1`, then attaches the MSI to a **draft** GitHub Release.
 
 ### Cutting a release
 
@@ -169,7 +193,7 @@ Releases are produced by the [`release` workflow](.github/workflows/release.yml)
    git push origin vX.Y.Z
    ```
 5. **Watch the build** at https://github.com/amrust/amwall/actions. Cold cache: ~5–7 min. Warm: ~1–2 min.
-6. **Review and publish the draft Release**. On success, a draft appears at `https://github.com/amrust/amwall/releases/tag/vX.Y.Z` with the MSI attached and auto-generated changelog. To publish:
+6. **Review and publish the draft Release**. On success, a draft appears at `https://github.com/amrust/amwall/releases/tag/vX.Y.Z` with the MSI attached and the changelog from the annotated tag. To publish:
    ```
    gh release edit vX.Y.Z --draft=false
    ```

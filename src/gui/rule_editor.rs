@@ -184,6 +184,7 @@ unsafe extern "system" fn parent_dlg_proc(
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, lparam.0);
             }
             on_init_parent(hwnd);
+            super::theme::inherit(hwnd, unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) });
             1 // TRUE = let the dialog manager set the default focus.
         }
         WM_SIZE => {
@@ -1020,6 +1021,7 @@ unsafe extern "system" fn addrule_dlg_proc(
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, lparam.0);
             }
             let raw = lparam.0 as *const AddRuleState;
+            super::theme::inherit(hwnd, unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) });
             if !raw.is_null() {
                 let s = unsafe { &*raw };
                 use windows::Win32::UI::WindowsAndMessaging::SetDlgItemTextW;

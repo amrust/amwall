@@ -33,26 +33,20 @@ use windows::Win32::Graphics::Gdi::{DeleteObject, HBRUSH, HFONT, UpdateWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Controls::{
-    ICC_BAR_CLASSES, ICC_COOL_CLASSES, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
-    HIMAGELIST,
-    InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
-    LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_IMAGE, LVIF_PARAM, LVIF_STATE, LVIF_TEXT,
-    LVIS_STATEIMAGEMASK, LVITEMW,
-    HDM_GETITEMCOUNT,
-    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEM,
-    LVM_GETITEMCOUNT, LVM_GETITEMSTATE, LVM_GETITEMTEXTW,
-    LVM_GETNEXTITEM, LVM_GETTOPINDEX, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
-    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_COLUMNCLICK, LVN_ITEMCHANGED, LVN_KEYDOWN, LVSIL_SMALL,
-    LVIS_SELECTED, LVNI_SELECTED, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_REPORT, LVS_SHAREIMAGELISTS,
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW,
-    LVS_SHOWSELALWAYS, NM_CUSTOMDRAW, NM_DBLCLK, NM_RCLICK, NMHDR, NMITEMACTIVATE,
-    NMLVCUSTOMDRAW, NMLVKEYDOWN,
-    NMTBGETINFOTIPW, SBARS_TOOLTIPS, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW,
-    TBN_GETINFOTIPW, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW,
-    TCM_SETCURSEL,
-    TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
+    HDM_GETITEMCOUNT, HIMAGELIST, ICC_BAR_CLASSES, ICC_COOL_CLASSES, ICC_LISTVIEW_CLASSES,
+    ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
+    LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_GROUPID, LVIF_IMAGE,
+    LVIF_PARAM, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED, LVIS_STATEIMAGEMASK, LVITEMW,
+    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEM,
+    LVM_GETITEMCOUNT, LVM_GETITEMSTATE, LVM_GETITEMTEXTW, LVM_GETNEXTITEM, LVM_GETTOPINDEX,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_COLUMNCLICK, LVN_ITEMCHANGED, LVN_KEYDOWN,
+    LVNI_SELECTED, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT,
+    LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK, NM_RCLICK,
+    NMHDR, NMITEMACTIVATE, NMLVCUSTOMDRAW, NMLVKEYDOWN, NMTBGETINFOTIPW, SB_SETPARTS, SB_SETTEXTW,
+    SBARS_TOOLTIPS, STATUSCLASSNAMEW, TBN_GETINFOTIPW, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT,
+    TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL, TCN_SELCHANGE, WC_LISTVIEWW, WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
@@ -65,47 +59,45 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MoveWindow, RegisterClassExW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY,
-    WM_SETREDRAW, WM_SHOWWINDOW, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WM_DPICHANGED, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETREDRAW, WM_SHOWWINDOW, WM_SIZE,
+    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
 use super::app::App;
 use super::ids::{
-    IDC_APPS_PROFILE, IDC_APPS_SERVICE, IDC_APPS_UWP, IDC_LOG, IDC_NETWORK,
-    IDC_RULES_BLOCKLIST, IDC_RULES_CUSTOM, IDC_RULES_SYSTEM, IDC_SEARCH, IDC_STATUSBAR, IDC_TAB,
-    IDM_ABOUT, IDM_ADD_FILE, IDM_ALWAYSONTOP_CHK, IDM_AUTOALLOW_MICROSOFT_CHK,
-    IDM_AUTOSIZECOLUMNS_CHK, IDM_EMERGENCY_RESET,
+    IDC_APPS_PROFILE, IDC_APPS_SERVICE, IDC_APPS_UWP, IDC_LOG, IDC_NETWORK, IDC_RULES_BLOCKLIST,
+    IDC_RULES_CUSTOM, IDC_RULES_SYSTEM, IDC_SEARCH, IDC_STATUSBAR, IDC_TAB, IDM_ABOUT,
+    IDM_ADD_FILE, IDM_ALLOW, IDM_ALWAYSONTOP_CHK, IDM_AUTOSIZECOLUMNS_CHK, IDM_BLOCK,
     IDM_BLOCKLIST_EXTRA_ALLOW, IDM_BLOCKLIST_EXTRA_BLOCK, IDM_BLOCKLIST_EXTRA_DISABLE,
     IDM_BLOCKLIST_SPY_ALLOW, IDM_BLOCKLIST_SPY_BLOCK, IDM_BLOCKLIST_SPY_DISABLE,
-    IDM_ALLOW, IDM_BLOCK, IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK,
-    IDM_BLOCKLIST_UPDATE_DISABLE, IDM_CHECK, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK,
-    IDM_CLOSE_CONNECTION, IDM_CONTEXT_RULE_FIRST, IDM_CONTEXT_RULE_LAST, IDM_COPY, IDM_COPY_VALUE,
-    IDM_DELETE, IDM_EXIT,
-    IDM_EXPLORE, IDM_EXPORT, IDM_FIND, IDM_FONT, IDM_IMPORT,
+    IDM_BLOCKLIST_UPDATE_ALLOW, IDM_BLOCKLIST_UPDATE_BLOCK, IDM_BLOCKLIST_UPDATE_DISABLE,
+    IDM_CHECK, IDM_CHECKUPDATES, IDM_CHECKUPDATES_CHK, IDM_CLOSE_CONNECTION,
+    IDM_CONTEXT_RULE_FIRST, IDM_CONTEXT_RULE_LAST, IDM_COPY, IDM_COPY_VALUE, IDM_DELETE,
+    IDM_EMERGENCY_RESET, IDM_EXIT, IDM_EXPLORE, IDM_EXPORT, IDM_FIND, IDM_FONT, IDM_IMPORT,
     IDM_LOADONSTARTUP_CHK, IDM_LOGCLEAR, IDM_OPENRULESEDITOR, IDM_PROPERTIES, IDM_PURGE_TIMERS,
-    IDM_REMOVE_FROM_PROFILE,
-    IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_RULE_ALLOW6TO4, IDM_RULE_ALLOWLOOPBACK,
-    IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND, IDM_RULE_BLOCKOUTBOUND, IDM_SELECT_ALL,
-    IDM_SETTINGS, IDM_SHOW_IN_LIST,
+    IDM_PURGE_UNUSED, IDM_REFRESH, IDM_RELEASES, IDM_REMOVE_FROM_PROFILE, IDM_RULE_ALLOW6TO4,
+    IDM_RULE_ALLOWLOOPBACK, IDM_RULE_ALLOWWINDOWSUPDATE, IDM_RULE_BLOCKINBOUND,
+    IDM_RULE_BLOCKOUTBOUND, IDM_SELECT_ALL, IDM_SETTINGS, IDM_SHOW_IN_LIST,
     IDM_SHOWFILENAMESONLY_CHK, IDM_SHOWSEARCHBAR_CHK, IDM_SIZE_EXTRALARGE, IDM_SIZE_LARGE,
     IDM_SIZE_SMALL, IDM_SKIPUACWARNING_CHK, IDM_STARTMINIMIZED_CHK, IDM_TAB_NEXT, IDM_TAB_PREV,
-    IDM_TIMER_15MIN, IDM_TIMER_1HR,
-    IDM_TIMER_30MIN, IDM_TIMER_4HR, IDM_TOGGLE_SILENT, IDM_TOGGLE_UNDELETABLE, IDM_TRAY_ENABLELOG_CHK,
-    IDM_TRAY_ENABLENOTIFICATIONS_CHK, IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK,
-    IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR, IDM_TRAY_LOGCLEAR_ERR, IDM_TRAY_LOGSHOW,
-    IDM_TRAY_LOGSHOW_ERR, IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK,
-    IDM_TRAY_NOTIFICATIONONTRAY_CHK, IDM_TRAY_SHOW, IDM_TRAY_START, IDM_UNCHECK,
-    IDM_USECERTIFICATES_CHK,
-    IDM_USEDARKTHEME_CHK, IDM_USEHASHES_CHK, IDM_VIEW_DETAILS, IDM_VIEW_ICON, IDM_VIEW_TILE,
-    IDM_WEBSITE, IDM_ZOOM, TAB_LISTVIEW_IDS,
+    IDM_TIMER_1HR, IDM_TIMER_4HR, IDM_TIMER_15MIN, IDM_TIMER_30MIN, IDM_TOGGLE_SILENT,
+    IDM_TOGGLE_UNDELETABLE, IDM_TRAY_ENABLELOG_CHK, IDM_TRAY_ENABLENOTIFICATIONS_CHK,
+    IDM_TRAY_ENABLENOTIFICATIONSSOUND_CHK, IDM_TRAY_ENABLEUILOG_CHK, IDM_TRAY_LOGCLEAR,
+    IDM_TRAY_LOGCLEAR_ERR, IDM_TRAY_LOGSHOW, IDM_TRAY_LOGSHOW_ERR,
+    IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK, IDM_TRAY_NOTIFICATIONONTRAY_CHK, IDM_TRAY_SHOW,
+    IDM_TRAY_START, IDM_UNCHECK, IDM_USECERTIFICATES_CHK, IDM_USEDARKTHEME_CHK, IDM_USEHASHES_CHK,
+    IDM_VIEW_DETAILS, IDM_VIEW_ICON, IDM_VIEW_TILE, IDM_WEBSITE, IDM_ZOOM, TAB_LISTVIEW_IDS,
 };
 use rust_i18n::t;
 
 use super::dialogs;
 use super::toolbar::{self, Toolbar};
 use super::{post_quit, wide};
+
+#[cfg(test)]
+mod ui_regression_tests;
 
 /// Window class name. Win32 uses this string to look up our class
 /// registration.
@@ -146,7 +138,10 @@ struct NetworkSortState {
 
 impl Default for NetworkSortState {
     fn default() -> Self {
-        Self { column: -1, ascending: false }
+        Self {
+            column: -1,
+            ascending: false,
+        }
     }
 }
 
@@ -203,6 +198,12 @@ const LOGICAL_INITIAL_H: i32 = 600;
 /// (heap-allocated by `gui::run`) plus cached child HWNDs and the
 /// last-known DPI. We cache the toolbar/listview/status HWNDs to
 /// avoid `GetDlgItem` lookups on every WM_SIZE.
+struct PendingPrompt {
+    id: u64,
+    app: crate::profile::App,
+    parent: HWND,
+}
+
 struct WndState {
     app: Box<App>,
     /// HWND of the toolbar (the action-buttons row). Cached so
@@ -239,11 +240,8 @@ struct WndState {
     // `event_engine` so unsubscribe runs against a still-open
     // engine handle. Rust drops fields in declaration order,
     // hence subscription before rx before engine.
-    event_subscription:
-        std::cell::RefCell<Option<crate::wfp::events::EventSubscription>>,
-    event_rx: std::cell::RefCell<
-        Option<std::sync::mpsc::Receiver<crate::wfp::events::NetEvent>>,
-    >,
+    event_subscription: std::cell::RefCell<Option<crate::wfp::events::EventSubscription>>,
+    event_rx: std::cell::RefCell<Option<std::sync::mpsc::Receiver<crate::wfp::events::NetEvent>>>,
     /// Owner of the WFP engine handle the event subscription
     /// borrows from. `Option` because subscribe can fail (most
     /// commonly: not running as admin) and we want the GUI to
@@ -258,11 +256,14 @@ struct WndState {
     /// tab. Populate stamps each row's lParam with its index into this
     /// Vec so a right-click can round-trip row → Connection (Fable #27).
     connections: std::cell::RefCell<Vec<super::connections::Connection>>,
-    /// Persistent per-connection TCP traffic counters for the
-    /// Connections tab's download/upload/total columns. Survives across
-    /// refresh ticks (each rate is diffed against the previous tick's
-    /// byte counts) and prunes closed connections. UI-thread only.
-    traffic_monitor: std::cell::RefCell<super::connections::TrafficMonitor>,
+    /// IP Helper, adapter and process queries run on one background
+    /// worker. None during native UI tests, which supply cached data.
+    network_worker: std::cell::RefCell<
+        Option<super::snapshot_worker::SnapshotWorker<super::network_snapshot::NetworkSnapshot>>,
+    >,
+    /// Latest complete observation, reused by sorting, DNS updates and
+    /// tab switches without blocking the message loop or resampling rates.
+    network_snapshot: std::cell::RefCell<super::network_snapshot::NetworkSnapshot>,
     /// Sort column/direction for the Connections listview (column
     /// header clicks). Default: unsorted (enumeration order).
     network_sort: Cell<NetworkSortState>,
@@ -286,15 +287,9 @@ struct WndState {
     /// `log_size_limit`. Mirrors the in-memory `event_log` ring,
     /// but persists across app restarts.
     event_log_writer: std::cell::RefCell<super::event_log::EventLogWriter>,
-    /// `true` between WM_ENTERSIZEMOVE and WM_EXITSIZEMOVE — i.e.
-    /// while the user is actively dragging the resize edge. We
-    /// suppress paint on the listviews during the drag (single
-    /// MoveWindow with bRepaint=FALSE; the LVS_EX_DOUBLEBUFFER
-    /// content remains visible at the old size), and re-fire a
-    /// clean jiggle-repaint once at WM_EXITSIZEMOVE. Otherwise
-    /// the per-pixel WM_SIZE flood coalesces paints and lands
-    /// the listview in a half-painted state.
-    resizing: Cell<bool>,
+    /// Suppress persistence notifications while applying a layout ourselves.
+    applying_columns: Cell<bool>,
+    initializing: Cell<bool>,
     /// `filterId`s of every filter currently installed under
     /// amwall's `PROVIDER_KEY`. Drop-packet toast is gated on
     /// `event.filter_id ∈ this set` so we don't pop notifications
@@ -309,8 +304,7 @@ struct WndState {
     /// (the startup-detection path can't recover categories from
     /// a previous session, so this stays empty until the user
     /// next clicks Enable filters).
-    categorized_filter_ids:
-        std::cell::RefCell<crate::install::CategorizedFilterIds>,
+    categorized_filter_ids: std::cell::RefCell<crate::install::CategorizedFilterIds>,
     /// `true` when amwall has filters live in WFP (i.e.
     /// `amwall_filter_ids` is non-empty). Drives the toolbar
     /// "Enable filters" ↔ "Disable filters" toggle.
@@ -348,9 +342,8 @@ struct WndState {
     /// surfaced in App Properties / connect prompt / Connections
     /// "Signature" column). The pair lives in a single cache
     /// entry so we don't re-walk the trust state machine twice.
-    signed_cache: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, SignedInfo>>,
-    >,
+    signed_cache:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, SignedInfo>>>,
     /// Mirror of `Settings.use_certificates` shared with the
     /// signed worker. Atomic so the toggle handler can flip it
     /// without restarting the thread; the worker reads it
@@ -360,17 +353,13 @@ struct WndState {
     /// Sends file paths to the background WinVerifyTrust worker.
     /// `None` until the worker spawns at WM_CREATE; populator
     /// code enqueues every File-kind app path once.
-    signed_tx: std::cell::RefCell<
-        Option<std::sync::mpsc::Sender<std::path::PathBuf>>,
-    >,
+    signed_tx: std::cell::RefCell<Option<std::sync::mpsc::Sender<std::path::PathBuf>>>,
     /// Most recently right-clicked listview row, set on NM_RCLICK
     /// before the popup menu shows and consumed by the IDM_*
     /// handlers. None after the menu dismisses (or never opened).
     context_target: std::cell::RefCell<Option<super::apps_context_menu::ContextTarget>>,
-    /// Runtime-only (not persisted) map of app path -> last connect-prompt
-    /// unix time, so a blocked-but-not-silenced app is re-prompted once
-    /// `notification_timeout` minutes have elapsed rather than being
-    /// silenced forever by a single dismiss. Fable sweep finding #24.
+    /// Runtime-only map of app path -> last connect-prompt unix time.
+    /// Throttles retries while an app remains blocked but not silenced.
     last_notify: std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, i64>>,
     /// Runtime-only set of app paths that currently have an OPEN connect-
     /// prompt window. A drop for an app already in this set never spawns
@@ -378,10 +367,11 @@ struct WndState {
     /// can't stack into dozens overnight. This mirrors upstream
     /// simplewall's one-notification-per-app model (`_app_notify_addobject`
     /// swaps a single `ptr_app->notification`, notifications.c:149, into
-    /// one window). Cleared when the window closes for ANY reason (Allow /
-    /// Block / dismiss) via `WM_USER_CONNECT_PROMPT_CLOSED`, so the normal
-    /// `notification_timeout` re-prompt still applies after the user acts.
-    pending_prompts: std::cell::RefCell<std::collections::HashSet<std::path::PathBuf>>,
+    /// one window). Cleared when the window closes for any reason via
+    /// `WM_USER_CONNECT_PROMPT_CLOSED`. Closing a prompt is a Block choice.
+    pending_prompts:
+        std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, PendingPrompt>>,
+    next_prompt_id: Cell<u64>,
     /// Cached per-path icon indices into the system small-icon
     /// imagelist (same global imagelist Explorer uses). Filled
     /// lazily on first row-render and reused across repaints,
@@ -405,9 +395,7 @@ struct WndState {
     /// re-enqueue dead IPs every refresh). Only consulted when
     /// `Settings.use_network_resolution` is on; the worker
     /// itself runs unconditionally and is cheap while idle.
-    dns_cache: std::sync::Arc<
-        std::sync::Mutex<super::dns_resolve::DnsCacheMap>,
-    >,
+    dns_cache: std::sync::Arc<std::sync::Mutex<super::dns_resolve::DnsCacheMap>>,
     /// Sends new IPs to the DNS worker. `None` until the worker
     /// spawns at WM_CREATE.
     dns_tx: std::cell::RefCell<Option<std::sync::mpsc::Sender<std::net::IpAddr>>>,
@@ -423,6 +411,10 @@ struct WndState {
 
 impl WndState {
     fn new(app: Box<App>) -> Self {
+        Self::with_net_meter(app, super::net_meter::NetMeter::start())
+    }
+
+    fn with_net_meter(app: Box<App>, net_meter: Option<super::net_meter::NetMeter>) -> Self {
         Self {
             app,
             toolbar: Cell::new(HWND::default()),
@@ -447,16 +439,16 @@ impl WndState {
             event_engine: std::cell::RefCell::new(None),
             event_log: std::cell::RefCell::new(std::collections::VecDeque::new()),
             connections: std::cell::RefCell::new(Vec::new()),
-            traffic_monitor: std::cell::RefCell::new(
-                super::connections::TrafficMonitor::new(),
+            network_worker: std::cell::RefCell::new(None),
+            network_snapshot: std::cell::RefCell::new(
+                super::network_snapshot::NetworkSnapshot::default(),
             ),
             network_sort: Cell::new(NetworkSortState::default()),
             app_traffic: std::cell::RefCell::new(std::collections::HashMap::new()),
-            net_meter: std::cell::RefCell::new(super::net_meter::NetMeter::start()),
-            event_log_writer: std::cell::RefCell::new(
-                super::event_log::EventLogWriter::new(),
-            ),
-            resizing: Cell::new(false),
+            net_meter: std::cell::RefCell::new(net_meter),
+            event_log_writer: std::cell::RefCell::new(super::event_log::EventLogWriter::new()),
+            applying_columns: Cell::new(false),
+            initializing: Cell::new(true),
             amwall_filter_ids: std::cell::RefCell::new(std::collections::HashSet::new()),
             categorized_filter_ids: std::cell::RefCell::new(
                 crate::install::CategorizedFilterIds::default(),
@@ -466,23 +458,20 @@ impl WndState {
             uwp_packages: std::cell::RefCell::new(Vec::new()),
             context_target: std::cell::RefCell::new(None),
             last_notify: std::cell::RefCell::new(std::collections::HashMap::new()),
-            pending_prompts: std::cell::RefCell::new(std::collections::HashSet::new()),
+            pending_prompts: std::cell::RefCell::new(std::collections::HashMap::new()),
+            next_prompt_id: Cell::new(1),
             apps_sort: Cell::new(AppsSortState::default()),
             connected_paths: std::cell::RefCell::new(std::collections::HashSet::new()),
             signed_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
-            use_certificates_flag: std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(false),
-            ),
+            use_certificates_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             signed_tx: std::cell::RefCell::new(None),
             tray_added: Cell::new(false),
             taskbar_created_msg: Cell::new(0),
             app_icon_cache: super::app_icons::IconCache::new(),
             user_rules_preset_count: Cell::new(0),
-            dns_cache: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            dns_cache: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             dns_tx: std::cell::RefCell::new(None),
         }
     }
@@ -497,10 +486,9 @@ const EVENT_LOG_CAP: usize = 1000;
 /// `event_log`, refreshing the listview if the Log tab is visible.
 const TIMER_EVENT_DRAIN: usize = 9002;
 
-/// How often to drain the event channel, in milliseconds. 500 ms is
-/// frequent enough to feel live without burning CPU when no events
-/// are firing.
-const EVENT_DRAIN_INTERVAL_MS: u32 = 500;
+/// Pick up first-connection events promptly and yield between bounded batches.
+const EVENT_DRAIN_INTERVAL_MS: u32 = 100;
+const EVENT_DRAIN_BATCH: usize = 256;
 
 /// Periodic pump that scans `profile.apps` for entries whose
 /// `timer` field has elapsed and rolls them back to `is_enabled
@@ -512,23 +500,9 @@ const EVENT_DRAIN_INTERVAL_MS: u32 = 500;
 const TIMER_APP_EXPIRY: usize = 9005;
 const APP_EXPIRY_INTERVAL_MS: u32 = 60_000;
 
-/// One-shot timer that fires `EVENT_RESIZE_CLEANUP_MS` after the
-/// last WM_SIZE — at which point the user has stopped dragging
-/// and we can safely do the listview-jiggle repaint without
-/// fighting the live-drag paint flood. More reliable than
-/// WM_EXITSIZEMOVE, which doesn't fire under Aero Snap and can
-/// be missed in other edge cases.
-const TIMER_RESIZE_CLEANUP: usize = 9003;
-const RESIZE_CLEANUP_MS: u32 = 100;
-
-/// One-shot timer fired shortly after `LVN_GROUPINFO` reports a
-/// group state change (typically the user clicking a collapse
-/// chevron). Mirrors `TIMER_RESIZE_CLEANUP` — same paint-pipeline
-/// class of bug as M5.9.5 (listview internal layout doesn't pick
-/// up the new geometry without a 1-pixel jiggle). Delaying past the
-/// collapse animation avoids fighting comctl's own paint.
-const TIMER_GROUP_COLLAPSE_REPAINT: usize = 9004;
-const GROUP_COLLAPSE_REPAINT_MS: u32 = 100;
+/// Save header changes after the native control finishes committing its order.
+const TIMER_SAVE_COLUMNS: usize = 9009;
+const WM_SAVE_COLUMN_LAYOUT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 30;
 
 /// Hourly auto-check timer for new GitHub releases. Fires every
 /// 60 minutes once the window is up; the WM_TIMER branch calls
@@ -548,14 +522,6 @@ const TIMER_HASH_CHECK: usize = 9007;
 const HASH_CHECK_INTERVAL_MS: u32 = 10 * 60 * 1000;
 const UPDATE_CHECK_INTERVAL_MS: u32 = 60 * 60 * 1000;
 
-/// `LVN_GROUPINFO` — sent by a list-view control when a group's
-/// state has changed (collapsed, expanded, …). Not exposed as a
-/// public constant in windows-rs 0.54, so we hardcode it: the value
-/// is `LVN_FIRST - 88` per comctl headers, where `LVN_FIRST` is
-/// `(0u32 - 100u32) = 4294967196`. Verified live: this is the only
-/// notification that fires on chevron clicks.
-const LVN_GROUPINFO: u32 = 0xFFFFFF44;
-
 /// Register the window class, create the main window, show it.
 /// Ownership of `app` is transferred into the window's
 /// `GWLP_USERDATA` and reclaimed on `WM_NCDESTROY`.
@@ -570,10 +536,7 @@ pub fn create(app: Box<App>, force_show: bool) -> Result<HWND, String> {
         // until RB_INSERTBANDW silently fails.
         let icc = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_LISTVIEW_CLASSES
-                | ICC_TAB_CLASSES
-                | ICC_BAR_CLASSES
-                | ICC_COOL_CLASSES,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES | ICC_COOL_CLASSES,
         };
         if !InitCommonControlsEx(&icc).as_bool() {
             return Err("InitCommonControlsEx failed".into());
@@ -714,13 +677,28 @@ fn build_main_menu() -> Option<HMENU> {
 
         // ---- Settings ----
         let settings = CreatePopupMenu().ok()?;
-        append_string(settings, IDM_LOADONSTARTUP_CHK, &t!("settings.load_on_startup"));
-        append_string(settings, IDM_STARTMINIMIZED_CHK, &t!("settings.start_minimized"));
+        append_string(
+            settings,
+            IDM_LOADONSTARTUP_CHK,
+            &t!("settings.load_on_startup"),
+        );
+        append_string(
+            settings,
+            IDM_STARTMINIMIZED_CHK,
+            &t!("settings.start_minimized"),
+        );
         append_string(settings, IDM_SKIPUACWARNING_CHK, &t!("settings.skip_uac"));
-        append_string(settings, IDM_CHECKUPDATES_CHK, &t!("settings.check_updates"));
-        append_string(settings, IDM_AUTOALLOW_MICROSOFT_CHK, &t!("settings.auto_allow_microsoft"));
+        append_string(
+            settings,
+            IDM_CHECKUPDATES_CHK,
+            &t!("settings.check_updates"),
+        );
         append_separator(settings);
-        append_string(settings, IDM_USECERTIFICATES_CHK, &t!("settings.check_signatures"));
+        append_string(
+            settings,
+            IDM_USECERTIFICATES_CHK,
+            &t!("settings.check_signatures"),
+        );
         append_string(settings, IDM_USEHASHES_CHK, &t!("settings.check_hashes"));
         append_separator(settings);
 
@@ -730,7 +708,11 @@ fn build_main_menu() -> Option<HMENU> {
         append_separator(rules);
         append_string(rules, IDM_RULE_ALLOWLOOPBACK, &t!("rules.allow_loopback"));
         append_string(rules, IDM_RULE_ALLOW6TO4, &t!("rules.allow_6to4"));
-        append_string(rules, IDM_RULE_ALLOWWINDOWSUPDATE, &t!("rules.allow_windows_update"));
+        append_string(
+            rules,
+            IDM_RULE_ALLOWWINDOWSUPDATE,
+            &t!("rules.allow_windows_update"),
+        );
         append_popup(settings, rules, &t!("menu.rules"));
         append_popup(menu, settings, &t!("menu.settings"));
 
@@ -744,7 +726,11 @@ fn build_main_menu() -> Option<HMENU> {
         append_popup(blocklist, spy, &t!("blocklist.spy_telemetry"));
 
         let update = CreatePopupMenu().ok()?;
-        append_string(update, IDM_BLOCKLIST_UPDATE_DISABLE, &t!("blocklist.disable"));
+        append_string(
+            update,
+            IDM_BLOCKLIST_UPDATE_DISABLE,
+            &t!("blocklist.disable"),
+        );
         append_string(update, IDM_BLOCKLIST_UPDATE_ALLOW, &t!("blocklist.allow"));
         append_string(update, IDM_BLOCKLIST_UPDATE_BLOCK, &t!("blocklist.block"));
         append_popup(blocklist, update, &t!("blocklist.ms_update"));
@@ -786,12 +772,7 @@ unsafe fn append_separator(menu: HMENU) {
 unsafe fn append_popup(parent: HMENU, child: HMENU, label: &str) {
     let buf = wide(label);
     unsafe {
-        let _ = AppendMenuW(
-            parent,
-            MF_POPUP,
-            child.0 as usize,
-            PCWSTR(buf.as_ptr()),
-        );
+        let _ = AppendMenuW(parent, MF_POPUP, child.0 as usize, PCWSTR(buf.as_ptr()));
     }
 }
 
@@ -802,6 +783,10 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        m if m != 0 && m == super::single_instance::activation_message() => {
+            super::window_state::show(hwnd);
+            LRESULT(0)
+        }
         WM_NCCREATE => {
             // CREATESTRUCTW.lpCreateParams holds the WndState pointer
             // we passed via lpParam. Park it into GWLP_USERDATA so
@@ -822,15 +807,14 @@ unsafe extern "system" fn wnd_proc(
         },
         WM_SIZE => {
             on_size(hwnd);
-            // (Re-)arm the resize-cleanup timer. Each new WM_SIZE
-            // pushes the deadline back; once size events stop the
-            // timer fires once (100 ms later) and we run the
-            // listview-jiggle repaint to land in a clean paint
-            // state. This handles every resize path — drag,
-            // double-click maximize, Aero Snap, programmatic
-            // SetWindowPos — without depending on WM_EXITSIZEMOVE.
-            unsafe {
-                SetTimer(hwnd, TIMER_RESIZE_CLEANUP, RESIZE_CLEANUP_MS, None);
+            LRESULT(0)
+        }
+        WM_SAVE_COLUMN_LAYOUT => {
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                remember_column_layout(state, wparam.0, false);
+                unsafe {
+                    SetTimer(hwnd, TIMER_SAVE_COLUMNS, 250, None);
+                }
             }
             LRESULT(0)
         }
@@ -846,30 +830,6 @@ unsafe extern "system" fn wnd_proc(
                 on_tab_change(hwnd);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
-        WM_ENTERSIZEMOVE => {
-            // Mark resize-in-progress so on_size can skip the
-            // listview paint flag (bRepaint=FALSE) for the
-            // duration of the live drag. WM_SIZE fires many times
-            // per second during a drag and paint coalescing
-            // leaves the listview half-painted otherwise.
-            if let Some(state) = unsafe { state_ref(hwnd) } {
-                state.resizing.set(true);
-            }
-            LRESULT(0)
-        }
-        WM_EXITSIZEMOVE => {
-            // Drag finished. Clear the resize flag, then re-fire
-            // the clean repaint path: on_size with paint enabled
-            // (one final layout at the settled size), then
-            // on_tab_change which jiggles the active listview to
-            // wake its header subwindow up.
-            if let Some(state) = unsafe { state_ref(hwnd) } {
-                state.resizing.set(false);
-            }
-            on_size(hwnd);
-            on_tab_change(hwnd);
-            LRESULT(0)
         }
         WM_NOTIFY => {
             let nmhdr = unsafe { &*(lparam.0 as *const NMHDR) };
@@ -949,24 +909,18 @@ unsafe extern "system" fn wnd_proc(
             // flips ascending/descending; clicking a different
             // column resets to descending (so most-recent-first
             // is the default for Added).
-            if nmhdr.code == LVN_COLUMNCLICK
-                && nmhdr.idFrom == IDC_APPS_PROFILE as usize
-            {
-                let nmlv = unsafe {
-                    &*(lparam.0 as *const windows::Win32::UI::Controls::NMLISTVIEW)
-                };
+            if nmhdr.code == LVN_COLUMNCLICK && nmhdr.idFrom == IDC_APPS_PROFILE as usize {
+                let nmlv =
+                    unsafe { &*(lparam.0 as *const windows::Win32::UI::Controls::NMLISTVIEW) };
                 on_apps_column_click(hwnd, nmlv.iSubItem);
             }
             // LVN_COLUMNCLICK on the Connections listview sorts by the
             // clicked column (toggling direction on repeat clicks). Lets
             // the user rank by download / upload / total to surface the
             // busiest connections.
-            if nmhdr.code == LVN_COLUMNCLICK
-                && nmhdr.idFrom == IDC_NETWORK as usize
-            {
-                let nmlv = unsafe {
-                    &*(lparam.0 as *const windows::Win32::UI::Controls::NMLISTVIEW)
-                };
+            if nmhdr.code == LVN_COLUMNCLICK && nmhdr.idFrom == IDC_NETWORK as usize {
+                let nmlv =
+                    unsafe { &*(lparam.0 as *const windows::Win32::UI::Controls::NMLISTVIEW) };
                 on_network_column_click(hwnd, nmlv.iSubItem);
             }
             // Apps tab keyboard shortcuts (Ctrl+A select all,
@@ -1000,13 +954,10 @@ unsafe extern "system" fn wnd_proc(
                     || nmhdr.idFrom == IDC_RULES_SYSTEM as usize
                     || nmhdr.idFrom == IDC_RULES_CUSTOM as usize)
             {
-                let nmlv = unsafe {
-                    &*(lparam.0 as *const windows::Win32::UI::Controls::NMLISTVIEW)
-                };
-                let old_image =
-                    (nmlv.uOldState & LVIS_STATEIMAGEMASK.0) >> 12;
-                let new_image =
-                    (nmlv.uNewState & LVIS_STATEIMAGEMASK.0) >> 12;
+                let nmlv =
+                    unsafe { &*(lparam.0 as *const windows::Win32::UI::Controls::NMLISTVIEW) };
+                let old_image = (nmlv.uOldState & LVIS_STATEIMAGEMASK.0) >> 12;
+                let new_image = (nmlv.uNewState & LVIS_STATEIMAGEMASK.0) >> 12;
                 let state_image_changed = old_image != new_image;
                 // old_image == 0 means "fresh insert" — comctl
                 // synthesises a 0->{1,2} transition for every row
@@ -1017,35 +968,7 @@ unsafe extern "system" fn wnd_proc(
                 let is_user_click = old_image != 0 && state_image_changed;
                 if is_user_click {
                     let new_checked = new_image == 2;
-                    on_listview_checkbox_toggle(
-                        hwnd,
-                        nmhdr.idFrom as i32,
-                        nmlv.iItem,
-                        new_checked,
-                    );
-                }
-            }
-            // LVN_GROUPINFO fires whenever a group's state changes —
-            // most importantly when the user clicks a collapse
-            // chevron. comctl32 doesn't expose any other notification
-            // for that gesture, so this is the canonical hook.
-            // Schedule the same paint-jiggle the resize cleanup uses
-            // so collapsed/expanded items render cleanly.
-            if nmhdr.code == LVN_GROUPINFO
-                && (nmhdr.idFrom == IDC_APPS_PROFILE as usize
-                    || nmhdr.idFrom == IDC_APPS_SERVICE as usize
-                    || nmhdr.idFrom == IDC_APPS_UWP as usize
-                    || nmhdr.idFrom == IDC_RULES_BLOCKLIST as usize
-                    || nmhdr.idFrom == IDC_RULES_SYSTEM as usize
-                    || nmhdr.idFrom == IDC_RULES_CUSTOM as usize)
-            {
-                unsafe {
-                    SetTimer(
-                        hwnd,
-                        TIMER_GROUP_COLLAPSE_REPAINT,
-                        GROUP_COLLAPSE_REPAINT_MS,
-                        None,
-                    );
+                    on_listview_checkbox_toggle(hwnd, nmhdr.idFrom as i32, nmlv.iItem, new_checked);
                 }
             }
             // Delete key on the User rules listview removes the
@@ -1101,64 +1024,15 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         m if m == WM_USER_SIGNED_REFRESH => {
-            // Worker filled new cache entries — repaint the
-            // active apps listview so freshly-verified rows show
-            // their green Signed colour.
-            //
-            // Painting history of this handler:
-            //   v1.1.10 and earlier: InvalidateRect(bErase=false) —
-            //     too weak; LVS_EX_DOUBLEBUFFER's cached surface
-            //     stayed the old non-coloured pixels.
-            //   v1.1.11: RedrawWindow with RDW_INVALIDATE | RDW_ERASE
-            //     | RDW_ALLCHILDREN | RDW_UPDATENOW — still too weak.
-            //   v1.1.12: force_active_apps_listview_jiggle (the
-            //     MoveWindow +1px jiggle that synthesises a WM_SIZE).
-            //     ALSO didn't work in practice — WM_SIZE alone
-            //     doesn't seem to make comctl32 throw away the
-            //     double-buffer cache for a listview whose
-            //     underlying ITEMS haven't changed.
-            //
-            // What does work in practice (per a user test on
-            // v1.1.12 — the post-Allow/Block redraw produces the
-            // colours every time): the LVM_DELETEALLITEMS +
-            // LVM_INSERTITEMW sequence inside `populate_apps_tab`.
-            // Mutating the listview's internal item array forces
-            // comctl32 to invalidate its cache and re-run
-            // CDDS_ITEMPREPAINT per row on the next paint — and
-            // THAT path picks up the freshly-cached signed
-            // verdicts.
-            //
-            // Frequency cost: the worker only posts this every
-            // BATCH_FOR_REFRESH (10) verifications, so even on a
-            // fresh install with hundreds of apps the populate
-            // fires a few dozen times during catch-up. populate
-            // is O(rows) — for a typical profile (a few dozen to
-            // a couple hundred apps) it's a ~ms-class operation,
-            // imperceptible in practice. The re-enqueue of
-            // already-cached paths to the worker is a no-op
-            // because the worker dedups against the same cache.
+            // Color changes need a paint, not a destructive row rebuild.
             if let Some(state) = unsafe { state_ref(hwnd) } {
-                let tab = state.tab.get();
-                if tab.0 != 0 {
-                    let sel = unsafe {
-                        SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0))
-                    }
-                    .0 as isize;
-                    if (0..=2).contains(&sel) {
-                        // populate_apps_tab re-inserts items so
-                        // pick_app_row_color is consulted with the
-                        // fresh cache; on_tab_change then ShowWindow's
-                        // the listview and runs force_listview_repaint
-                        // (the MoveWindow +1px jiggle) — same
-                        // sequence on_connect_allow uses. populate
-                        // alone leaves comctl32's cached
-                        // LVS_EX_DOUBLEBUFFER surface stale; the
-                        // jiggle after the re-insert is what makes
-                        // the new colours actually paint.
-                        populate_apps_tab(state);
-                        on_tab_change(hwnd);
-                    }
-                }
+                repaint_active_apps_listview(hwnd, state);
+            }
+            LRESULT(0)
+        }
+        m if m == super::network_snapshot::READY => {
+            if let Some(state) = unsafe { state_ref(hwnd) } {
+                render_ready_network_snapshot(hwnd, state);
             }
             LRESULT(0)
         }
@@ -1170,10 +1044,8 @@ unsafe extern "system" fn wnd_proc(
             if let Some(state) = unsafe { state_ref(hwnd) } {
                 let tab = state.tab.get();
                 if tab.0 != 0 {
-                    let sel = unsafe {
-                        SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0))
-                    }
-                    .0 as isize;
+                    let sel = unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0
+                        as isize;
                     if sel == 6 {
                         populate_connections_tab(state);
                     } else if sel == 7 {
@@ -1184,30 +1056,20 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_TIMER => {
-            if wparam.0 == TIMER_CONNECTIONS_REFRESH {
-                if let Some(state) = unsafe { state_ref(hwnd) } {
-                    populate_connections_tab(state);
-                    // Connections is the ONLY tab that does a full
-                    // refill (DELETEALLITEMS + re-insert) from a timer,
-                    // calling its populator directly rather than via
-                    // on_tab_change / repopulate_tab — so it is the only
-                    // one that never reaches the jiggle those paths run.
-                    //
-                    // Re-inserting items invalidates comctl32's
-                    // LVS_EX_DOUBLEBUFFER cache but does not make it
-                    // repaint; see the painting history recorded on the
-                    // WM_USER_SIGNED_REFRESH handler, where
-                    // InvalidateRect(bErase=false) and RedrawWindow with
-                    // RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW were both
-                    // measured too weak. Re-insert THEN jiggle is the
-                    // combination that actually paints. Without this the
-                    // tab looks right for two seconds after you switch
-                    // to it and then goes stale until moused over.
-                    jiggle_active_listview(state, 6);
+            if wparam.0 == TIMER_SAVE_COLUMNS {
+                unsafe {
+                    let _ = KillTimer(hwnd, TIMER_SAVE_COLUMNS);
                 }
-            } else if wparam.0 == TIMER_APPS_REFRESH {
                 if let Some(state) = unsafe { state_ref(hwnd) } {
-                    refresh_apps_traffic_columns(state);
+                    let path = state.app.settings_path.borrow().clone();
+                    if let Err(e) = state.app.settings.borrow().save(&path) {
+                        eprintln!("amwall: column layout: settings save failed: {e}");
+                    }
+                }
+            } else if matches!(wparam.0, TIMER_CONNECTIONS_REFRESH | TIMER_APPS_REFRESH) {
+                if let Some(state) = unsafe { state_ref(hwnd) } {
+                    render_ready_network_snapshot(hwnd, state);
+                    request_network_snapshot(state);
                 }
             } else if wparam.0 == TIMER_EVENT_DRAIN {
                 if let Some(state) = unsafe { state_ref(hwnd) } {
@@ -1230,8 +1092,7 @@ unsafe extern "system" fn wnd_proc(
                 // write update_dismissed_tag — see on_update_available).
                 if let Some(state) = unsafe { state_ref(hwnd) } {
                     if state.app.settings.borrow().check_updates {
-                        let dismissed =
-                            state.app.settings.borrow().update_dismissed_tag.clone();
+                        let dismissed = state.app.settings.borrow().update_dismissed_tag.clone();
                         let dismissed_opt = if dismissed.is_empty() {
                             None
                         } else {
@@ -1244,43 +1105,6 @@ unsafe extern "system" fn wnd_proc(
                         );
                     }
                 }
-            } else if wparam.0 == TIMER_GROUP_COLLAPSE_REPAINT {
-                // One-shot — disarm before any further work so a
-                // re-arm during repaint doesn't recurse.
-                unsafe {
-                    let _ = KillTimer(hwnd, TIMER_GROUP_COLLAPSE_REPAINT);
-                }
-                // The active listview is whichever tab is selected;
-                // running on_tab_change does the SW_SHOW + force-
-                // repaint jiggle that fixes paint glitches without
-                // re-inserting items (so the user's just-collapsed
-                // state survives).
-                on_tab_change(hwnd);
-            } else if wparam.0 == TIMER_RESIZE_CLEANUP {
-                // One-shot. Disarm immediately so we don't keep
-                // jiggling on every tick after a single resize.
-                unsafe {
-                    let _ = KillTimer(hwnd, TIMER_RESIZE_CLEANUP);
-                }
-                if let Some(state) = unsafe { state_ref(hwnd) } {
-                    let tab = state.tab.get();
-                    if tab.0 != 0 {
-                        let sel = unsafe {
-                            SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0))
-                        }
-                        .0 as isize;
-                        let slot = if sel < 0 { 0 } else { sel as usize };
-                        // Repopulate clears + re-inserts items
-                        // and forces the listview to rebuild its
-                        // view, which is invariant to whatever
-                        // half-painted state comctl32 is in
-                        // post-resize. Followed by on_tab_change
-                        // for the jiggle that wakes the header
-                        // subwindow up.
-                        repopulate_tab(state, slot);
-                    }
-                }
-                on_tab_change(hwnd);
             }
             LRESULT(0)
         }
@@ -1294,15 +1118,14 @@ unsafe extern "system" fn wnd_proc(
             // window.
             if let Some(state) = unsafe { state_ref(hwnd) } {
                 if state.tray_added.get() {
-                    unsafe {
-                        let _ = ShowWindow(hwnd, SW_HIDE);
-                    }
+                    super::window_state::hide(hwnd);
                     return LRESULT(0);
                 }
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_DESTROY => {
+            super::connect_dialog::shutdown();
             // Tear down the tray icon before quitting so the
             // notification area doesn't keep a stale slot for
             // the dead HWND until the user hovers over it.
@@ -1435,21 +1258,27 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // hidden initially; the `on_tab_change` call at the end shows
     // the one matching the selected tab.
     //
-    // Each listview is MoveWindow'd to a non-zero rect *before*
-    // configure_listview adds columns. Inserting columns into a
-    // 0×0 listview leaves the internal header control with bogus
-    // geometry that subsequent resizes don't recover — observed as
-    // headers/rows that stay invisible until hot-tracked column-
-    // by-column on hover. on_size below sizes the listview to its
-    // real rect; the 800×600 here is just placeholder geometry so
-    // the header has somewhere to lay itself out.
+    // Give the header a usable initial rectangle before inserting columns;
+    // the first layout pass below sizes every view to the tab content area.
     for (slot, &id) in TAB_LISTVIEW_IDS.iter().enumerate() {
         let lv = create_tab_listview(hwnd, id)?;
         unsafe {
             let _ = MoveWindow(lv, 0, 0, 800, 600, false);
         }
         configure_listview(lv, id, state.dpi.get())?;
+        if !unsafe {
+            windows::Win32::UI::Shell::SetWindowSubclass(lv, Some(listview_header_proc), 1, 0)
+        }
+        .as_bool()
+        {
+            return Err("Could not attach column layout notifications".into());
+        }
         state.listviews[slot].set(lv);
+        if let Some(layout) = state.app.settings.borrow().column_layouts[slot].clone() {
+            state.applying_columns.set(true);
+            layout.apply(lv, listview_column_count(lv) as usize, state.dpi.get());
+            state.applying_columns.set(false);
+        }
     }
 
     // Status bar at the bottom. Two parts: filter state, item count.
@@ -1496,6 +1325,7 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     super::font::apply_recursive(hwnd, font);
 
     // Triggers on_size (which lays out children) and on_tab_change.
+    state.initializing.set(false);
     on_size(hwnd);
     on_tab_change(hwnd);
 
@@ -1512,12 +1342,6 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
         SetTimer(hwnd, TIMER_HASH_CHECK, HASH_CHECK_INTERVAL_MS, None);
     }
 
-    // First drift check at launch, BEFORE the startup filter
-    // reconciliation below, so a binary that was tampered while amwall
-    // was closed is disabled and never receives a permit this run.
-    // Security audit finding F.1.
-    check_hash_drift(hwnd, state);
-
     // Filters installed on a previous run survive process exit
     // (we ask BFE to persist them across reboots, which also
     // means they outlive amwall itself). On startup we check
@@ -1526,6 +1350,10 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // title-bar would say "off" while the kernel is still
     // dropping packets.
     detect_initial_filter_state(hwnd, state);
+
+    // Detect persisted permits before checking hashes, so drift can revoke
+    // an existing permit as well as prevent a new one during auto-enable.
+    check_hash_drift(hwnd, state);
 
     // If the user's last explicit choice was "filters on" but
     // the kernel has no amwall filters (fresh install, or a
@@ -1572,6 +1400,7 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // so toggling the setting from off→on doesn't need a respawn.
     let dns_tx = super::dns_resolve::spawn_worker(hwnd, state.dns_cache.clone());
     *state.dns_tx.borrow_mut() = Some(dns_tx);
+    start_network_worker(hwnd, state);
 
     // First-run wizard (M9.4): if the user has never seen it
     // and simplewall has a config to import, ask. Runs once per
@@ -1593,7 +1422,11 @@ fn on_create(hwnd: HWND) -> Result<(), String> {
     // hourly TIMER_UPDATE_CHECK tick — see WM_TIMER below.
     if state.app.settings.borrow().check_updates {
         let dismissed = state.app.settings.borrow().update_dismissed_tag.clone();
-        let dismissed_opt = if dismissed.is_empty() { None } else { Some(dismissed.as_str()) };
+        let dismissed_opt = if dismissed.is_empty() {
+            None
+        } else {
+            Some(dismissed.as_str())
+        };
         super::update_check::check_async(hwnd, env!("CARGO_PKG_VERSION"), dismissed_opt);
         unsafe {
             SetTimer(hwnd, TIMER_UPDATE_CHECK, UPDATE_CHECK_INTERVAL_MS, None);
@@ -1631,15 +1464,9 @@ fn maybe_run_first_run_wizard(hwnd: HWND, state: &WndState) {
                     populate_apps_tab(state);
                     populate_user_rules(state);
                     on_tab_change(hwnd);
-                    set_status_text(
-                        state.status.get(),
-                        0,
-                        &t!("status.imported_simplewall"),
-                    );
+                    set_status_text(state.status.get(), 0, &t!("status.imported_simplewall"));
                 }
-                Err(e) => eprintln!(
-                    "amwall: imported profile parse failed: {e}"
-                ),
+                Err(e) => eprintln!("amwall: imported profile parse failed: {e}"),
             }
         }
         Choice::StartFresh | Choice::NotApplicable => {}
@@ -1682,9 +1509,7 @@ fn try_subscribe_events(state: &WndState) {
             *state.event_engine.borrow_mut() = Some(engine);
         }
         Err(e) => {
-            eprintln!(
-                "amwall: net-event subscribe failed (admin may be required): {e}"
-            );
+            eprintln!("amwall: net-event subscribe failed (admin may be required): {e}");
             note_events_unavailable(state);
             // Drop the engine — no subscription means no point
             // holding it open.
@@ -1760,9 +1585,7 @@ fn try_auto_enable_filters_at_startup(hwnd: HWND, state: &WndState) {
         return;
     }
     if !state.app.settings.borrow().filters_active_persisted {
-        eprintln!(
-            "amwall: auto-enable filters: skipping (persisted choice was off)"
-        );
+        eprintln!("amwall: auto-enable filters: skipping (persisted choice was off)");
         return;
     }
     if !unsafe { IsUserAnAdmin() }.as_bool() {
@@ -1771,9 +1594,7 @@ fn try_auto_enable_filters_at_startup(hwnd: HWND, state: &WndState) {
         );
         return;
     }
-    eprintln!(
-        "amwall: auto-enable filters: persisted=true and kernel empty; installing now"
-    );
+    eprintln!("amwall: auto-enable filters: persisted=true and kernel empty; installing now");
     let engine = match crate::wfp::WfpEngine::open() {
         Ok(e) => e,
         Err(e) => {
@@ -1804,6 +1625,7 @@ fn try_auto_enable_filters_at_startup(hwnd: HWND, state: &WndState) {
             true,
         )
     };
+    ensure_enabled_hash_baselines(state);
     let report = match crate::install::install_with_internal(
         &engine,
         &state.app.profile.borrow(),
@@ -1851,12 +1673,11 @@ fn try_auto_enable_filters_at_startup(hwnd: HWND, state: &WndState) {
 /// click.
 fn update_titlebar_icon(hwnd: HWND, active: bool) {
     use windows::Win32::UI::WindowsAndMessaging::{ICON_BIG, ICON_SMALL, LoadIconW, WM_SETICON};
-    let hi = match unsafe {
-        windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null())
-    } {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let hi =
+        match unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null()) } {
+            Ok(h) => h,
+            Err(_) => return,
+        };
     let res_id = if active { 1usize } else { 2usize };
     let icon = match unsafe { LoadIconW(hi, PCWSTR(res_id as *const u16)) } {
         Ok(i) => i,
@@ -1869,12 +1690,7 @@ fn update_titlebar_icon(hwnd: HWND, active: bool) {
             WPARAM(ICON_SMALL as usize),
             LPARAM(icon.0),
         );
-        SendMessageW(
-            hwnd,
-            WM_SETICON,
-            WPARAM(ICON_BIG as usize),
-            LPARAM(icon.0),
-        );
+        SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(icon.0));
     }
 
     // Keep the tray icon's color/mono variant in sync with the
@@ -1890,9 +1706,7 @@ fn update_titlebar_icon(hwnd: HWND, active: bool) {
 /// its command id. Used for the Notifications toggle so the button
 /// visibly reflects whether the connect-prompt mode is on.
 fn set_toolbar_button_checked(state: &WndState, id: u16, checked: bool) {
-    use windows::Win32::UI::Controls::{
-        TBSTATE_CHECKED, TBSTATE_ENABLED, TB_SETSTATE,
-    };
+    use windows::Win32::UI::Controls::{TB_SETSTATE, TBSTATE_CHECKED, TBSTATE_ENABLED};
     let toolbar = state.toolbar.get();
     if toolbar.0 == 0 {
         return;
@@ -1927,10 +1741,7 @@ fn on_toggle_notifications(hwnd: HWND) {
     };
     let path = state.app.settings_path.borrow().clone();
     if let Err(e) = state.app.settings.borrow().save(&path) {
-        eprintln!(
-            "amwall: settings: save failed for {}: {e}",
-            path.display()
-        );
+        eprintln!("amwall: settings: save failed for {}: {e}", path.display());
     }
     set_toolbar_button_checked(state, IDM_TRAY_ENABLENOTIFICATIONS_CHK, new_value);
     set_status_text(
@@ -1945,7 +1756,7 @@ fn on_toggle_notifications(hwnd: HWND) {
 }
 
 fn update_enable_filters_button(state: &WndState, active: bool) {
-    use windows::Win32::UI::Controls::{TBBUTTONINFOW, TBIF_IMAGE, TBIF_TEXT, TB_SETBUTTONINFOW};
+    use windows::Win32::UI::Controls::{TB_SETBUTTONINFOW, TBBUTTONINFOW, TBIF_IMAGE, TBIF_TEXT};
     let toolbar = state.toolbar.get();
     if toolbar.0 == 0 {
         return;
@@ -1966,7 +1777,11 @@ fn update_enable_filters_button(state: &WndState, active: bool) {
         let _ = windows::Win32::UI::Controls::ImageList_Destroy(icons.himagelist);
     }
 
-    let label = if active { t!("toolbar.disable_filters") } else { t!("toolbar.enable_filters") };
+    let label = if active {
+        t!("toolbar.disable_filters")
+    } else {
+        t!("toolbar.enable_filters")
+    };
     let mut wlabel = wide(&label);
     let mut info = TBBUTTONINFOW {
         cbSize: std::mem::size_of::<TBBUTTONINFOW>() as u32,
@@ -2009,10 +1824,7 @@ fn on_toast_moved(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     // survive a restart, and we log to stderr.
     let path = state.app.settings_path.borrow().clone();
     if let Err(e) = state.app.settings.borrow().save(&path) {
-        eprintln!(
-            "amwall: settings: save failed for {}: {e}",
-            path.display()
-        );
+        eprintln!("amwall: settings: save failed for {}: {e}", path.display());
     }
 }
 
@@ -2042,7 +1854,10 @@ fn nt_path_to_win32(nt_path: &str) -> Option<String> {
         // QueryDosDeviceW returns a double-NUL-terminated list of
         // NT names; the first entry is the canonical mapping. Find
         // the first NUL to slice it.
-        let first_end = buf[..n as usize].iter().position(|&c| c == 0).unwrap_or(n as usize);
+        let first_end = buf[..n as usize]
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(n as usize);
         let nt_root = String::from_utf16_lossy(&buf[..first_end]);
         let nt_root_lc = nt_root.to_lowercase();
         if nt_root_lc.is_empty() {
@@ -2070,8 +1885,7 @@ fn nt_path_to_win32(nt_path: &str) -> Option<String> {
 // M11.5 was silently dropped, which is why row colours never
 // appeared on cold launch — the four attempts in v1.1.10–v1.1.13
 // were all editing a handler that was never being called.
-const WM_USER_SIGNED_REFRESH: u32 =
-    windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x120;
+const WM_USER_SIGNED_REFRESH: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 0x120;
 
 /// Worker-thread entry. Drains `rx` for paths to verify,
 /// updates `cache` with each result, and posts
@@ -2100,10 +1914,23 @@ fn spawn_signed_worker(
     // by Win32 contract.
     let hwnd_raw = main_hwnd.0 as usize;
     std::thread::spawn(move || {
-        const BATCH_FOR_REFRESH: u32 = 10;
-        let mut since_last_post = 0u32;
-        // Channel-closed (app shutting down) breaks the loop.
-        while let Ok(path) = rx.recv() {
+        let mut batch = super::refresh_batch::RefreshBatch::new();
+        loop {
+            let path = match batch.recv(&rx) {
+                Ok(path) => path,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if batch.flush(std::time::Instant::now(), false) {
+                        post_signed_refresh(hwnd_raw);
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    if batch.flush(std::time::Instant::now(), true) {
+                        post_signed_refresh(hwnd_raw);
+                    }
+                    break;
+                }
+            };
             // Skip if already cached AND the cached entry has
             // (or doesn't need) a signer. Re-verify when the
             // user just turned use_certificates on so we
@@ -2119,19 +1946,16 @@ fn spawn_signed_worker(
             }
             // Display-only signer worker: no revocation network check
             // (fast, offline-safe). Security audit finding F.2.
-            let info = verify_signature(&path, want_signer, false);
+            if batch.flush(std::time::Instant::now(), true) {
+                post_signed_refresh(hwnd_raw);
+            }
+            let info = verify_signature(&path, want_signer);
             if let Ok(mut g) = cache.lock() {
                 g.insert(path, info);
             }
-            since_last_post += 1;
-            if since_last_post >= BATCH_FOR_REFRESH {
-                since_last_post = 0;
+            if batch.changed(std::time::Instant::now()) {
                 post_signed_refresh(hwnd_raw);
             }
-        }
-        // Final flush so the last partial batch repaints too.
-        if since_last_post > 0 {
-            post_signed_refresh(hwnd_raw);
         }
     });
     tx
@@ -2145,75 +1969,90 @@ fn post_signed_refresh(hwnd_raw: usize) {
     }
 }
 
-/// Re-walk the IP Helper tables and replace `connected_paths`
-/// with the current set. Cheap (one syscall per protocol +
-/// process-handle opens for each unique PID), but synchronous —
-/// only invoked from populator entry points so it runs at most
-/// once per tab repaint, not once per row.
+/// Start observation only after a real main window exists. Tests keep
+/// this optional and render their own snapshots without touching the OS.
+fn start_network_worker(hwnd: HWND, state: &WndState) {
+    *state.network_worker.borrow_mut() = Some(super::network_snapshot::start(hwnd));
+    request_network_snapshot(state);
+}
+
+/// Refresh requests coalesce while collection is running. A slow IP
+/// Helper call never queues a backlog of obsolete snapshots.
+fn request_network_snapshot(state: &WndState) {
+    if let Some(worker) = state.network_worker.borrow().as_ref() {
+        worker.request();
+    }
+}
+
+/// Adopt one complete observation. ETW rates are sampled once per new
+/// snapshot so a header click or DNS repaint cannot consume the next
+/// interval and make every speed briefly fall to zero.
+fn consume_network_snapshot(state: &WndState) -> bool {
+    let snapshot = state
+        .network_worker
+        .borrow()
+        .as_ref()
+        .and_then(|worker| worker.take_ready());
+    let Some(mut snapshot) = snapshot else {
+        return false;
+    };
+    if let Some(meter) = state.net_meter.borrow_mut().as_mut() {
+        snapshot.pid_rates = meter.rates();
+        let endpoint_rates = meter.conn_rates();
+        for connection in &mut snapshot.connections {
+            if connection.has_stats {
+                continue;
+            }
+            let is_udp = connection.protocol == super::connections::Protocol::Udp;
+            if let Some(rate) = endpoint_rates.get(&(is_udp, connection.local.port)) {
+                connection.download_speed = rate.download;
+                connection.upload_speed = rate.upload;
+                connection.total_bytes = rate.total;
+                connection.has_stats = true;
+            }
+        }
+    }
+    *state.network_snapshot.borrow_mut() = snapshot;
+    refresh_connected_paths(state);
+    refresh_app_traffic(state);
+    true
+}
+
+/// Update the row-color cache from the last complete observation. No
+/// network table or process queries are performed on the GUI thread.
 fn refresh_connected_paths(state: &WndState) {
-    // Store ASCII-lowercased so membership tests match the lowercase
-    // `profile.apps[].path`; `enumerate_active_paths` returns the OS's
-    // real casing and Windows paths are case-insensitive (an exact
-    // `PathBuf` compare would silently never hit — the "talking now"
-    // highlight then never lit).
-    *state.connected_paths.borrow_mut() = super::connections::enumerate_active_paths()
-        .into_iter()
-        .map(|p| std::path::PathBuf::from(p.to_string_lossy().to_ascii_lowercase()))
+    *state.connected_paths.borrow_mut() = state
+        .network_snapshot
+        .borrow()
+        .process_paths
+        .values()
+        .map(std::path::PathBuf::from)
         .collect();
 }
 
-/// Run the M5.9.5 paint-jiggle on the currently-active apps
-/// listview. Used after `auto_catalog_drops` adds rows so they
-/// show up in the same paint cycle without waiting for a
-/// resize / scroll / click. The 1-pixel MoveWindow forces
-/// listview internal layout to recompute, which is the only
-/// reliable way to wake comctl up for fresh rows.
-fn force_active_apps_listview_jiggle(hwnd: HWND, state: &WndState) {
+/// Queue one native repaint for the visible apps view. Hidden tabs stay hidden.
+fn repaint_active_apps_listview(_hwnd: HWND, state: &WndState) {
+    let selected = unsafe { SendMessageW(state.tab.get(), TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0;
+    if (0..=2).contains(&selected) {
+        redraw_listview(state.listviews[selected as usize].get());
+    }
+}
+
+/// Invalidate client, header and border together. The message loop coalesces
+/// updates; forcing synchronous paints during mutation caused visible flicker.
+fn redraw_listview(lv: HWND) {
     use windows::Win32::Graphics::Gdi::{
-        InvalidateRect, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow,
+        RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow,
     };
-    let tab = state.tab.get();
-    if tab.0 == 0 {
-        return;
-    }
-    let sel = unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
-    let slot: usize = if (0..=2).contains(&sel) { sel as usize } else { 0 };
-    let lv = state.listviews[slot].get();
-    if lv.0 == 0 {
-        return;
-    }
-
-    // Synchronous pass — handles the simple cases (auto-catalog
-    // during a fully-painted listview).
-    //  1. MoveWindow jiggle — wakes the header subwindow so
-    //     column titles + sort arrows render after a resize.
-    //  2. InvalidateRect on the client — marks the rows dirty.
-    //  3. RedrawWindow with RDW_UPDATENOW — flushes the paint
-    //     synchronously instead of waiting for the next idle.
-    if let Some((x, y, w, h)) = current_lv_rect_in_parent(lv, hwnd) {
-        force_listview_repaint(lv, x, y, w, h);
-    }
-    unsafe {
-        let _ = InvalidateRect(lv, None, true);
-        let _ = RedrawWindow(
-            lv,
-            None,
-            None,
-            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
-        );
-    }
-
-    // Deferred pass — same trick the resize-end cleanup uses.
-    // After delete + populate, comctl32's internal paint state
-    // can be sticky enough that even a synchronous redraw doesn't
-    // land cleanly on the first try. Arming TIMER_RESIZE_CLEANUP
-    // re-fires repopulate_tab + on_tab_change ~100 ms later, by
-    // which point comctl32 has settled and the second redraw
-    // takes. This is the same path WM_SIZE already uses, so the
-    // user gets identical post-resize-end visual behavior after
-    // any delete / auto-catalog batch.
-    unsafe {
-        SetTimer(hwnd, TIMER_RESIZE_CLEANUP, RESIZE_CLEANUP_MS, None);
+    if lv.0 != 0 {
+        unsafe {
+            let _ = RedrawWindow(
+                lv,
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+            );
+        }
     }
 }
 
@@ -2262,51 +2101,13 @@ fn expire_timed_apps(hwnd: HWND, state: &WndState) {
     save_profile_to_disk(state);
     populate_apps_tab(state);
     on_tab_change(hwnd);
-    force_active_apps_listview_jiggle(hwnd, state);
+    repaint_active_apps_listview(hwnd, state);
     reinstall_filters_if_active(hwnd, state);
     set_status_text(
         state.status.get(),
         0,
-        &format!(
-            "{expired} app timer(s) expired \u{2014} rolled back to Block."
-        ),
+        &format!("{expired} app timer(s) expired \u{2014} rolled back to Block."),
     );
-}
-
-/// Return true if `path` is signed by Microsoft. Wraps the same
-/// `verify_signature` helper the use_certificates worker uses,
-/// but called synchronously on the GUI thread — typical
-/// WinVerifyTrust call is 50-200 ms which is acceptable in the
-/// auto-catalog path (runs on a 500 ms drain timer, at most a
-/// handful of new apps per tick).
-///
-/// Match heuristic: leaf certificate's "simple display name"
-/// starts with `"Microsoft "` (note the trailing space). That
-/// catches "Microsoft Corporation", "Microsoft Windows",
-/// "Microsoft Windows Hardware Compatibility Publisher", and
-/// the few other variants Microsoft uses, while not matching
-/// "Microsoft365 Surveillance Corp" or other lookalikes.
-///
-/// Used by the M9.5 / amwall-extension auto-allow flow gated
-/// on `Settings.auto_allow_microsoft_signed`. Not present in
-/// upstream simplewall (that project's longstanding wishlist
-/// item that henrypp hasn't shipped).
-fn is_microsoft_signed(path: &std::path::Path) -> bool {
-    if path.as_os_str().is_empty() {
-        return false;
-    }
-    // Auto-ALLOW decision: verify with whole-chain revocation checking
-    // (WTD_REVOKE_WHOLECHAIN) so a revoked-but-unexpired Microsoft cert
-    // fails closed and the binary falls to the connect prompt instead
-    // of being silently permitted. Security audit finding F.2.
-    let info = verify_signature(path, true, true);
-    if !info.signed {
-        return false;
-    }
-    match info.signer {
-        Some(s) => s.starts_with("Microsoft "),
-        None => false,
-    }
 }
 
 /// What to do with one drop net-event, decided purely so the
@@ -2319,7 +2120,7 @@ enum DropDisposition {
     /// Nothing to do: no filter id, an excluded source category, no
     /// resolvable app path, or an already-silenced / not-yet-due app.
     Ignore,
-    /// A not-yet-cataloged app — add it, then auto-allow or prompt.
+    /// A not-yet-cataloged app — add it as blocked, then prompt.
     CatalogNew,
     /// An existing blocked-but-not-silenced app due for a re-prompt.
     Reprompt,
@@ -2380,7 +2181,10 @@ fn classify_drop(ctx: &DropContext) -> DropDisposition {
     }
     match ctx.existing {
         None => DropDisposition::CatalogNew,
-        Some(ExistingApp { is_silent, is_enabled }) => {
+        Some(ExistingApp {
+            is_silent,
+            is_enabled,
+        }) => {
             // Re-prompt only a still-blocked, not-silenced app, throttled
             // by notification_timeout, and never while its window is open.
             if is_silent || is_enabled || ctx.reprompt_after_secs <= 0 {
@@ -2410,7 +2214,7 @@ fn format_remote(details: &crate::wfp::events::NetEventDetails) -> String {
 
 #[cfg(test)]
 mod catalog_decision_tests {
-    use super::{classify_drop, DropContext, DropDisposition, ExistingApp};
+    use super::{DropContext, DropDisposition, ExistingApp, classify_drop};
 
     /// A drop that SHOULD be cataloged: real filter id, resolvable path,
     /// not excluded, not yet in the profile. Tests tweak one field.
@@ -2432,18 +2236,27 @@ mod catalog_decision_tests {
     }
 
     fn blocked_existing() -> Option<ExistingApp> {
-        Some(ExistingApp { is_silent: false, is_enabled: false })
+        Some(ExistingApp {
+            is_silent: false,
+            is_enabled: false,
+        })
     }
 
     #[test]
     fn ignores_drop_without_filter_id() {
-        let c = DropContext { has_filter_id: false, ..fresh_drop() };
+        let c = DropContext {
+            has_filter_id: false,
+            ..fresh_drop()
+        };
         assert_eq!(classify_drop(&c), DropDisposition::Ignore);
     }
 
     #[test]
     fn ignores_drop_without_resolvable_path() {
-        let c = DropContext { has_resolved_path: false, ..fresh_drop() };
+        let c = DropContext {
+            has_resolved_path: false,
+            ..fresh_drop()
+        };
         assert_eq!(classify_drop(&c), DropDisposition::Ignore);
     }
 
@@ -2470,25 +2283,44 @@ mod catalog_decision_tests {
     #[test]
     fn excludes_category_only_when_its_flag_is_on() {
         // Blocklist-sourced drop, but exclude flag off -> still cataloged.
-        let c = DropContext { in_blocklist: true, exclude_blocklist: false, ..fresh_drop() };
+        let c = DropContext {
+            in_blocklist: true,
+            exclude_blocklist: false,
+            ..fresh_drop()
+        };
         assert_eq!(classify_drop(&c), DropDisposition::CatalogNew);
         // Flag on -> excluded.
-        let c = DropContext { in_blocklist: true, exclude_blocklist: true, ..fresh_drop() };
+        let c = DropContext {
+            in_blocklist: true,
+            exclude_blocklist: true,
+            ..fresh_drop()
+        };
         assert_eq!(classify_drop(&c), DropDisposition::Ignore);
     }
 
     #[test]
     fn excludes_custom_and_stealth_categories() {
-        let c = DropContext { in_user_rules: true, exclude_custom: true, ..fresh_drop() };
+        let c = DropContext {
+            in_user_rules: true,
+            exclude_custom: true,
+            ..fresh_drop()
+        };
         assert_eq!(classify_drop(&c), DropDisposition::Ignore);
-        let c = DropContext { in_stealth: true, exclude_stealth: true, ..fresh_drop() };
+        let c = DropContext {
+            in_stealth: true,
+            exclude_stealth: true,
+            ..fresh_drop()
+        };
         assert_eq!(classify_drop(&c), DropDisposition::Ignore);
     }
 
     #[test]
     fn ignores_already_silenced_app() {
         let c = DropContext {
-            existing: Some(ExistingApp { is_silent: true, is_enabled: false }),
+            existing: Some(ExistingApp {
+                is_silent: true,
+                is_enabled: false,
+            }),
             ..fresh_drop()
         };
         assert_eq!(classify_drop(&c), DropDisposition::Ignore);
@@ -2497,7 +2329,10 @@ mod catalog_decision_tests {
     #[test]
     fn ignores_already_allowed_app() {
         let c = DropContext {
-            existing: Some(ExistingApp { is_silent: false, is_enabled: true }),
+            existing: Some(ExistingApp {
+                is_silent: false,
+                is_enabled: true,
+            }),
             ..fresh_drop()
         };
         assert_eq!(classify_drop(&c), DropDisposition::Ignore);
@@ -2550,14 +2385,14 @@ mod catalog_decision_tests {
 }
 
 fn auto_catalog_drops(
-    hwnd: HWND,
+    _hwnd: HWND,
     state: &WndState,
     events: &[crate::wfp::events::NetEvent],
 ) -> Vec<(std::path::PathBuf, String)> {
     use crate::wfp::events::NetEvent;
     let mut new_apps: Vec<(std::path::PathBuf, String)> = Vec::new();
-    let mut seen: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut resolved_paths = std::collections::HashMap::new();
     // Apps already in the profile, blocked-but-not-silenced, that are due
     // for a re-prompt (Fable #24). Kept separate from `new_apps` so they
     // don't get re-added to profile.apps.
@@ -2566,8 +2401,8 @@ fn auto_catalog_drops(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    // Re-prompt window in seconds (notification_timeout is minutes; 0
-    // disables re-prompting -- one dismiss silences the app for the session).
+    // Re-prompt window in seconds for blocked, unsilenced apps
+    // (notification_timeout is minutes; 0 disables retries).
     let reprompt_after = state.app.settings.borrow().notification_timeout as i64 * 60;
 
     {
@@ -2582,8 +2417,12 @@ fn auto_catalog_drops(
                 .app_path
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .and_then(nt_path_to_win32)
-                .map(std::path::PathBuf::from);
+                .and_then(|raw| {
+                    resolved_paths
+                        .entry(raw)
+                        .or_insert_with(|| nt_path_to_win32(raw).map(std::path::PathBuf::from))
+                        .clone()
+                });
 
             // Gather the (impure) decision inputs; `classify_drop` is pure.
             // Catalog + prompt for a drop from ANY WFP provider, not just
@@ -2610,14 +2449,12 @@ fn auto_catalog_drops(
             };
             let prompt_open = path
                 .as_ref()
-                .map(|p| state.pending_prompts.borrow().contains(p))
+                .map(|p| state.pending_prompts.borrow().contains_key(p))
                 .unwrap_or(false);
             let secs_since_last_prompt = path
                 .as_ref()
                 .map(|p| {
-                    now_secs.saturating_sub(
-                        state.last_notify.borrow().get(p).copied().unwrap_or(0),
-                    )
+                    now_secs.saturating_sub(state.last_notify.borrow().get(p).copied().unwrap_or(0))
                 })
                 .unwrap_or(0);
             let ctx = {
@@ -2664,70 +2501,35 @@ fn auto_catalog_drops(
         return new_apps;
     }
 
-    let auto_allow_msft = state.app.settings.borrow().auto_allow_microsoft_signed;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // Partition the newly-detected apps into "auto-allow"
-    // (Microsoft-signed when the setting is on) and "needs
-    // prompt" (everything else). Auto-allowed apps go straight
-    // into profile.apps with is_enabled=true and don't get
-    // returned to the caller, so the connect prompt never
-    // shows. Needs-prompt apps go in with is_enabled=false
-    // (Blocked) like before.
+    // Every discovered app starts blocked. Publisher/signature metadata is
+    // display-only; permission changes require an explicit user Allow action.
     let mut for_prompt: Vec<(std::path::PathBuf, String)> = Vec::new();
-    let mut auto_allowed_count: usize = 0;
     {
         let mut profile = state.app.profile.borrow_mut();
         for (path, remote) in new_apps.into_iter() {
-            let auto_allow = auto_allow_msft && is_microsoft_signed(&path);
-            profile.apps.push(crate::profile::App {
+            let app = crate::profile::App {
                 path: path.clone(),
-                is_enabled: auto_allow,
+                is_enabled: false,
                 is_silent: false,
                 is_undeletable: false,
                 timestamp: now,
                 timer: 0,
                 hash: None,
                 comment: None,
-            });
-            if auto_allow {
-                auto_allowed_count += 1;
-                let name = path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                eprintln!(
-                    "amwall: auto-allowed Microsoft-signed binary {name} ({})",
-                    path.display(),
-                );
-            } else {
-                for_prompt.push((path, remote));
-            }
+            };
+            profile.apps.push(app);
+            for_prompt.push((path, remote));
         }
     }
 
     // Existing blocked-not-silent apps due for a re-prompt were queued
     // above; they're already in profile.apps so they skipped the add loop.
     for_prompt.extend(reprompt);
-
-    if auto_allowed_count > 0 {
-        // Push the new permits to the kernel so the next
-        // connection attempt from these apps actually succeeds.
-        // Without this, the freshly-cataloged Allowed entries
-        // sit in profile.apps but no per-app permit filter
-        // exists in WFP yet, so the very next packet still gets
-        // dropped by the default-deny.
-        reinstall_filters_if_active(hwnd, state);
-        let label = if auto_allowed_count == 1 {
-            t!("status.auto_allowed_one")
-        } else {
-            t!("status.auto_allowed_many", count = auto_allowed_count)
-        };
-        set_status_text(state.status.get(), 0, &label);
-    }
 
     // Record the prompt time for every app we're about to prompt for, so
     // it isn't re-prompted again until notification_timeout elapses.
@@ -2777,8 +2579,8 @@ fn should_show_connect_prompt(is_silent: bool, already_pending: bool) -> bool {
 /// Modeless / non-focus-stealing — `show_async` returns
 /// immediately. The user's Allow click flows back via
 /// `WM_USER_CONNECT_ALLOW`, which flips `is_enabled`. Block
-/// flows back via `WM_USER_CONNECT_BLOCK`, which sets
-/// `is_silent`. X / dismiss leaves both fields untouched.
+/// flows back via `WM_USER_CONNECT_BLOCK`, which keeps the app blocked
+/// and sets `is_silent`. X / Escape / Alt+F4 use the same Block action.
 fn process_connect_prompts(
     hwnd: HWND,
     state: &WndState,
@@ -2786,23 +2588,32 @@ fn process_connect_prompts(
 ) {
     let profile = state.app.profile.borrow();
     for (path, remote) in new_apps {
-        let silenced = profile
-            .apps
-            .iter()
-            .find(|a| a.path == *path)
-            .map(|a| a.is_silent)
-            .unwrap_or(false);
+        let Some(app) = profile.apps.iter().find(|a| a.path == *path) else {
+            continue;
+        };
+        if app.is_enabled {
+            continue;
+        }
         // One open prompt window per app: if this app already has a
         // prompt on screen (e.g. the user is away and it keeps retrying),
         // don't open another -- that stacking is what produced dozens of
         // windows overnight. The guard clears on window close via
         // WM_USER_CONNECT_PROMPT_CLOSED.
-        let already_pending = state.pending_prompts.borrow().contains(path);
-        if !should_show_connect_prompt(silenced, already_pending) {
+        let already_pending = state.pending_prompts.borrow().contains_key(path);
+        if !should_show_connect_prompt(app.is_silent, already_pending) {
             continue;
         }
         // Reserve the one-window-per-app slot before showing.
-        state.pending_prompts.borrow_mut().insert(path.clone());
+        let id = state.next_prompt_id.get();
+        state.next_prompt_id.set(id.wrapping_add(1));
+        state.pending_prompts.borrow_mut().insert(
+            path.clone(),
+            PendingPrompt {
+                id,
+                app: app.clone(),
+                parent: hwnd,
+            },
+        );
         // Pull cached signer for the prompt's "Signed by X" line.
         // Cache will usually have the entry by now since the
         // path was just auto-cataloged and the worker keeps a
@@ -2810,7 +2621,7 @@ fn process_connect_prompts(
         // first-ever drop will see None and the prompt renders
         // without the signer line.
         let signer = path_signer_cached(state, path);
-        if !super::connect_dialog::show_async(hwnd, path, remote, signer.as_deref()) {
+        if !super::connect_dialog::show_async(hwnd, path, remote, signer.as_deref(), id) {
             // Window creation failed -- don't leave a stuck guard that
             // would suppress this app's prompt for the rest of the session.
             state.pending_prompts.borrow_mut().remove(path);
@@ -2868,7 +2679,11 @@ fn on_update_available(hwnd: HWND, wparam: WPARAM) {
     // strips "v" from both inputs already, so this only affects
     // what the user sees in the dialog.
     let current_display = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let body = t!("message.update_available_body", latest = &info.latest_tag, current = &current_display);
+    let body = t!(
+        "message.update_available_body",
+        latest = &info.latest_tag,
+        current = &current_display
+    );
     let mut wbody = wide(&body);
     let mut wtitle = wide(&t!("dialog.update_available"));
     let result = unsafe {
@@ -2937,9 +2752,7 @@ fn on_check_updates_manual(hwnd: HWND) {
 /// `releases/latest` tag so the user can verify the comparison.
 /// Auto-check at startup never reaches this path.
 fn on_update_uptodate(hwnd: HWND, wparam: WPARAM) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MB_ICONINFORMATION, MB_OK, MessageBoxW,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
 
     // take() the payload by token; a forged / stale wparam is a safe
     // miss (no Box::from_raw on an attacker integer). Fable sweep #19.
@@ -2950,7 +2763,11 @@ fn on_update_uptodate(hwnd: HWND, wparam: WPARAM) {
     // Same v-prefix shape match as on_update_available — keeps the
     // "Current" / "Latest" lines consistent in the dialog.
     let current_display = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let body = t!("message.update_uptodate_body", current = &current_display, latest = &info.latest_tag);
+    let body = t!(
+        "message.update_uptodate_body",
+        current = &current_display,
+        latest = &info.latest_tag
+    );
     let mut wbody = wide(&body);
     let mut wtitle = wide(&t!("dialog.check_updates"));
     unsafe {
@@ -2971,9 +2788,7 @@ fn on_update_uptodate(hwnd: HWND, wparam: WPARAM) {
 /// Shows an explanatory MessageBox so the user knows the click
 /// produced a real failure, not a silent no-op.
 fn on_update_error(hwnd: HWND) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MB_ICONWARNING, MB_OK, MessageBoxW,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
     let mut wbody = wide(&t!("message.update_error_body"));
     let mut wtitle = wide(&t!("dialog.check_updates"));
     unsafe {
@@ -3005,13 +2820,14 @@ fn on_connect_block(hwnd: HWND, wparam: WPARAM) {
     };
     // take() the path by token; a forged / stale wparam is a safe miss
     // (no Box::from_raw on an attacker integer). Fable sweep #19.
-    let Some(path) = super::msg_slab::take::<std::path::PathBuf>(wparam.0) else {
+    let Some(path) = take_current_prompt(state, wparam) else {
         return;
     };
 
     {
         let mut profile = state.app.profile.borrow_mut();
         if let Some(app) = profile.apps.iter_mut().find(|a| a.path == path) {
+            app.is_enabled = false;
             app.is_silent = true;
         } else {
             return;
@@ -3020,17 +2836,68 @@ fn on_connect_block(hwnd: HWND, wparam: WPARAM) {
     save_profile_to_disk(state);
     populate_apps_tab(state);
     on_tab_change(hwnd);
-    let name = path.file_name()
+    let name = path
+        .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
     set_status_text(state.status.get(), 0, &t!("status.silenced", name = name));
 }
 
-/// Handler for `WM_USER_CONNECT_ALLOW` posted by the connect-
-/// prompt dialog when the user clicks Allow. Reclaims the
-/// `Box<PathBuf>` the dialog stuffed into wparam, finds the
-/// matching App, flips `is_enabled = true`, persists, and
-/// re-pushes filters to the kernel so the per-app permit lands.
+/// Apply one explicit Allow without rebuilding unrelated firewall rules.
+/// The profile and filter caches change only after all four permits commit.
+fn allow_prompt_app(
+    state: &WndState,
+    path: &std::path::Path,
+    install: impl FnOnce(&crate::profile::App) -> Result<Vec<u64>, crate::install::InstallError>,
+) -> Result<bool, crate::install::InstallError> {
+    let Some(mut candidate) = state
+        .app
+        .profile
+        .borrow()
+        .apps
+        .iter()
+        .find(|app| app.path == path && !app.is_enabled)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    candidate.is_enabled = true;
+    if state.app.settings.borrow().use_hashes {
+        super::hash_baseline::capture_missing(
+            std::slice::from_mut(&mut candidate),
+            crate::hash::sha256_file,
+        );
+    }
+    let ids = if state.filters_active.get() {
+        install(&candidate)?
+    } else {
+        Vec::new()
+    };
+    // No message dispatch occurs between taking this snapshot and committing.
+    // A failed transaction leaves the saved decision blocked and can be retried.
+    if let Some(app) = state
+        .app
+        .profile
+        .borrow_mut()
+        .apps
+        .iter_mut()
+        .find(|app| app.path == path)
+    {
+        *app = candidate;
+    }
+    state
+        .amwall_filter_ids
+        .borrow_mut()
+        .extend(ids.iter().copied());
+    state
+        .categorized_filter_ids
+        .borrow_mut()
+        .per_app
+        .extend(ids);
+    Ok(true)
+}
+
+/// Handler for an Allow click from the notification's dedicated message loop.
 fn on_connect_allow(hwnd: HWND, wparam: WPARAM) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
@@ -3038,47 +2905,125 @@ fn on_connect_allow(hwnd: HWND, wparam: WPARAM) {
     };
     // take() the path by token; a forged / stale wparam is a safe miss
     // (no Box::from_raw on an attacker integer). Fable sweep #19.
-    let Some(path) = super::msg_slab::take::<std::path::PathBuf>(wparam.0) else {
+    let Some(path) = take_current_prompt(state, wparam) else {
         return;
     };
 
-    {
-        let mut profile = state.app.profile.borrow_mut();
-        if let Some(app) = profile.apps.iter_mut().find(|a| a.path == path) {
-            app.is_enabled = true;
-        } else {
-            // Edge case: user removed the app from profile while
-            // the dialog was up. Nothing to do.
+    let started = std::time::Instant::now();
+    match allow_prompt_app(state, &path, |app| {
+        let engine = crate::wfp::WfpEngine::open()?;
+        crate::install::install_app_permit(&engine, app, true)
+    }) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            eprintln!("amwall: notification Allow failed; app remains blocked: {e}");
+            warn_filter_update_failed(hwnd, state);
             return;
         }
     }
+    eprintln!(
+        "amwall: notification permission committed in {:?}",
+        started.elapsed()
+    );
     save_profile_to_disk(state);
     populate_apps_tab(state);
-    on_tab_change(hwnd);
-    reinstall_filters_if_active(hwnd, state);
-    let name = path.file_name()
+    let selected = unsafe { SendMessageW(state.tab.get(), TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0;
+    match selected {
+        1 => populate_services_tab(state),
+        2 => populate_uwp_tab(state),
+        _ => {}
+    }
+    if selected >= 0 {
+        update_item_count(state, selected as usize);
+    }
+    eprintln!(
+        "amwall: notification Allow saved and displayed in {:?}",
+        started.elapsed()
+    );
+    let name = path
+        .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
-    set_status_text(state.status.get(), 0, &t!("status.allowed_count", name = name));
+    set_status_text(
+        state.status.get(),
+        0,
+        &t!("status.allowed_count", name = name),
+    );
 }
 
 /// Handler for `WM_USER_CONNECT_PROMPT_CLOSED`, posted by the connect-
-/// prompt dialog's `WM_NCDESTROY` when its window closes for ANY reason
-/// (Allow, Block, or a plain dismiss). Clears the per-app "prompt
-/// already open" guard so a later drop can prompt again — throttled by
-/// `notification_timeout` as before. Without this, one open window
-/// would suppress the app's prompt for the rest of the session, so the
-/// app-level dedup that stops overnight prompt stacking wouldn't reset.
+/// prompt dialog's `WM_NCDESTROY` when its window closes for any reason.
+/// Clears only the matching generation's reservation. User closes have
+/// already posted Block; programmatic cancellation never changes permission.
 fn on_connect_prompt_closed(hwnd: HWND, wparam: WPARAM) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
         None => return,
     };
     // take() the path by token; a forged / stale wparam is a safe miss.
-    let Some(path) = super::msg_slab::take::<std::path::PathBuf>(wparam.0) else {
+    let Some(event) = super::msg_slab::take::<super::connect_dialog::PromptEvent>(wparam.0) else {
         return;
     };
-    state.pending_prompts.borrow_mut().remove(&path);
+    let mut pending = state.pending_prompts.borrow_mut();
+    if pending.get(&event.path).is_some_and(|p| p.id == event.id) {
+        pending.remove(&event.path);
+    }
+}
+
+/// A queued click is valid only for the prompt and app decision it displayed.
+fn take_current_prompt(state: &WndState, token: WPARAM) -> Option<std::path::PathBuf> {
+    let event = super::msg_slab::take::<super::connect_dialog::PromptEvent>(token.0)?;
+    let mut pending = state.pending_prompts.borrow_mut();
+    let prompt = pending.get(&event.path)?;
+    if prompt.id != event.id {
+        return None;
+    }
+    let unchanged = state
+        .app
+        .profile
+        .borrow()
+        .apps
+        .iter()
+        .any(|app| super::prompt_checks::decision_unchanged(app, &prompt.app));
+    pending.remove(&event.path);
+    unchanged.then_some(event.path)
+}
+
+fn cancel_changed_prompts(state: &WndState) {
+    let profile = state.app.profile.borrow();
+    state.pending_prompts.borrow_mut().retain(|_, prompt| {
+        let unchanged = profile
+            .apps
+            .iter()
+            .any(|app| super::prompt_checks::decision_unchanged(app, &prompt.app));
+        if !unchanged {
+            super::connect_dialog::cancel(prompt.parent, prompt.id);
+        }
+        unchanged
+    });
+}
+
+fn cancel_all_prompts(state: &WndState) {
+    for (_, prompt) in state.pending_prompts.borrow_mut().drain() {
+        super::connect_dialog::cancel(prompt.parent, prompt.id);
+    }
+}
+
+fn render_ready_network_snapshot(hwnd: HWND, state: &WndState) {
+    if !consume_network_snapshot(state) {
+        return;
+    }
+    let slot = unsafe { SendMessageW(state.tab.get(), TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0;
+    match slot {
+        0 => {
+            refresh_apps_traffic_columns(state);
+            repaint_active_apps_listview(hwnd, state);
+        }
+        1 | 2 => repaint_active_apps_listview(hwnd, state),
+        6 => populate_connections_tab(state),
+        _ => {}
+    }
 }
 
 /// Drain any pending events from the channel into the log buffer,
@@ -3115,10 +3060,14 @@ fn on_toggle_app_flag(hwnd: HWND, flag: AppFlag) {
         let mut profile = state.app.profile.borrow_mut();
         // New value from the first selected app that exists in the profile.
         let new_val = paths.iter().find_map(|p| {
-            profile.apps.iter().find(|a| &a.path == p).map(|a| match flag {
-                AppFlag::Silent => !a.is_silent,
-                AppFlag::Undeletable => !a.is_undeletable,
-            })
+            profile
+                .apps
+                .iter()
+                .find(|a| &a.path == p)
+                .map(|a| match flag {
+                    AppFlag::Silent => !a.is_silent,
+                    AppFlag::Undeletable => !a.is_undeletable,
+                })
         });
         let Some(new_val) = new_val else {
             return;
@@ -3160,7 +3109,11 @@ fn on_set_app_timer(hwnd: HWND, duration_secs: i64) {
     let expiry = now + duration_secs;
     {
         let mut profile = state.app.profile.borrow_mut();
-        if let Some(app) = profile.apps.iter_mut().find(|a| a.path == target.binary_path) {
+        if let Some(app) = profile
+            .apps
+            .iter_mut()
+            .find(|a| a.path == target.binary_path)
+        {
             app.is_enabled = true;
             app.timer = expiry;
         } else {
@@ -3212,144 +3165,113 @@ fn play_notification_sound() {
     use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC};
     let alias = wide("MailBeep");
     unsafe {
-        let _ = PlaySoundW(PCWSTR(alias.as_ptr()), HMODULE::default(), SND_ALIAS | SND_ASYNC);
+        let _ = PlaySoundW(
+            PCWSTR(alias.as_ptr()),
+            HMODULE::default(),
+            SND_ALIAS | SND_ASYNC,
+        );
     }
 }
 
+/// Collect at most one bounded batch. A busy producer cannot monopolize the UI.
+fn receive_event_batch(
+    rx: &std::sync::mpsc::Receiver<crate::wfp::events::NetEvent>,
+) -> Vec<crate::wfp::events::NetEvent> {
+    rx.try_iter().take(EVENT_DRAIN_BATCH).collect()
+}
+
 fn drain_events(hwnd: HWND, state: &WndState) {
-    let settings = state.app.settings.borrow();
-    let notify = settings.enable_notifications;
+    let batch = state
+        .event_rx
+        .borrow()
+        .as_ref()
+        .map(receive_event_batch)
+        .unwrap_or_default();
+    // Backlogs use a short timer, leaving input and paint messages ahead of
+    // each continuation. Never post a self-perpetuating high-priority loop.
+    unsafe {
+        SetTimer(
+            hwnd,
+            TIMER_EVENT_DRAIN,
+            if batch.len() == EVENT_DRAIN_BATCH {
+                10
+            } else {
+                EVENT_DRAIN_INTERVAL_MS
+            },
+            None,
+        );
+    }
     let filters_active = state.filters_active.get();
+    let old_count = state.app.profile.borrow().apps.len();
+    let new_apps = if filters_active && !batch.is_empty() {
+        auto_catalog_drops(hwnd, state, &batch)
+    } else {
+        Vec::new()
+    };
+    let profile_changed = state.app.profile.borrow().apps.len() != old_count;
+
+    // Queue notifications before disk logging, hashing, list population or WFP
+    // updates. Their dedicated message loop can paint while this thread works.
+    let notify = state.app.settings.borrow().enable_notifications;
+    let suppress_centered =
+        state.app.settings.borrow().notification_fullscreen_silent && is_user_in_fullscreen();
+    if filters_active && notify && !new_apps.is_empty() {
+        if !suppress_centered {
+            if state.app.settings.borrow().notification_sound {
+                play_notification_sound();
+            }
+            process_connect_prompts(hwnd, state, &new_apps);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for (path, remote) in &new_apps {
+            state.last_notify.borrow_mut().insert(path.clone(), now);
+            if state.app.settings.borrow().notification_on_tray {
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                super::tray::show_balloon(
+                    hwnd,
+                    &t!("status.tray_blocked", name = name),
+                    &t!("status.connecting", remote = remote),
+                );
+            }
+        }
+    }
+
+    let settings = state.app.settings.borrow();
     let mut log = state.event_log.borrow_mut();
     let mut writer = state.event_log_writer.borrow_mut();
     let mut new_arrivals = false;
-    // Collect this tick's events for downstream batch processing
-    // (auto-catalog deduplicates within the batch).
-    let mut batch: Vec<crate::wfp::events::NetEvent> = Vec::new();
-    if let Some(rx) = state.event_rx.borrow().as_ref() {
-        while let Ok(event) = rx.try_recv() {
-            // Persist to the on-disk log first. Settings gate
-            // (enable_log, exclude_classify_allow, rotation cap)
-            // are applied inside the writer.
-            writer.append(&event, &settings);
-
-            // The in-memory ring (and therefore the Packets log
-            // tab) only fills when the user has explicitly turned
-            // Log UI on — matches upstream's "Log UI is off by
-            // default; flipping it on starts capturing events".
-            // Auto-catalog still gets the event because it works
-            // off `batch`, not `event_log`.
-            if settings.enable_ui_log {
-                if log.len() >= EVENT_LOG_CAP {
-                    log.pop_front();
-                }
-                log.push_back(event.clone());
-                new_arrivals = true;
+    for event in batch {
+        writer.append(&event, &settings);
+        if settings.enable_ui_log {
+            if log.len() >= EVENT_LOG_CAP {
+                log.pop_front();
             }
-            batch.push(event);
+            log.push_back(event);
+            new_arrivals = true;
         }
     }
     drop(writer);
     drop(log);
     drop(settings);
 
-    // Auto-catalog drops as Blocked entries when filters are on.
-    // Returns the list of newly-added apps (with their first
-    // drop's remote endpoint) so the connect-prompt dialog can
-    // show context. An app already in `profile.apps` never
-    // appears here regardless of how many packets it drops —
-    // that's how we guarantee "one Allow/Block window per exe,
-    // ever".
-    let mut profile_changed = false;
-    let new_apps = if filters_active && !batch.is_empty() {
-        auto_catalog_drops(hwnd, state, &batch)
-    } else {
-        Vec::new()
-    };
-    if !new_apps.is_empty() {
-        profile_changed = true;
-    }
-
-    // Connect-prompt dialogs (centered Allow/Block, modeless) —
-    // only when notifications are enabled. One dialog per
-    // newly-cataloged app. show_async returns immediately; the
-    // user's Allow choice flows back via WM_USER_CONNECT_ALLOW
-    // and is handled by `on_connect_allow` in the wndproc.
-    //
-    // notification_fullscreen_silent: skip the popup entirely
-    // when the user is in a fullscreen game / presentation. The
-    // app is still cataloged + persisted (so once the user exits
-    // fullscreen they'll see the new Blocked entry on the Apps
-    // tab) — only the modal-style interruption is suppressed.
-    let suppress_centered = state.app.settings.borrow().notification_fullscreen_silent
-        && is_user_in_fullscreen();
-    if filters_active && notify && !new_apps.is_empty() && !suppress_centered {
-        // Audible cue when Settings -> notification sound is on (and not
-        // suppressed by fullscreen-silent). The toggle was previously a
-        // dead no-op -- nothing ever played a sound. Fable sweep #29.
-        if state.app.settings.borrow().notification_sound {
-            play_notification_sound();
-        }
-        process_connect_prompts(hwnd, state, &new_apps);
-    }
-
-    // notification_on_tray: pop a tray-icon balloon for each new
-    // app the centered prompt would have / did show. Routes
-    // through Shell_NotifyIcon NIM_MODIFY + NIIF_INFO so the
-    // user sees blocks accumulate in the action center without
-    // a focus-stealing dialog. Independent of suppress_centered:
-    // the user can have both, just centered, or just balloon.
-    if filters_active
-        && notify
-        && !new_apps.is_empty()
-        && state.app.settings.borrow().notification_on_tray
-    {
-        for (path, remote) in &new_apps {
-            let name = path.file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            let title = t!("status.tray_blocked", name = name);
-            let body = t!("status.connecting", remote = remote);
-            super::tray::show_balloon(hwnd, &title, &body);
-        }
-    }
-
     if profile_changed {
         save_profile_to_disk(state);
         populate_apps_tab(state);
-        on_tab_change(hwnd);
-        // Force the listview's internal layout to pick up the
-        // freshly-inserted rows in the same paint cycle. Without
-        // this, the new entries don't appear until the user
-        // resizes / scrolls / clicks — the same paint-pipeline
-        // class of bug as M5.9.5 / M5.4d, so reuse the same
-        // 1-pixel jiggle the resize cleanup uses.
-        force_active_apps_listview_jiggle(hwnd, state);
     }
-
-    // Drop-toast removed: the connect-prompt dialog (when
-    // `enable_notifications` is on) is the user-facing
-    // first-connect signal now. The toast was redundant and the
-    // user explicitly asked it off — packet-level visibility
-    // belongs to the Packets log tab / the on-disk log, not to
-    // the notifications path.
-
-    if !new_arrivals {
-        return;
-    }
-    // Repopulate only if Log tab is the active one — otherwise
-    // we'd be doing UI work nobody sees. Switching to Log will
-    // populate from the buffer regardless.
-    let tab = state.tab.get();
-    if tab.0 == 0 {
-        return;
-    }
-    let sel =
-        unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
-    if sel == 7 {
+    // Do not run on_tab_change here: it re-enumerates the selected tab and
+    // used to refill the log twice on every batch.
+    let selected = unsafe { SendMessageW(state.tab.get(), TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0;
+    if new_arrivals && selected == 7 {
         populate_log_tab(state);
-        // Update the count segment on the status bar too.
-        on_tab_change(hwnd);
+    }
+    if (profile_changed && selected == 0) || (new_arrivals && selected == 7) {
+        update_item_count(state, selected as usize);
     }
 }
 
@@ -3385,7 +3307,6 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
         (IDM_RULE_ALLOWWINDOWSUPDATE, s.rule_allow_windows_update),
         (IDM_USECERTIFICATES_CHK, s.use_certificates),
         (IDM_USEHASHES_CHK, s.use_hashes),
-        (IDM_AUTOALLOW_MICROSOFT_CHK, s.auto_allow_microsoft_signed),
     ];
     for (id, v) in pairs {
         set_menu_check(hwnd, id, v);
@@ -3393,6 +3314,7 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
     apply_always_on_top(hwnd, s.always_on_top);
     apply_search_bar_visibility(hwnd, s.show_search_bar);
     super::font::set_dark_mode(hwnd, s.use_dark_theme);
+    super::connect_dialog::set_dark_mode(s.use_dark_theme);
     let autosize = s.autosize_columns;
     drop(s);
 
@@ -3429,10 +3351,8 @@ fn apply_initial_settings(hwnd: HWND, state: &WndState) {
     }
 }
 
-/// `WM_SIZE`: lay out rebar + tab + status bar. The rebar pins to
-/// the top, the status bar to the bottom, and the tab control fills
-/// the space between. The status bar and rebar self-size when
-/// forwarded WM_SIZE.
+/// Lay out toolbar, search, tabs and status bar on each size change.
+/// Child-window moves are batched; resizing never rebuilds list contents.
 fn on_size(hwnd: HWND) {
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
@@ -3446,54 +3366,21 @@ fn on_size(hwnd: HWND) {
     let total_w = client.right - client.left;
     let total_h = client.bottom - client.top;
 
-    // Layout: toolbar at the very top with full client width;
-    // search edit below it; tab control below that.
-    //
-    //   1. Tell the toolbar its width via SetWindowPos. Its
-    //      WM_SIZE handler runs TBSTYLE_WRAPABLE wrap if needed.
-    //   2. Query TB_GETMAXSIZE for the wrapped height.
-    //   3. MoveWindow the toolbar to (0, 0, total_w, tb_h).
-    //   4. Position the search edit just below.
-    //   5. Tab control sits below the search edit.
     let toolbar_hwnd = state.toolbar.get();
     let search_hwnd = state.search.get();
-    const SEARCH_H: i32 = 24;
-    let mut tb_h = 0;
-    let mut header_h = 0;
-    if toolbar_hwnd.0 != 0 {
-        // 1. MoveWindow at the new width — the WRAPABLE toolbar
-        //    auto-grows itself to its preferred height (rows ×
-        //    row_h + comctl32 trailing padding). We can't shrink
-        //    it back: a second MoveWindow gets reverted on the
-        //    next WM_SIZE.
-        // 2. Read the actual content extent (max bottom across
-        //    all buttons + separators) — that's where the visible
-        //    content ends.
-        // 3. SetWindowRgn clips the toolbar's painted area to that
-        //    extent. The window's logical rect stays at the
-        //    toolbar's preferred size (so its layout state is
-        //    untouched), but the gap between content_h and
-        //    preferred_h becomes transparent — no visible blank
-        //    band before the next control.
+    let search_h = scale_dpi(24, state.dpi.get());
+    let mut header_h = if toolbar_hwnd.0 != 0 {
+        toolbar::layout(toolbar_hwnd, total_w)
+    } else {
+        0
+    };
+    if search_hwnd.0 != 0 && state.app.settings.borrow().show_search_bar {
         unsafe {
-            let _ = MoveWindow(toolbar_hwnd, 0, 0, total_w, 1, true);
+            let _ = MoveWindow(search_hwnd, 0, header_h, total_w, search_h, true);
         }
-        tb_h = toolbar::toolbar_layout_height(toolbar_hwnd);
-        toolbar::clip_to_content(toolbar_hwnd, total_w, tb_h);
-        header_h += tb_h;
-    }
-    let _ = tb_h; // header_h is what downstream layout uses
-    if search_hwnd.0 != 0 {
-        let visible = state.app.settings.borrow().show_search_bar;
-        if visible {
-            unsafe {
-                let _ = MoveWindow(search_hwnd, 0, header_h, total_w, SEARCH_H, true);
-            }
-            header_h += SEARCH_H;
-        }
+        header_h += search_h;
     }
     let rebar_h = header_h;
-    let _ = tb_h; // kept for future per-row tinting if we want it
 
     // Status bar pins to bottom and self-sizes too.
     let status = state.status.get();
@@ -3535,52 +3422,52 @@ fn on_size(hwnd: HWND) {
     let cw = content.right - content.left;
     let ch = content.bottom - content.top;
 
-    // Mirror upstream simplewall (controls.c:_app_window_resize):
-    // batch ONLY rebar + tab in DeferWindowPos, then MoveWindow
-    // each listview INDIVIDUALLY outside the batch with
-    // bRepaint=TRUE. Earlier versions batched all 9 (tab + 8
-    // listviews) which reliably caused the listviews' inner
-    // header + body to skip their first WM_PAINT after a resize
-    // until hover hot-tracked them column-by-column.
     use windows::Win32::UI::WindowsAndMessaging::{
-        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos,
     };
-    unsafe {
-        // Only the tab control needs DeferWindowPos here — the
-        // toolbar + search edit were positioned above. (The
-        // batch-of-1 still provides atomic invalidation.)
-        if let Ok(mut hdwp) = BeginDeferWindowPos(1) {
-            if let Ok(h) = DeferWindowPos(
-                hdwp,
-                tab,
-                HWND::default(),
-                0,
-                tab_y,
-                total_w,
-                tab_h,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            ) {
-                hdwp = h;
+    let positions = std::iter::once((tab, 0, tab_y, total_w, tab_h))
+        .chain(
+            state
+                .listviews
+                .iter()
+                .map(|lv| (lv.get(), content.left, content.top, cw.max(0), ch.max(0))),
+        )
+        .filter(|(h, ..)| h.0 != 0)
+        .collect::<Vec<_>>();
+    // If allocation fails, fall back to ordinary positioning, never use an
+    // invalid HDWP after a failed DeferWindowPos.
+    let mut batch = unsafe { BeginDeferWindowPos(positions.len() as i32) }.ok();
+    for &(child, x, y, w, h) in &positions {
+        batch = batch.and_then(|b| {
+            unsafe {
+                DeferWindowPos(
+                    b,
+                    child,
+                    HWND::default(),
+                    x,
+                    y,
+                    w,
+                    h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
             }
-            let _ = EndDeferWindowPos(hdwp);
-        }
-
-        // bRepaint=FALSE while the user is actively dragging the
-        // resize edge (resizing flag set by WM_ENTERSIZEMOVE).
-        // MoveWindow still updates the window rect and fires
-        // WM_SIZE on the listview so its internal layout updates,
-        // but suppresses the per-pixel paint flood that would
-        // otherwise produce visible flashing. The cleanup timer
-        // armed by WM_SIZE fires once 100 ms after the last size
-        // event and runs repopulate_tab + on_tab_change to land
-        // the listview in a clean visible state.
-        let repaint = !state.resizing.get();
-        for slot in 0..TAB_LISTVIEW_IDS.len() {
-            let lv = state.listviews[slot].get();
-            if lv.0 == 0 {
-                continue;
+            .ok()
+        });
+    }
+    let applied = batch.is_some_and(|b| unsafe { EndDeferWindowPos(b) }.is_ok());
+    if !applied {
+        for (child, x, y, w, h) in positions {
+            unsafe {
+                let _ = SetWindowPos(
+                    child,
+                    HWND::default(),
+                    x,
+                    y,
+                    w,
+                    h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
-            let _ = MoveWindow(lv, content.left, content.top, cw, ch, repaint);
         }
     }
 }
@@ -3603,6 +3490,20 @@ fn on_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     };
     let new_dpi = (wparam.0 & 0xFFFF) as u32;
     let new_dpi = if new_dpi == 0 { REFERENCE_DPI } else { new_dpi };
+    // Snapshot physical widths at the old DPI without marking unvisited tabs
+    // as customized. They still need first-show sizing for localized headings.
+    let layouts: Vec<_> = state
+        .listviews
+        .iter()
+        .map(|lv| {
+            let lv = lv.get();
+            super::column_layout::ColumnLayout::capture(
+                lv,
+                listview_column_count(lv) as usize,
+                state.dpi.get(),
+            )
+        })
+        .collect();
     state.dpi.set(new_dpi);
 
     let suggested = unsafe { &*(lparam.0 as *const RECT) };
@@ -3620,74 +3521,17 @@ fn on_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
 
     // Re-scale all per-tab listview columns to the new DPI so the
     // content doesn't end up squished or stretched.
-    for (slot, &id) in TAB_LISTVIEW_IDS.iter().enumerate() {
+    for (slot, layout) in layouts.into_iter().enumerate() {
         let lv = state.listviews[slot].get();
         if lv.0 == 0 {
             continue;
         }
-        rescale_listview_columns(lv, id, new_dpi);
-    }
-}
-
-/// Re-issue LVM_SETCOLUMNWIDTH for every column on this listview
-/// using the new DPI. Mirrors the per-tab column-width tables used
-/// by `configure_listview`.
-fn rescale_listview_columns(lv: HWND, id: i32, dpi: u32) {
-    let Some(defs) = super::column_sizing::columns_for(id) else {
-        return;
-    };
-    for (i, def) in defs.iter().enumerate() {
-        let pixels = scale_dpi(def.legacy_width, dpi);
-        unsafe {
-            let _ = SendMessageW(
-                lv,
-                LVM_SETCOLUMNWIDTH,
-                WPARAM(i),
-                LPARAM(pixels as isize),
-            );
+        if let Some(layout) = layout {
+            state.applying_columns.set(true);
+            layout.apply(lv, listview_column_count(lv) as usize, new_dpi);
+            state.applying_columns.set(false);
         }
     }
-}
-
-/// Position a listview at `(x, y, w, h)` and force its internal
-/// header subwindow to repaint. A single `MoveWindow` leaves the
-/// header ghosted (visible-but-blank) until hover hot-tracking
-/// forces per-element invalidation — the standard
-/// `RedrawWindow(RDW_ALLCHILDREN)` doesn't reliably reach it
-/// under comctl6. The reliable workaround is to make `MoveWindow`
-/// fire `WM_SIZE` *twice*: once with a 1-pixel-larger rect (which
-/// is a real size change so the listview re-lays out its
-/// internals), then once with the correct rect (which trips the
-/// re-layout a second time and lands on the right size). Used by
-/// `on_tab_change` to wake the active listview's header up after
-/// `SW_SHOW`.
-fn force_listview_repaint(lv: HWND, x: i32, y: i32, w: i32, h: i32) {
-    unsafe {
-        let _ = MoveWindow(lv, x, y, w + 1, h + 1, true);
-        let _ = MoveWindow(lv, x, y, w, h, true);
-    }
-}
-
-/// Get a listview's current rect in its parent's client
-/// coordinates, suitable for handing back to `force_listview_repaint`.
-/// Returns `None` if the Win32 calls fail (shouldn't happen for
-/// live windows).
-fn current_lv_rect_in_parent(lv: HWND, parent: HWND) -> Option<(i32, i32, i32, i32)> {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::Graphics::Gdi::ScreenToClient;
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
-    let mut wr = RECT::default();
-    if unsafe { GetWindowRect(lv, &mut wr) }.is_err() {
-        return None;
-    }
-    let mut tl = POINT {
-        x: wr.left,
-        y: wr.top,
-    };
-    if unsafe { ScreenToClient(parent, &mut tl) }.0 == 0 {
-        return None;
-    }
-    Some((tl.x, tl.y, wr.right - wr.left, wr.bottom - wr.top))
 }
 
 /// Show the listview matching the currently-selected tab; hide the
@@ -3703,31 +3547,38 @@ fn on_tab_change(hwnd: HWND) {
     if tab.0 == 0 {
         return;
     }
-    let sel =
-        unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
+    let sel = unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
     let sel_slot = if sel < 0 { 0 } else { sel as usize };
+    if matches!(sel_slot, 0 | 1 | 2 | 6) {
+        request_network_snapshot(state);
+    }
 
-    // ShowWindow(SW_SHOW) on a previously-hidden child window adds
-    // its area to the parent's update region but doesn't always
-    // queue a WM_PAINT for the child's own client rect — so the
-    // listview can become visible without ever drawing its headers
-    // or rows until something else (mouse hover hot-tracking)
-    // pokes it. Force a full repaint on the just-shown listview.
+    // Hide inactive siblings before revealing the active one. The listview
+    // must sit above the tab's content surface in sibling z-order.
     for (slot, lv_cell) in state.listviews.iter().enumerate() {
         let lv = lv_cell.get();
-        if lv.0 == 0 {
-            continue;
-        }
-        unsafe {
-            if slot == sel_slot {
-                let _ = ShowWindow(lv, SW_SHOW);
-                if let Some((x, y, w, h)) = current_lv_rect_in_parent(lv, hwnd) {
-                    force_listview_repaint(lv, x, y, w, h);
-                }
-            } else {
+        if lv.0 != 0 && slot != sel_slot {
+            unsafe {
                 let _ = ShowWindow(lv, SW_HIDE);
             }
         }
+    }
+    if let Some(lv) = state.listviews.get(sel_slot).map(Cell::get) {
+        unsafe {
+            let _ = SetWindowPos(
+                lv,
+                windows::Win32::UI::WindowsAndMessaging::HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_NOACTIVATE
+                    | windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW,
+            );
+        }
+        redraw_listview(lv);
     }
 
     // Slot 7 is IDC_LOG (Packets log) — populate from the
@@ -3744,7 +3595,12 @@ fn on_tab_change(hwnd: HWND) {
         // first timer tick, then arm the periodic refresh.
         populate_connections_tab(state);
         unsafe {
-            SetTimer(hwnd, TIMER_CONNECTIONS_REFRESH, CONNECTIONS_REFRESH_MS, None);
+            SetTimer(
+                hwnd,
+                TIMER_CONNECTIONS_REFRESH,
+                CONNECTIONS_REFRESH_MS,
+                None,
+            );
         }
     } else {
         // Stop polling when the user navigates away — avoids
@@ -3768,12 +3624,22 @@ fn on_tab_change(hwnd: HWND) {
         }
     }
 
-    // Update the right-hand status bar segment with the selected
-    // tab's item count.
-    let lv = state.listviews[sel_slot].get();
+    update_item_count(state, sel_slot);
+
+    // Fit the newly-shown tab's columns to its own header text and
+    // content. Upstream does this at the end of its tab-change
+    // handler for the same reason (main.c:2609) — each tab has its
+    // own column set, so sizing only makes sense once it is visible.
+    autosize_active_listview_columns(state, false);
+}
+
+/// Update the count without rebuilding or re-enumerating the selected view.
+fn update_item_count(state: &WndState, slot: usize) {
+    let Some(lv) = state.listviews.get(slot).map(Cell::get) else {
+        return;
+    };
     if lv.0 != 0 && state.status.get().0 != 0 {
-        let count =
-            unsafe { SendMessageW(lv, windows_lvm_getitemcount(), WPARAM(0), LPARAM(0)) }.0;
+        let count = unsafe { SendMessageW(lv, windows_lvm_getitemcount(), WPARAM(0), LPARAM(0)) }.0;
         let text = if count == 0 {
             "Empty.".to_string()
         } else {
@@ -3781,12 +3647,6 @@ fn on_tab_change(hwnd: HWND) {
         };
         set_status_text(state.status.get(), 1, &text);
     }
-
-    // Fit the newly-shown tab's columns to its own header text and
-    // content. Upstream does this at the end of its tab-change
-    // handler for the same reason (main.c:2609) — each tab has its
-    // own column set, so sizing only makes sense once it is visible.
-    autosize_active_listview_columns(state, false);
 }
 
 /// `WM_COMMAND` dispatch. `id` is LOWORD(wParam) — the menu /
@@ -3869,7 +3729,6 @@ fn on_command(hwnd: HWND, id: u32, notif: u32) {
         | IDM_STARTMINIMIZED_CHK
         | IDM_SKIPUACWARNING_CHK
         | IDM_CHECKUPDATES_CHK
-        | IDM_AUTOALLOW_MICROSOFT_CHK
         | IDM_RULE_BLOCKOUTBOUND
         | IDM_RULE_BLOCKINBOUND
         | IDM_RULE_ALLOWLOOPBACK
@@ -3954,10 +3813,7 @@ fn on_blocklist_mode_pick(hwnd: HWND, id: u16) {
 
     let path = state.app.settings_path.borrow().clone();
     if let Err(e) = state.app.settings.borrow().save(&path) {
-        eprintln!(
-            "amwall: settings: save failed for {}: {e}",
-            path.display()
-        );
+        eprintln!("amwall: settings: save failed for {}: {e}", path.display());
     }
 
     refresh_blocklist_menu_checks(hwnd, state);
@@ -4713,7 +4569,9 @@ fn on_log_context_menu(hwnd: HWND, activate: &NMITEMACTIVATE) {
         }
         IDM_OPENRULESEDITOR => {
             let dir = match details.direction {
-                Some(crate::wfp::events::NetDirection::Inbound) => crate::profile::Direction::Inbound,
+                Some(crate::wfp::events::NetDirection::Inbound) => {
+                    crate::profile::Direction::Inbound
+                }
                 Some(crate::wfp::events::NetDirection::Outbound) => {
                     crate::profile::Direction::Outbound
                 }
@@ -4970,18 +4828,20 @@ fn path_for_row_with_state(
     let state = unsafe { state_ref(parent) }?;
     let source_idx = listview_item_param(lv, row)? as usize;
     let path = match listview_id {
-        x if x == IDC_APPS_PROFILE => {
-            state.app.profile.borrow().apps.get(source_idx).map(|a| a.path.clone())?
-        }
-        x if x == IDC_APPS_SERVICE => {
-            state.services.borrow().get(source_idx).and_then(|s| {
-                if s.image_path.as_os_str().is_empty() {
-                    None
-                } else {
-                    Some(s.image_path.clone())
-                }
-            })?
-        }
+        x if x == IDC_APPS_PROFILE => state
+            .app
+            .profile
+            .borrow()
+            .apps
+            .get(source_idx)
+            .map(|a| a.path.clone())?,
+        x if x == IDC_APPS_SERVICE => state.services.borrow().get(source_idx).and_then(|s| {
+            if s.image_path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(s.image_path.clone())
+            }
+        })?,
         _ => return None,
     };
     Some((state, path))
@@ -5019,18 +4879,20 @@ fn path_for_row(listview_id: i32, row: i32) -> Option<std::path::PathBuf> {
     let state = unsafe { state_ref(parent) }?;
     let source_idx = listview_item_param(lv, row)? as usize;
     match listview_id {
-        x if x == IDC_APPS_PROFILE => {
-            state.app.profile.borrow().apps.get(source_idx).map(|a| a.path.clone())
-        }
-        x if x == IDC_APPS_SERVICE => {
-            state.services.borrow().get(source_idx).and_then(|s| {
-                if s.image_path.as_os_str().is_empty() {
-                    None
-                } else {
-                    Some(s.image_path.clone())
-                }
-            })
-        }
+        x if x == IDC_APPS_PROFILE => state
+            .app
+            .profile
+            .borrow()
+            .apps
+            .get(source_idx)
+            .map(|a| a.path.clone()),
+        x if x == IDC_APPS_SERVICE => state.services.borrow().get(source_idx).and_then(|s| {
+            if s.image_path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(s.image_path.clone())
+            }
+        }),
         _ => None,
     }
 }
@@ -5044,8 +4906,8 @@ fn path_for_row(listview_id: i32, row: i32) -> Option<std::path::PathBuf> {
 /// Implementation cheat: walk every visible top-level window
 /// looking for the amwall main class — there's only ever one.
 fn find_listview(slot: usize) -> Option<HWND> {
-    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW};
     use std::cell::Cell;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW};
 
     thread_local! {
         static FOUND: Cell<HWND> = const { Cell::new(HWND(0)) };
@@ -5209,33 +5071,12 @@ pub struct SignedInfo {
     pub signer: Option<String>,
 }
 
-/// Map "does this decision care about certificate revocation?" to the
-/// WinVerifyTrust revocation-check flags. The auto-ALLOW path
-/// (is_microsoft_signed) passes true -> WTD_REVOKE_WHOLECHAIN so a
-/// revoked-but-unexpired cert fails closed (nothing wrongly permitted);
-/// the display-only signer worker passes false -> WTD_REVOKE_NONE (fast,
-/// offline-safe, and grants nothing on its own). Security audit finding
-/// F.2. Upstream verifies with WHOLECHAIN (helper.c:833,846) and uses
-/// NONE only on the display/cache path (helper.c:851).
-fn revocation_checks(
-    check_revocation: bool,
-) -> windows::Win32::Security::WinTrust::WINTRUST_DATA_REVOCATION_CHECKS {
-    use windows::Win32::Security::WinTrust::{WTD_REVOKE_NONE, WTD_REVOKE_WHOLECHAIN};
-    if check_revocation {
-        WTD_REVOKE_WHOLECHAIN
-    } else {
-        WTD_REVOKE_NONE
-    }
-}
-
 /// `WinVerifyTrust(WINTRUST_ACTION_GENERIC_VERIFY_V2)` returning
 /// `0` means the binary's signature chain is valid. Anything else
 /// (TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN, etc.) means we
-/// treat it as unsigned. `check_revocation` selects the revocation
-/// policy via `revocation_checks`: the auto-ALLOW caller passes true
-/// (WTD_REVOKE_WHOLECHAIN, fails closed on a revoked cert); the
-/// display-only signer worker passes false (WTD_REVOKE_NONE, fast and
-/// offline-safe). Security audit finding F.2.
+/// treat it as unsigned. This asynchronous display-only lookup uses
+/// WTD_REVOKE_NONE, like upstream's display/cache path (helper.c:851).
+/// Its result never grants network permission.
 ///
 /// When `extract_signer` is true (settings.use_certificates), the
 /// state-data emitted by VERIFY is walked via
@@ -5245,21 +5086,16 @@ fn revocation_checks(
 /// display name (typically the publisher org, e.g. "Microsoft
 /// Corporation" or "GitHub, Inc."). When false, signer is None
 /// even for signed binaries.
-fn verify_signature(
-    path: &std::path::Path,
-    extract_signer: bool,
-    check_revocation: bool,
-) -> SignedInfo {
+fn verify_signature(path: &std::path::Path, extract_signer: bool) -> SignedInfo {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Security::Cryptography::{
         CERT_NAME_SIMPLE_DISPLAY_TYPE, CertGetNameStringW,
     };
     use windows::Win32::Security::WinTrust::{
-        WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
-        WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
-        WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
-        WTHelperProvDataFromStateData, WinVerifyTrust,
+        WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_NONE,
+        WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE, WTHelperGetProvCertFromChain,
+        WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
     };
     use windows::core::{GUID, PCWSTR};
 
@@ -5282,7 +5118,7 @@ fn verify_signature(
     let mut data: WINTRUST_DATA = unsafe { std::mem::zeroed() };
     data.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
     data.dwUIChoice = WTD_UI_NONE;
-    data.fdwRevocationChecks = revocation_checks(check_revocation);
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
     data.dwUnionChoice = WTD_CHOICE_FILE;
     data.dwStateAction = WTD_STATEACTION_VERIFY;
     data.Anonymous = WINTRUST_DATA_0 {
@@ -5311,9 +5147,7 @@ fn verify_signature(
         if prov_data.is_null() {
             None
         } else {
-            let signer_ptr = unsafe {
-                WTHelperGetProvSignerFromChain(prov_data, 0, false, 0)
-            };
+            let signer_ptr = unsafe { WTHelperGetProvSignerFromChain(prov_data, 0, false, 0) };
             if signer_ptr.is_null() {
                 None
             } else {
@@ -5536,8 +5370,7 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs() as i64)
                                 .unwrap_or(0);
-                            if let Some(existing) =
-                                profile.apps.iter_mut().find(|a| a.path == path)
+                            if let Some(existing) = profile.apps.iter_mut().find(|a| a.path == path)
                             {
                                 if existing.is_enabled != new_enabled {
                                     existing.is_enabled = new_enabled;
@@ -5585,17 +5418,10 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
                     .filter(|r| search_match(&r.name, &filter))
                     .nth(row_usize);
                 if let Some(rule) = target {
-                    let Ok(mut overrides) =
-                        state.app.internal_rules_state.try_borrow_mut()
-                    else {
+                    let Ok(mut overrides) = state.app.internal_rules_state.try_borrow_mut() else {
                         return;
                     };
-                    overrides.set(
-                        RuleKind::Custom,
-                        &rule.name,
-                        new_enabled,
-                        rule.is_enabled,
-                    );
+                    overrides.set(RuleKind::Custom, &rule.name, new_enabled, rule.is_enabled);
                     overrides_dirty = true;
                 }
             } else {
@@ -5647,9 +5473,7 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
                 .filter(|r| search_match(&r.name, &filter))
                 .nth(row as usize);
             if let Some(rule) = target {
-                let Ok(mut overrides) =
-                    state.app.internal_rules_state.try_borrow_mut()
-                else {
+                let Ok(mut overrides) = state.app.internal_rules_state.try_borrow_mut() else {
                     return;
                 };
                 overrides.set(kind, &rule.name, new_enabled, rule.is_enabled);
@@ -5668,8 +5492,7 @@ fn on_listview_checkbox_toggle(hwnd: HWND, listview_id: i32, row: i32, new_enabl
         // once during startup, so `try_borrow` here is effectively
         // free. Skipping save on contention is fine — the next
         // toggle will retry.
-        let Ok(path_borrow) = state.app.internal_rules_state_path.try_borrow()
-        else {
+        let Ok(path_borrow) = state.app.internal_rules_state_path.try_borrow() else {
             return;
         };
         let path = path_borrow.clone();
@@ -5747,7 +5570,10 @@ fn sort_connections(conns: &mut [super::connections::Connection], sort: NetworkS
     }
     conns.sort_by(|a, b| {
         let ord = match sort.column {
-            0 => a.process.to_ascii_lowercase().cmp(&b.process.to_ascii_lowercase()),
+            0 => a
+                .process
+                .to_ascii_lowercase()
+                .cmp(&b.process.to_ascii_lowercase()),
             1 => a.local.ip.cmp(&b.local.ip),
             3 => a.local.port.cmp(&b.local.port),
             4 => a.remote.ip.cmp(&b.remote.ip),
@@ -5906,7 +5732,9 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
             let mut profile = state.app.profile.borrow_mut();
             let before = profile.apps.len();
             // Keep "Prevent removal" apps even when matched (review finding).
-            profile.apps.retain(|a| a.is_undeletable || !paths.contains(&a.path));
+            profile
+                .apps
+                .retain(|a| a.is_undeletable || !paths.contains(&a.path));
             removed = before - profile.apps.len();
         }
         x if x == IDC_APPS_UWP => {
@@ -5925,7 +5753,9 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
                 let mut profile = state.app.profile.borrow_mut();
                 let before = profile.apps.len();
                 // Keep "Prevent removal" apps even when matched (review finding).
-                profile.apps.retain(|a| a.is_undeletable || !sids.contains(&a.path));
+                profile
+                    .apps
+                    .retain(|a| a.is_undeletable || !sids.contains(&a.path));
                 removed = before - profile.apps.len();
             }
         }
@@ -5942,22 +5772,20 @@ fn on_apps_delete_selected(hwnd: HWND, listview_id: i32) {
     populate_services_tab(state);
     populate_uwp_tab(state);
     on_tab_change(hwnd);
-    // Same paint-pipeline jiggle the auto-catalog flow uses —
-    // populate + tab-change alone leave comctl32 in a half-
-    // painted state where deleted rows linger until the user
-    // scrolls or resizes. Forcing an InvalidateRect on the
-    // listview's parent rect re-runs the paint pipeline cleanly.
-    force_active_apps_listview_jiggle(hwnd, state);
+    // Repaint after the profile mutation.
+    repaint_active_apps_listview(hwnd, state);
     reinstall_filters_if_active(hwnd, state);
-    set_status_text(state.status.get(), 0, &t!("status.removed_entries", count = removed));
+    set_status_text(
+        state.status.get(),
+        0,
+        &t!("status.removed_entries", count = removed),
+    );
 }
 
 /// MessageBox confirm for bulk-delete. Yes/No, default No so a
 /// stray Enter doesn't wipe the list.
 fn confirm_bulk_delete(hwnd: HWND, count: usize) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO};
     let msg = wide(&t!("message.bulk_delete_confirm", count = count));
     let title = wide(&t!("dialog.confirm_bulk_delete"));
     let r = unsafe {
@@ -6032,9 +5860,7 @@ fn on_context_set_enabled(hwnd: HWND, enable: bool) {
     {
         let mut profile = state.app.profile.borrow_mut();
         for path in &paths {
-            if let Some(existing) =
-                profile.apps.iter_mut().find(|a| &a.path == path)
-            {
+            if let Some(existing) = profile.apps.iter_mut().find(|a| &a.path == path) {
                 existing.is_enabled = enable;
             } else {
                 profile.apps.push(ProfileApp {
@@ -6373,7 +6199,7 @@ fn on_context_remove(hwnd: HWND) {
     populate_services_tab(state);
     populate_uwp_tab(state);
     on_tab_change(hwnd);
-    force_active_apps_listview_jiggle(hwnd, state);
+    repaint_active_apps_listview(hwnd, state);
     reinstall_filters_if_active(hwnd, state);
     let msg = if removed == 1 {
         format!("Removed: {}", target.display_name)
@@ -6508,7 +6334,11 @@ fn on_context_properties(hwnd: HWND) {
 
     {
         let mut profile = state.app.profile.borrow_mut();
-        if let Some(slot) = profile.apps.iter_mut().find(|a| a.path == target.binary_path) {
+        if let Some(slot) = profile
+            .apps
+            .iter_mut()
+            .find(|a| a.path == target.binary_path)
+        {
             *slot = updated;
         }
     }
@@ -6535,9 +6365,7 @@ pub(crate) fn set_clipboard_text(hwnd: HWND, text: &str) {
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
-    use windows::Win32::System::Memory::{
-        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
-    };
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
     use windows::Win32::System::Ole::CF_UNICODETEXT;
 
     let mut wide_text: Vec<u16> = text.encode_utf16().collect();
@@ -6609,7 +6437,6 @@ fn on_toggle(hwnd: HWND, id: u16) {
             IDM_RULE_ALLOWWINDOWSUPDATE => &mut s.rule_allow_windows_update,
             IDM_USECERTIFICATES_CHK => &mut s.use_certificates,
             IDM_USEHASHES_CHK => &mut s.use_hashes,
-            IDM_AUTOALLOW_MICROSOFT_CHK => &mut s.auto_allow_microsoft_signed,
             // Toolbar "Log to file" / "Log UI" buttons. drain_events gates
             // on these, so flipping the setting is all that's needed
             // functionally; the toolbar pressed state is synced below.
@@ -6637,17 +6464,17 @@ fn on_toggle(hwnd: HWND, id: u16) {
     // the toggle, just won't survive restart.
     let path = state.app.settings_path.borrow().clone();
     if let Err(e) = state.app.settings.borrow().save(&path) {
-        eprintln!(
-            "amwall: settings: save failed for {}: {e}",
-            path.display()
-        );
+        eprintln!("amwall: settings: save failed for {}: {e}", path.display());
     }
 
     // Visual side effects.
     match id {
         IDM_ALWAYSONTOP_CHK => apply_always_on_top(hwnd, new_value),
         IDM_SHOWSEARCHBAR_CHK => apply_search_bar_visibility(hwnd, new_value),
-        IDM_USEDARKTHEME_CHK => super::font::set_dark_mode(hwnd, new_value),
+        IDM_USEDARKTHEME_CHK => {
+            super::font::set_dark_mode(hwnd, new_value);
+            super::connect_dialog::set_dark_mode(new_value);
+        }
         IDM_SHOWFILENAMESONLY_CHK => {
             // Filename / full-path display affects Apps tab rendering.
             populate_apps_tab(state);
@@ -6705,11 +6532,7 @@ fn on_toggle(hwnd: HWND, id: u16) {
             apply_skipuac_toggle(hwnd, state, new_value);
         }
         IDM_USEHASHES_CHK => {
-            // Hash drift check runs on save; trigger one now so
-            // the user sees the effect of flipping the toggle
-            // immediately. update_hashes_if_enabled is a no-op
-            // when use_hashes is off.
-            save_profile_to_disk(state);
+            check_hash_drift(hwnd, state);
         }
         IDM_TRAY_ENABLELOG_CHK | IDM_TRAY_ENABLEUILOG_CHK => {
             // Reflect the new state on the toolbar toggle button.
@@ -6739,12 +6562,8 @@ fn on_toggle(hwnd: HWND, id: u16) {
 fn apply_skipuac_toggle(hwnd: HWND, state: &WndState, requested: bool) {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        INFINITE, WaitForSingleObject,
-    };
-    use windows::Win32::UI::Shell::{
-        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
-    };
+    use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+    use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
     use windows::core::PCWSTR;
 
@@ -6753,11 +6572,19 @@ fn apply_skipuac_toggle(hwnd: HWND, state: &WndState, requested: bool) {
         Err(e) => {
             eprintln!("amwall: skipuac: cannot resolve own exe: {e}");
             // Snap the menu back to the actual task state.
-            set_menu_check(hwnd, IDM_SKIPUACWARNING_CHK, crate::skipuac::is_registered());
+            set_menu_check(
+                hwnd,
+                IDM_SKIPUACWARNING_CHK,
+                crate::skipuac::is_registered(),
+            );
             return;
         }
     };
-    let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let exe_w: Vec<u16> = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let verb_w: Vec<u16> = "runas\0".encode_utf16().collect();
     let arg = if requested {
         "-skipuac-register"
@@ -6779,7 +6606,11 @@ fn apply_skipuac_toggle(hwnd: HWND, state: &WndState, requested: bool) {
     let exec_ok = unsafe { ShellExecuteExW(&mut sei) };
     if exec_ok.is_err() || sei.hProcess.0 == 0 {
         eprintln!("amwall: skipuac: ShellExecuteExW(runas) failed (UAC denied?)");
-        set_menu_check(hwnd, IDM_SKIPUACWARNING_CHK, crate::skipuac::is_registered());
+        set_menu_check(
+            hwnd,
+            IDM_SKIPUACWARNING_CHK,
+            crate::skipuac::is_registered(),
+        );
         return;
     }
     unsafe {
@@ -6836,9 +6667,7 @@ fn requeue_signed_paths(state: &WndState) {
 /// Blocklist tri-state radios) to the install-time `BlocklistAction`.
 /// Same shape — kept as separate types so `crate::install` doesn't
 /// need to depend on GUI code.
-fn blocklist_mode_to_action(
-    m: super::settings::BlocklistMode,
-) -> crate::install::BlocklistAction {
+fn blocklist_mode_to_action(m: super::settings::BlocklistMode) -> crate::install::BlocklistAction {
     match m {
         super::settings::BlocklistMode::Disable => crate::install::BlocklistAction::Disable,
         super::settings::BlocklistMode::Allow => crate::install::BlocklistAction::Allow,
@@ -6884,7 +6713,11 @@ fn on_enable_filters(hwnd: HWND) {
                 set_status_text(
                     state.status.get(),
                     1,
-                    &t!("status.filters_removed", filters = report.filters_deleted, sublayers = report.sublayers_deleted),
+                    &t!(
+                        "status.filters_removed",
+                        filters = report.filters_deleted,
+                        sublayers = report.sublayers_deleted
+                    ),
                 );
                 new_active = false;
             }
@@ -6918,6 +6751,7 @@ fn on_enable_filters(hwnd: HWND) {
                 true,
             )
         };
+        ensure_enabled_hash_baselines(state);
         let report = match crate::install::install_with_internal(
             &engine,
             &state.app.profile.borrow(),
@@ -6942,7 +6776,11 @@ fn on_enable_filters(hwnd: HWND) {
         set_status_text(
             state.status.get(),
             1,
-            &t!("status.filters_installed", added = report.filters_added, skipped = report.rules_skipped),
+            &t!(
+                "status.filters_installed",
+                added = report.filters_added,
+                skipped = report.rules_skipped
+            ),
         );
         new_active = true;
     }
@@ -7029,6 +6867,7 @@ fn reinstall_filters_if_active(hwnd: HWND, state: &WndState) {
             return;
         }
     };
+    ensure_enabled_hash_baselines(state);
     if let Err(e) = engine.cleanup_provider(&crate::install::PROVIDER_KEY) {
         eprintln!("amwall: reinstall: cleanup_provider failed: {e:?}");
         warn_filter_update_failed(hwnd, state);
@@ -7218,7 +7057,15 @@ fn refresh_blocklist_menu_checks(hwnd: HWND, state: &WndState) {
 fn apply_always_on_top(hwnd: HWND, on: bool) {
     let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
     unsafe {
-        let _ = SetWindowPos(hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            after,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -7263,6 +7110,9 @@ fn autosize_active_listview_columns(state: &WndState, force: bool) {
     }
     let sel = unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
     let slot = if sel < 0 { 0 } else { sel as usize };
+    if force {
+        state.app.settings.borrow_mut().manual_columns[slot].clear();
+    }
     autosize_listview_slot(state, slot);
 }
 
@@ -7270,55 +7120,140 @@ fn autosize_active_listview_columns(state: &WndState, force: bool) {
 /// Callers that already know which tab they just refilled use this
 /// directly so a background tab is not resized on another's behalf.
 fn autosize_listview_slot(state: &WndState, slot: usize) {
-    use super::column_sizing::AutosizeSpec;
+    if state.initializing.get() {
+        return;
+    }
     let Some(lv) = state.listviews.get(slot).map(|c| c.get()) else {
         return;
     };
     if lv.0 == 0 {
         return;
     }
-    // The Log tab's column 0 is the `#` counter, so its Name column
-    // (1) absorbs the leftover width instead. Upstream listview.c:855.
-    let spec = match crate::gui::ids::TAB_LISTVIEW_IDS.get(slot) {
-        Some(&id) if id == IDC_LOG => &AutosizeSpec::LOG,
-        _ => &AutosizeSpec::DEFAULT,
-    };
-    super::column_sizing::autosize_listview(lv, state.dpi.get(), spec);
-
-    // Re-lay-out repaint. `LVM_SETCOLUMNWIDTH` moves the header's
-    // dividers and reflows every row, but under comctl6 that leaves the
-    // header and rows drawn-but-stale until the mouse passes over them
-    // and hot-tracking invalidates each element — the exact M5.9.5
-    // ghosting `force_listview_repaint` exists to cure.
-    //
-    // This bites specifically because sizing runs LAST: `on_tab_change`
-    // does its own jiggle when it shows the listview, long before the
-    // columns are measured, so without repairing here the freshly-shown
-    // tab paints blank until moused over.
-    jiggle_active_listview(state, slot);
+    let manual = state.app.settings.borrow().manual_columns[slot].clone();
+    state.applying_columns.set(true);
+    let changed = super::column_sizing::autosize_listview(lv, state.dpi.get(), &manual);
+    state.applying_columns.set(false);
+    if changed {
+        remember_column_layout(state, slot, false);
+        redraw_listview(lv);
+    }
 }
 
-/// Run the +1px `MoveWindow` jiggle on the listview in `slot`.
-///
-/// The one repaint primitive this codebase has found to reliably pierce
-/// comctl32's `LVS_EX_DOUBLEBUFFER` cache after the item array or the
-/// column layout has been mutated. Cheap — two `MoveWindow` calls that
-/// net to the listview's existing rect — but it must follow the
-/// mutation, not precede it.
-fn jiggle_active_listview(state: &WndState, slot: usize) {
-    use windows::Win32::UI::WindowsAndMessaging::GetParent;
-    let Some(lv) = state.listviews.get(slot).map(|c| c.get()) else {
+fn remember_column_layout(state: &WndState, slot: usize, save: bool) {
+    let Some(lv) = state
+        .listviews
+        .get(slot)
+        .map(Cell::get)
+        .filter(|lv| lv.0 != 0)
+    else {
         return;
     };
-    if lv.0 == 0 {
+    let Some(layout) = super::column_layout::ColumnLayout::capture(
+        lv,
+        listview_column_count(lv) as usize,
+        state.dpi.get(),
+    ) else {
+        return;
+    };
+    state.app.settings.borrow_mut().column_layouts[slot] = Some(layout);
+    if save {
+        let path = state.app.settings_path.borrow().clone();
+        if let Err(e) = state.app.settings.borrow().save(&path) {
+            eprintln!("amwall: column layout: settings save failed: {e}");
+        }
+    }
+}
+
+unsafe extern "system" fn listview_header_proc(
+    lv: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    id: usize,
+    _data: usize,
+) -> LRESULT {
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    if msg == WM_NOTIFY && lparam.0 != 0 {
+        let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(lv) };
+        unsafe {
+            on_header_change(parent, &*(lparam.0 as *const NMHDR));
+        }
+    }
+    if msg == WM_NCDESTROY {
+        unsafe {
+            RemoveWindowSubclass(lv, Some(listview_header_proc), id);
+        }
+    }
+    unsafe { DefSubclassProc(lv, msg, wparam, lparam) }
+}
+
+/// `header` must point into the native WM_NOTIFY payload (NMHEADER for HDN_*).
+unsafe fn on_header_change(hwnd: HWND, header: &NMHDR) {
+    use windows::Win32::UI::Controls::{
+        HDN_ENDDRAG, HDN_ENDTRACKA, HDN_ENDTRACKW, HDN_ITEMCHANGEDA, HDN_ITEMCHANGEDW,
+    };
+    if ![
+        HDN_ENDDRAG,
+        HDN_ENDTRACKW,
+        HDN_ENDTRACKA,
+        HDN_ITEMCHANGEDW,
+        HDN_ITEMCHANGEDA,
+    ]
+    .contains(&header.code)
+    {
         return;
     }
-    let parent = unsafe { GetParent(lv) };
-    if parent.0 == 0 {
+    if [HDN_ITEMCHANGEDW, HDN_ITEMCHANGEDA].contains(&header.code) {
+        let notification =
+            unsafe { &*(header as *const NMHDR as *const windows::Win32::UI::Controls::NMHEADERW) };
+        if notification.pitem.is_null() {
+            return;
+        }
+        let mask = unsafe { (*notification.pitem).mask };
+        if mask.0
+            & (windows::Win32::UI::Controls::HDI_WIDTH.0
+                | windows::Win32::UI::Controls::HDI_ORDER.0)
+            == 0
+        {
+            return;
+        }
+    }
+    let Some(state) = (unsafe { state_ref(hwnd) }) else {
+        return;
+    };
+    if state.applying_columns.get() || state.initializing.get() {
         return;
     }
-    if let Some((x, y, w, h)) = current_lv_rect_in_parent(lv, parent) {
-        force_listview_repaint(lv, x, y, w, h);
+    for (slot, lv) in state.listviews.iter().enumerate() {
+        if lv.get().0 == 0 {
+            continue;
+        }
+        let h = unsafe { SendMessageW(lv.get(), LVM_GETHEADER, WPARAM(0), LPARAM(0)) }.0;
+        if h == header.hwndFrom.0 {
+            let n = unsafe {
+                &*(header as *const NMHDR as *const windows::Win32::UI::Controls::NMHEADERW)
+            };
+            let width_changed = [HDN_ENDTRACKA, HDN_ENDTRACKW].contains(&header.code)
+                || (!n.pitem.is_null()
+                    && unsafe { (*n.pitem).mask.0 } & windows::Win32::UI::Controls::HDI_WIDTH.0
+                        != 0);
+            let count = listview_column_count(lv.get()) as usize;
+            if width_changed && n.iItem >= 0 && (n.iItem as usize) < count {
+                let mut settings = state.app.settings.borrow_mut();
+                settings.manual_columns[slot].resize(count, false);
+                settings.manual_columns[slot][n.iItem as usize] = true;
+            }
+            // END(DRAG/TRACK) runs before the final value is committed.
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd,
+                    WM_SAVE_COLUMN_LAYOUT,
+                    WPARAM(slot),
+                    LPARAM(0),
+                );
+            }
+            break;
+        }
     }
 }
 
@@ -7399,30 +7334,35 @@ fn on_open_settings(hwnd: HWND) {
     state.app.settings.replace(updated.clone());
     let path = state.app.settings_path.borrow().clone();
     if let Err(e) = updated.save(&path) {
-        eprintln!(
-            "amwall: settings: save failed for {}: {e}",
-            path.display()
-        );
+        eprintln!("amwall: settings: save failed for {}: {e}", path.display());
+    }
+    if updated.use_hashes && !snapshot.use_hashes {
+        check_hash_drift(hwnd, state);
     }
 
     if language_changed {
-        restart_self();
+        restart_self(hwnd);
         return;
     }
 
     apply_initial_settings(hwnd, state);
     // Highlighting colors / enables may have changed — force the active
     // Apps listview to repaint so new row colors apply immediately
-    // instead of only after the next populate (Fable #31). The jiggle
+    // instead of only after the next populate (Fable #31). A repaint
     // is what reliably pierces LVS_EX_DOUBLEBUFFER's cached surface.
-    force_active_apps_listview_jiggle(hwnd, state);
+    repaint_active_apps_listview(hwnd, state);
 }
 
-fn restart_self() {
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).arg("--show").spawn();
+fn restart_self(hwnd: HWND) {
+    if let Some(state) = unsafe { state_ref(hwnd) } {
+        for slot in 0..TAB_LISTVIEW_IDS.len() {
+            if state.app.settings.borrow().column_layouts[slot].is_some() {
+                remember_column_layout(state, slot, false);
+            }
+        }
     }
-    std::process::exit(0);
+    save_window_placement(hwnd);
+    super::request_restart(hwnd);
 }
 
 /// Toolbar "Create rule" / Edit menu equivalent: open the rule
@@ -7504,7 +7444,7 @@ fn on_edit_selected_rule(hwnd: HWND) {
 /// Delete-key handler for the User rules listview — confirm,
 /// then remove the selected row. Persist + repopulate.
 fn on_delete_selected_rule(hwnd: HWND) {
-    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONQUESTION, MB_YESNO, IDYES};
+    use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO};
     let state = match unsafe { state_ref(hwnd) } {
         Some(s) => s,
         None => return,
@@ -7575,15 +7515,9 @@ fn on_delete_selected_rule(hwnd: HWND) {
 /// stands either way (the user can still re-save via
 /// File > Export).
 fn save_profile_to_disk(state: &WndState) {
-    // M12.2: when use_hashes is on, compute SHA-256 for File-
-    // kind apps that don't yet have a stored hash AND check for
-    // drift on apps that do. Mirrors upstream simplewall's
-    // `_app_getfilehashinfo` -> `<item hash="..."/>` flow at
-    // db.c:1027 + helper.c:1882. Cheap on a typical exe (a few
-    // ms each); we run it inline on save rather than spawning a
-    // worker since the user expects "save" to mean "everything
-    // is on disk now", not "queued".
-    update_hashes_if_enabled(state);
+    cancel_changed_prompts(state);
+    // Ordinary saves never scan executables. Capture missing baselines before
+    // installing permissions; enforce drift at startup and on TIMER_HASH_CHECK.
 
     let path = state.app.profile_path.borrow().clone();
     let xml = crate::profile::to_string(&state.app.profile.borrow());
@@ -7599,70 +7533,18 @@ fn save_profile_to_disk(state: &WndState) {
     }
 }
 
-/// M12.2 use_hashes worker: walk File-kind apps in the profile,
-/// compute current SHA-256, compare against stored. Three cases:
-///
-/// - `app.hash` empty + file readable: store the computed hash.
-/// - `app.hash` non-empty + file readable + matches: no-op.
-/// - `app.hash` non-empty + file readable + differs: log a
-///   warning to stderr (caught by swaplog) and surface in the
-///   status bar. The stored hash is NOT overwritten — drift
-///   detection is a one-shot signal; the user clears it by
-///   editing or removing the App entry.
-///
-/// No-op when `use_hashes` is off or the app isn't File-shaped.
-fn update_hashes_if_enabled(state: &WndState) {
-    use crate::profile::AppKind;
-
+/// Capture only missing baselines before installing enabled apps. Existing
+/// baselines are never refreshed here; the drift-enforcement pass owns them.
+fn ensure_enabled_hash_baselines(state: &WndState) {
     if !state.app.settings.borrow().use_hashes {
         return;
     }
-    let mut profile = state.app.profile.borrow_mut();
-    let mut drifted: Vec<String> = Vec::new();
-    for app in profile.apps.iter_mut() {
-        if app.kind() != AppKind::File {
-            continue;
-        }
-        let Some(current) = crate::hash::sha256_file(&app.resolved_path()) else {
-            // Unreadable file — skip, leave any existing hash
-            // alone. Don't surface as drift (the file might
-            // simply have been uninstalled).
-            continue;
-        };
-        // Save-path pass stays WARN-ONLY; periodic enforcement (disable
-        // + rebuild filters on drift) is check_hash_drift on
-        // TIMER_HASH_CHECK. Shared classifier so both agree on "drift".
-        match hash_drift_verdict(app.hash.as_deref(), &current) {
-            HashVerdict::Store => {
-                app.hash = Some(current);
-            }
-            HashVerdict::Match => {
-                // Nothing to do.
-            }
-            HashVerdict::Drift => {
-                let name = app
-                    .path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| app.path.display().to_string());
-                eprintln!(
-                    "amwall: hash drift detected for {} ({}): \
-                     stored hash differs from current binary",
-                    name,
-                    app.path.display()
-                );
-                drifted.push(name);
-            }
-        }
-    }
-    drop(profile);
-    if !drifted.is_empty() {
-        let msg = if drifted.len() == 1 {
-            t!("status.hash_drift_one", name = &drifted[0])
-        } else {
-            t!("status.hash_drift_many", count = drifted.len())
-        };
-        set_status_text(state.status.get(), 0, &msg);
+    let changed = super::hash_baseline::capture_missing(
+        &mut state.app.profile.borrow_mut().apps,
+        crate::hash::sha256_file,
+    );
+    if changed {
+        save_profile_to_disk(state);
     }
 }
 
@@ -7687,13 +7569,12 @@ fn hash_drift_verdict(stored: Option<&str>, current: &str) -> HashVerdict {
     }
 }
 
-/// Periodic (and one-shot at launch) `use_hashes` ENFORCEMENT. Unlike
-/// the save-path warner `update_hashes_if_enabled`, this acts on drift:
+/// Periodic (and one-shot at launch) `use_hashes` drift enforcement:
 /// an enabled File app whose binary changed on disk is disabled and its
 /// stored hash refreshed, then filters are rebuilt so the tampered
 /// binary loses its WFP permit. Mirrors upstream's INFO_DISABLE on
 /// drift (helper.c:1745-1778 -> profile.c:262-277). No-op when
-/// `use_hashes` is off. Same mutate -> save -> repopulate -> jiggle ->
+/// `use_hashes` is off. Same mutate -> save -> repopulate -> repaint ->
 /// reinstall shape as `expire_timed_apps`. Security audit finding F.1.
 fn check_hash_drift(hwnd: HWND, state: &WndState) {
     use crate::profile::AppKind;
@@ -7702,6 +7583,7 @@ fn check_hash_drift(hwnd: HWND, state: &WndState) {
         return;
     }
     let mut disabled: Vec<String> = Vec::new();
+    let mut changed = false;
     {
         let mut profile = state.app.profile.borrow_mut();
         for app in profile.apps.iter_mut() {
@@ -7714,7 +7596,10 @@ fn check_hash_drift(hwnd: HWND, state: &WndState) {
                 continue;
             };
             match hash_drift_verdict(app.hash.as_deref(), &current) {
-                HashVerdict::Store => app.hash = Some(current),
+                HashVerdict::Store => {
+                    app.hash = Some(current);
+                    changed = true;
+                }
                 HashVerdict::Match => {}
                 HashVerdict::Drift => {
                     // Refresh the baseline to the new binary and, if the
@@ -7726,6 +7611,7 @@ fn check_hash_drift(hwnd: HWND, state: &WndState) {
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| app.path.display().to_string());
                     app.hash = Some(current);
+                    changed = true;
                     if app.is_enabled {
                         app.is_enabled = false;
                         disabled.push(name);
@@ -7733,6 +7619,9 @@ fn check_hash_drift(hwnd: HWND, state: &WndState) {
                 }
             }
         }
+    }
+    if changed {
+        save_profile_to_disk(state);
     }
     if disabled.is_empty() {
         return;
@@ -7742,10 +7631,9 @@ fn check_hash_drift(hwnd: HWND, state: &WndState) {
         disabled.len(),
         disabled.join(", ")
     );
-    save_profile_to_disk(state);
     populate_apps_tab(state);
     on_tab_change(hwnd);
-    force_active_apps_listview_jiggle(hwnd, state);
+    repaint_active_apps_listview(hwnd, state);
     reinstall_filters_if_active(hwnd, state);
     set_status_text(
         state.status.get(),
@@ -7771,10 +7659,7 @@ fn on_import(hwnd: HWND) {
     let xml = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "amwall: import: read failed for {}: {e}",
-                path.display()
-            );
+            eprintln!("amwall: import: read failed for {}: {e}", path.display());
             set_status_text(state.status.get(), 0, &t!("status.import_read_error"));
             return;
         }
@@ -7787,6 +7672,7 @@ fn on_import(hwnd: HWND) {
             return;
         }
     };
+    cancel_all_prompts(state);
     state.app.profile.replace(new_profile);
     state.app.profile_path.replace(path.clone());
     populate_apps_tab(state);
@@ -7823,10 +7709,7 @@ fn on_export(hwnd: HWND) {
 
     let xml = crate::profile::to_string(&state.app.profile.borrow());
     if let Err(e) = std::fs::write(&target, xml) {
-        eprintln!(
-            "amwall: export: write failed for {}: {e}",
-            target.display()
-        );
+        eprintln!("amwall: export: write failed for {}: {e}", target.display());
         set_status_text(state.status.get(), 0, &t!("status.export_write_error"));
         return;
     }
@@ -7849,10 +7732,7 @@ fn on_refresh(hwnd: HWND) {
     let xml = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "amwall: refresh: read failed for {}: {e}",
-                path.display(),
-            );
+            eprintln!("amwall: refresh: read failed for {}: {e}", path.display(),);
             set_status_text(state.status.get(), 0, &t!("status.refresh_read_error"));
             return;
         }
@@ -7865,6 +7745,7 @@ fn on_refresh(hwnd: HWND) {
             return;
         }
     };
+    cancel_all_prompts(state);
     state.app.profile.replace(new_profile);
     // F5 also re-walks SCM + the UWP repository so the user picks
     // up newly-installed services / packages without restarting.
@@ -7959,6 +7840,13 @@ fn on_exit(hwnd: HWND) {
     // restores it. Done here (the real exit path) rather than on WM_CLOSE,
     // which only hides to the tray. Mirrors upstream simplewall
     // `_r_window_saveposition` (main.c close handler).
+    if let Some(state) = unsafe { state_ref(hwnd) } {
+        for slot in 0..TAB_LISTVIEW_IDS.len() {
+            if state.app.settings.borrow().column_layouts[slot].is_some() {
+                remember_column_layout(state, slot, false);
+            }
+        }
+    }
     save_window_placement(hwnd);
     unsafe {
         let _ = DestroyWindow(hwnd);
@@ -8007,6 +7895,7 @@ fn restore_window_placement(hwnd: HWND, start_minimized: bool) {
     clamp_rect_to_work_area(&mut rect);
 
     let show = if start_minimized {
+        super::window_state::remember_hidden(hwnd, maximized);
         SW_HIDE
     } else if maximized {
         SW_SHOWMAXIMIZED
@@ -8041,9 +7930,7 @@ fn restore_window_placement(hwnd: HWND, start_minimized: bool) {
 /// the previously-saved values are left untouched. Mirrors upstream
 /// simplewall `_r_window_saveposition`.
 fn save_window_placement(hwnd: HWND) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowPlacement, SW_SHOWMAXIMIZED, WINDOWPLACEMENT,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, WINDOWPLACEMENT};
 
     let Some(state) = (unsafe { state_ref(hwnd) }) else {
         return;
@@ -8063,7 +7950,7 @@ fn save_window_placement(hwnd: HWND) {
         eprintln!("amwall: window placement: degenerate rect {w}x{h}, not saving");
         return;
     }
-    let maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
+    let maximized = super::window_state::restore_maximized(hwnd, &wp);
 
     {
         let mut s = state.app.settings.borrow_mut();
@@ -8236,9 +8123,13 @@ fn on_purge_unused(hwnd: HWND) {
     save_profile_to_disk(state);
     populate_apps_tab(state);
     on_tab_change(hwnd);
-    force_active_apps_listview_jiggle(hwnd, state);
+    repaint_active_apps_listview(hwnd, state);
     reinstall_filters_if_active(hwnd, state);
-    set_status_text(state.status.get(), 0, &t!("status.purged_apps", count = removed));
+    set_status_text(
+        state.status.get(),
+        0,
+        &t!("status.purged_apps", count = removed),
+    );
 }
 
 /// Edit → Purge timers. Clears every app's expiration timer
@@ -8270,9 +8161,13 @@ fn on_purge_timers(hwnd: HWND) {
     save_profile_to_disk(state);
     populate_apps_tab(state);
     on_tab_change(hwnd);
-    force_active_apps_listview_jiggle(hwnd, state);
+    repaint_active_apps_listview(hwnd, state);
     reinstall_filters_if_active(hwnd, state);
-    set_status_text(state.status.get(), 0, &t!("status.cleared_timers", count = cleared));
+    set_status_text(
+        state.status.get(),
+        0,
+        &t!("status.cleared_timers", count = cleared),
+    );
 }
 
 /// Edit → Clear log (also reachable via the toolbar's "Clear
@@ -8557,9 +8452,7 @@ fn on_pick_icon_size(hwnd: HWND, id: u16) {
 /// the icon/tile modes don't make sense there.
 fn apply_view_settings(hwnd: HWND, state: &WndState) {
     use crate::gui::settings::{IconSize, ViewType};
-    use windows::Win32::UI::Controls::{
-        LV_VIEW_DETAILS, LV_VIEW_ICON, LV_VIEW_TILE, LVSIL_NORMAL,
-    };
+    use windows::Win32::UI::Controls::{LV_VIEW_DETAILS, LV_VIEW_ICON, LV_VIEW_TILE, LVSIL_NORMAL};
     use windows::Win32::UI::WindowsAndMessaging::CheckMenuRadioItem;
 
     const LVM_SETVIEW: u32 = 0x108E; // see CommCtrl.h: LVM_FIRST + 142
@@ -8611,9 +8504,7 @@ fn apply_view_settings(hwnd: HWND, state: &WndState) {
         IconSize::ExtraLarge => IDM_SIZE_EXTRALARGE,
     };
     drop(s);
-    let menu = unsafe {
-        windows::Win32::UI::WindowsAndMessaging::GetMenu(hwnd)
-    };
+    let menu = unsafe { windows::Win32::UI::WindowsAndMessaging::GetMenu(hwnd) };
     if !menu.is_invalid() {
         unsafe {
             let _ = CheckMenuRadioItem(
@@ -8788,8 +8679,7 @@ fn on_emergency_reset(hwnd: HWND) {
     update_enable_filters_button(state, false);
     update_titlebar_icon(hwnd, false);
     state.amwall_filter_ids.borrow_mut().clear();
-    *state.categorized_filter_ids.borrow_mut() =
-        crate::install::CategorizedFilterIds::default();
+    *state.categorized_filter_ids.borrow_mut() = crate::install::CategorizedFilterIds::default();
 
     // Honour the panic-button intent across restarts: don't let
     // the startup auto-enable silently re-install everything we
@@ -8885,10 +8775,7 @@ unsafe extern "system" fn about_dialog_callback(
 /// the system's default browser. Replaces upstream's PayPal donate
 /// flow — same toolbar slot, friendlier action.
 fn open_releases_page(hwnd: HWND) {
-    shell_open_url(
-        hwnd,
-        w!("https://github.com/amrust/amwall/releases"),
-    );
+    shell_open_url(hwnd, w!("https://github.com/amrust/amwall/releases"));
 }
 
 /// Pop the user's default browser at `url`. ShellExecuteW returns
@@ -8898,7 +8785,14 @@ fn open_releases_page(hwnd: HWND) {
 /// already self-explanatory.
 fn shell_open_url(hwnd: HWND, url: PCWSTR) {
     let result = unsafe {
-        ShellExecuteW(hwnd, w!("open"), url, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
+        ShellExecuteW(
+            hwnd,
+            w!("open"),
+            url,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
     };
     if result.0 as usize <= 32 {
         eprintln!("amwall: ShellExecuteW failed: code {}", result.0);
@@ -8977,6 +8871,7 @@ fn create_tab_listview(parent: HWND, id: i32) -> Result<HWND, String> {
         // we attach that imagelist for per-row exe icons and we
         // don't own it.
         let style = WS_CHILD
+            | WS_CLIPSIBLINGS
             | WS_BORDER
             | WINDOW_STYLE(LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS);
         let hwnd = CreateWindowExW(
@@ -9005,7 +8900,9 @@ fn create_tab_listview(parent: HWND, id: i32) -> Result<HWND, String> {
 fn configure_listview(lv: HWND, id: i32, dpi: u32) -> Result<(), String> {
     // Extended styles: double-buffer + full-row select for all,
     // checkboxes only for the apps + rules tabs.
-    let mut ext = LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT;
+    let mut ext = LVS_EX_DOUBLEBUFFER
+        | LVS_EX_FULLROWSELECT
+        | windows::Win32::UI::Controls::LVS_EX_HEADERDRAGDROP;
     let is_apps_or_rules = (IDC_APPS_PROFILE..=IDC_RULES_CUSTOM).contains(&id);
     if is_apps_or_rules {
         ext |= LVS_EX_CHECKBOXES;
@@ -9122,10 +9019,7 @@ fn refresh_apps_group_headers(lv: HWND) {
         GROUP_APP_ALLOWED, GROUP_APP_BLOCKED, GROUP_APP_BLOCKED_SILENT, GROUP_APP_SPECIAL,
         GROUP_APP_TIMER, set_header,
     };
-    let total = unsafe {
-        SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0))
-    }
-    .0 as i32;
+    let total = unsafe { SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0)) }.0 as i32;
     let mut counts: [i32; 5] = [0; 5];
     for row in 0..total {
         if let Some(gid) = listview_item_group(lv, row) {
@@ -9152,10 +9046,7 @@ fn refresh_apps_group_headers(lv: HWND) {
 /// Same idea as `refresh_apps_group_headers` for rules tabs.
 fn refresh_rules_group_headers(lv: HWND) {
     use super::listview_groups::{GROUP_RULE_DISABLED, GROUP_RULE_ENABLED, set_header};
-    let total = unsafe {
-        SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0))
-    }
-    .0 as i32;
+    let total = unsafe { SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0)) }.0 as i32;
     let mut enabled = 0i32;
     let mut disabled = 0i32;
     for row in 0..total {
@@ -9188,7 +9079,11 @@ fn listview_item_group(lv: HWND, idx: i32) -> Option<i32> {
             LPARAM(&mut item as *mut _ as isize),
         )
     };
-    if res.0 == 0 { None } else { Some(item.iGroupId) }
+    if res.0 == 0 {
+        None
+    } else {
+        Some(item.iGroupId)
+    }
 }
 
 /// Read the `lParam` (source-vec index) the populator stamped on
@@ -9211,7 +9106,11 @@ fn listview_item_param(lv: HWND, idx: i32) -> Option<isize> {
             LPARAM(&mut item as *mut _ as isize),
         )
     };
-    if res.0 == 0 { None } else { Some(item.lParam.0) }
+    if res.0 == 0 {
+        None
+    } else {
+        Some(item.lParam.0)
+    }
 }
 
 /// Read the text of a listview cell `(row, subitem)` via LVM_GETITEMTEXTW.
@@ -9239,7 +9138,9 @@ fn listview_item_text(lv: HWND, row: i32, subitem: i32) -> Option<String> {
     if len <= 0 {
         return Some(String::new());
     }
-    Some(String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]))
+    Some(String::from_utf16_lossy(
+        &buf[..(len as usize).min(buf.len())],
+    ))
 }
 
 /// Number of columns in a report-view listview (via its header control).
@@ -9316,59 +9217,159 @@ fn add_column(
     Ok(())
 }
 
-/// Snapshot of a listview's scroll position. Captured before a
-/// delete-all/refill cycle so [`end_listview_refill`] can put the
-/// user back where they were.
-#[derive(Debug, Clone, Copy)]
+/// Preserve UI state by row identity, not by its transient position. Traffic,
+/// resolved hostnames and connection state deliberately aren't part of identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RowIdentity {
+    cells: Vec<String>,
+    occurrence: usize,
+}
+
+fn row_identities(lv: HWND) -> Vec<RowIdentity> {
+    use windows::Win32::UI::WindowsAndMessaging::GetDlgCtrlID;
+    let id = unsafe { GetDlgCtrlID(lv) };
+    let columns: &[i32] = match id {
+        IDC_APPS_PROFILE => &[2],
+        IDC_APPS_SERVICE | IDC_APPS_UWP => &[0, 2],
+        IDC_NETWORK => &[0, 1, 3, 4, 6, 7],
+        IDC_LOG => &[1, 2, 3, 5, 6, 8, 9, 10, 11],
+        _ => &[0, 1, 2],
+    };
+    let count = unsafe { SendMessageW(lv, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0)) }.0 as i32;
+    let mut occurrences = std::collections::HashMap::new();
+    (0..count)
+        .map(|row| {
+            let cells: Vec<_> = columns
+                .iter()
+                .map(|&col| listview_item_text(lv, row, col).unwrap_or_default())
+                .collect();
+            let occurrence = occurrences.entry(cells.clone()).or_insert(0);
+            let key = RowIdentity {
+                cells,
+                occurrence: *occurrence,
+            };
+            *occurrence += 1;
+            key
+        })
+        .collect()
+}
+
 struct SavedScroll {
     top: i32,
     count_per_page: i32,
+    horizontal: i32,
+    top_key: Option<RowIdentity>,
+    selected: std::collections::HashSet<RowIdentity>,
+    focused: Option<RowIdentity>,
+    redraw_suspended: bool,
 }
 
-/// Pair with [`end_listview_refill`]. Snapshots the current
-/// scroll position, freezes paints (`WM_SETREDRAW(0)`), and
-/// wipes the listview. Used by every populator that does a
-/// bulk delete-all / re-insert — without the pair, the auto-
-/// refresh timers (Connections every 1.5 s, Log every drain
-/// tick) yank the user back to row 0 and they can't read past
-/// the first page.
 fn begin_listview_refill(lv: HWND) -> SavedScroll {
-    let top = unsafe {
-        SendMessageW(lv, LVM_GETTOPINDEX, WPARAM(0), LPARAM(0))
+    use windows::Win32::UI::Controls::LVIS_FOCUSED;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetScrollPos, GetWindowLongW, SB_HORZ,
+    };
+    let top = unsafe { SendMessageW(lv, LVM_GETTOPINDEX, WPARAM(0), LPARAM(0)) }.0 as i32;
+    let count_per_page =
+        unsafe { SendMessageW(lv, LVM_GETCOUNTPERPAGE, WPARAM(0), LPARAM(0)) }.0 as i32;
+    let horizontal = unsafe { GetScrollPos(lv, SB_HORZ) };
+    let keys = row_identities(lv);
+    let mut selected = std::collections::HashSet::new();
+    let mut focused = None;
+    for (row, key) in keys.iter().enumerate() {
+        let flags = unsafe {
+            SendMessageW(
+                lv,
+                LVM_GETITEMSTATE,
+                WPARAM(row),
+                LPARAM((LVIS_SELECTED.0 | LVIS_FOCUSED.0) as isize),
+            )
+        }
+        .0 as u32;
+        if flags & LVIS_SELECTED.0 != 0 {
+            selected.insert(key.clone());
+        }
+        if flags & LVIS_FOCUSED.0 != 0 {
+            focused = Some(key.clone());
+        }
     }
-    .0 as i32;
-    let count_per_page = unsafe {
-        SendMessageW(lv, LVM_GETCOUNTPERPAGE, WPARAM(0), LPARAM(0))
-    }
-    .0 as i32;
+    // WM_SETREDRAW(TRUE) adds WS_VISIBLE. Never send the pair to a hidden
+    // tab: doing so exposed overlapping siblings and made painting unreliable.
+    // Read the control's own style, since its parent may still be hidden.
+    let redraw_suspended = unsafe { GetWindowLongW(lv, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0;
     unsafe {
-        let _ = SendMessageW(lv, WM_SETREDRAW, WPARAM(0), LPARAM(0));
-        let _ = SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
+        if redraw_suspended {
+            SendMessageW(lv, WM_SETREDRAW, WPARAM(0), LPARAM(0));
+        }
+        SendMessageW(lv, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
     }
-    SavedScroll { top, count_per_page }
+    SavedScroll {
+        top,
+        count_per_page,
+        horizontal,
+        top_key: keys.get(top.max(0) as usize).cloned(),
+        selected,
+        focused,
+        redraw_suspended,
+    }
 }
 
-/// Pair with [`begin_listview_refill`]. Restores the saved
-/// scroll position, re-enables paints, and forces a single
-/// invalidate so the deferred redraw fires once. `new_count` is
-/// how many rows the populator actually inserted — needed to
-/// clamp `saved.top` if the list shrank (e.g. a connection
-/// closed) so we don't try to scroll past the new end. The
-/// two-step ENSUREVISIBLE (last-visible-of-old-view first, then
-/// `saved.top`) is the canonical comctl idiom for "put `top`
-/// back at the top of the visible area."
 fn end_listview_refill(lv: HWND, saved: SavedScroll, new_count: i32) {
-    if saved.top > 0 && new_count > 0 {
-        let bottom = (saved.top + saved.count_per_page - 1).min(new_count - 1);
+    use windows::Win32::UI::Controls::{LVIS_FOCUSED, LVM_SCROLL};
+    use windows::Win32::UI::WindowsAndMessaging::{GetScrollPos, SB_HORZ};
+    let keys = row_identities(lv);
+    for (row, key) in keys.iter().enumerate() {
+        let mut flags = LIST_VIEW_ITEM_STATE_FLAGS(0);
+        if saved.selected.contains(key) {
+            flags.0 |= LVIS_SELECTED.0;
+        }
+        if saved.focused.as_ref() == Some(key) {
+            flags.0 |= LVIS_FOCUSED.0;
+        }
+        if flags.0 != 0 {
+            let item = LVITEMW {
+                stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
+                state: flags,
+                ..Default::default()
+            };
+            unsafe {
+                SendMessageW(
+                    lv,
+                    LVM_SETITEMSTATE,
+                    WPARAM(row),
+                    LPARAM(&item as *const _ as isize),
+                );
+            }
+        }
+    }
+    let top = saved
+        .top_key
+        .as_ref()
+        .and_then(|key| keys.iter().position(|k| k == key))
+        .map(|i| i as i32)
+        .unwrap_or(saved.top)
+        .clamp(0, (new_count - 1).max(0));
+    // Enabling redraw recalculates the scroll ranges. Restore the viewport
+    // afterwards, before queued paints run, or that recalculation resets it.
+    if saved.redraw_suspended {
         unsafe {
-            let _ = SendMessageW(lv, LVM_ENSUREVISIBLE, WPARAM(bottom as usize), LPARAM(1));
-            let _ = SendMessageW(lv, LVM_ENSUREVISIBLE, WPARAM(saved.top as usize), LPARAM(1));
+            SendMessageW(lv, WM_SETREDRAW, WPARAM(1), LPARAM(0));
+        }
+    }
+    if top > 0 && new_count > 0 {
+        let bottom = (top + saved.count_per_page.max(1) - 1).min(new_count - 1);
+        unsafe {
+            SendMessageW(lv, LVM_ENSUREVISIBLE, WPARAM(bottom as usize), LPARAM(1));
+            SendMessageW(lv, LVM_ENSUREVISIBLE, WPARAM(top as usize), LPARAM(1));
         }
     }
     unsafe {
-        let _ = SendMessageW(lv, WM_SETREDRAW, WPARAM(1), LPARAM(0));
-        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(lv, None, false);
+        let dx = saved.horizontal - GetScrollPos(lv, SB_HORZ);
+        if dx != 0 {
+            SendMessageW(lv, LVM_SCROLL, WPARAM(dx as isize as usize), LPARAM(0));
+        }
     }
+    redraw_listview(lv);
 }
 
 /// Wipe the User rules ListView and re-fill from the current
@@ -9523,6 +9524,7 @@ fn populate_user_rules(state: &WndState) {
     state.user_rules_preset_count.set(preset_visible);
     refresh_rules_group_headers(lv);
     end_listview_refill(lv, saved, row);
+    autosize_slot_if_visible(state, 5);
 }
 
 /// Write the protocol + direction subitem columns for a rule row.
@@ -9549,60 +9551,20 @@ fn write_rule_subitems(lv: HWND, idx: i32, rule: &crate::profile::Rule) {
     set_subitem(lv, idx, 2, &direction);
 }
 
-/// Wipe the Apps ListView (IDC_APPS_PROFILE) and re-fill from
-/// `profile.apps`. Each row carries:
-///   col 0  - filename (basename of the .exe path)
-///   col 1  - "Added" timestamp formatted as local-time
-///            "yyyy-MM-dd HH:mm:ss"
-///   checkbox state - reflects `App.is_enabled`.
-///
-/// Toggling the checkbox is wired in a follow-up (it mutates the
-/// in-memory App.is_enabled; actual filter (re-)install fires off
-/// an Apply or the Enable filters toolbar button).
-/// Recompute the per-app traffic rollup (aggregate speed + interfaces)
-/// from a fresh traffic sample and store it in `state.app_traffic`.
-/// Aggregates the same ESTATS sample the Connections tab uses: each TCP
-/// connection's rate is summed onto its owning process's full image
-/// path, and the connection's local IP is mapped to the interface it
-/// rides. pid → path resolution is memoized per call so a busy process
-/// with many sockets pays one lookup.
+/// Recompute app speeds and interfaces from the latest complete
+/// background snapshot. Its PID paths are already resolved; this stays
+/// cheap when called during row painting, sorting or tab changes.
 fn refresh_app_traffic(state: &WndState) {
-    // Speed comes from the ETW per-process meter (real TCP+UDP), keyed by
-    // PID. Empty when the meter isn't running (not elevated) — the Speed
-    // columns then stay blank, same as the old ESTATS fallback.
-    let pid_rates: std::collections::HashMap<u32, (u64, u64)> = state
-        .net_meter
-        .borrow_mut()
-        .as_mut()
-        .map(|m| m.rates())
-        .unwrap_or_default();
-
-    // The current connection table gives PID -> local IP for interface
-    // attribution and marks which apps are connected at all.
-    let conns = super::connections::enumerate();
-    let ifaces = super::connections::interface_names_by_ip();
-
-    // Memoized PID -> lowercased image path (matches profile.apps[].path;
-    // see the `app_traffic` field doc).
-    let mut pid_path: std::collections::HashMap<u32, Option<String>> =
-        std::collections::HashMap::new();
-    let mut resolve = |pid: u32| -> Option<String> {
-        pid_path
-            .entry(pid)
-            .or_insert_with(|| {
-                super::connections::process_full_path(pid)
-                    .map(|p| p.to_string_lossy().to_ascii_lowercase())
-            })
-            .clone()
-    };
-
+    let snapshot = state.network_snapshot.borrow();
     let mut rollup: std::collections::HashMap<String, AppTraffic> =
         std::collections::HashMap::new();
 
     // Speed: fold each PID's rate onto its owning app path.
-    for (&pid, &(down, up)) in &pid_rates {
-        let Some(path) = resolve(pid) else { continue };
-        let entry = rollup.entry(path).or_default();
+    for (&pid, &(down, up)) in &snapshot.pid_rates {
+        let Some(path) = snapshot.process_paths.get(&pid) else {
+            continue;
+        };
+        let entry = rollup.entry(path.clone()).or_default();
         entry.download_speed = entry.download_speed.saturating_add(down);
         entry.upload_speed = entry.upload_speed.saturating_add(up);
     }
@@ -9610,10 +9572,12 @@ fn refresh_app_traffic(state: &WndState) {
     // Interface: attribute each live connection's local-IP adapter to its
     // app (also creates a 0-speed entry for connected-but-idle apps so
     // they still show their interface rather than blank).
-    for c in &conns {
-        let Some(path) = resolve(c.pid) else { continue };
-        let entry = rollup.entry(path).or_default();
-        if let Some(name) = ifaces.get(&c.local.ip) {
+    for c in &snapshot.connections {
+        let Some(path) = snapshot.process_paths.get(&c.pid) else {
+            continue;
+        };
+        let entry = rollup.entry(path.clone()).or_default();
+        if let Some(name) = snapshot.interfaces.get(&c.local.ip) {
             if !entry.interfaces.iter().any(|n| n == name) {
                 entry.interfaces.push(name.clone());
             }
@@ -9630,8 +9594,18 @@ fn set_app_traffic_subitems(state: &WndState, lv: HWND, row: i32, path: &std::pa
     let key = path_match_key(path);
     let at = state.app_traffic.borrow();
     if let Some(t) = at.get(&key) {
-        set_subitem(lv, row, 3, &super::connections::format_speed(t.download_speed));
-        set_subitem(lv, row, 4, &super::connections::format_speed(t.upload_speed));
+        set_subitem(
+            lv,
+            row,
+            3,
+            &super::connections::format_speed(t.download_speed),
+        );
+        set_subitem(
+            lv,
+            row,
+            4,
+            &super::connections::format_speed(t.upload_speed),
+        );
         set_subitem(lv, row, 5, &t.interfaces.join(", "));
     } else {
         set_subitem(lv, row, 3, "");
@@ -9672,6 +9646,7 @@ fn refresh_apps_traffic_columns(state: &WndState) {
             set_app_traffic_subitems(state, lv, row, &path);
         }
     }
+    autosize_slot_if_visible(state, 0);
 }
 
 fn populate_apps_tab(state: &WndState) {
@@ -9727,8 +9702,7 @@ fn populate_apps_tab(state: &WndState) {
     // still drives Win32 group bucketing — the sort just picks
     // ordering within each group.
     let sort = state.apps_sort.get();
-    let mut indexed: Vec<(usize, &crate::profile::App)> =
-        profile.apps.iter().enumerate().collect();
+    let mut indexed: Vec<(usize, &crate::profile::App)> = profile.apps.iter().enumerate().collect();
     {
         // Columns 3 (↓) and 4 (↑) sort by the live per-app rate, looked
         // up in `app_traffic` by lowercased path (blank / not-connected
@@ -9739,7 +9713,13 @@ fn populate_apps_tab(state: &WndState) {
             let key = path_match_key(&app.path);
             app_traffic
                 .get(&key)
-                .map(|t| if upload { t.upload_speed } else { t.download_speed })
+                .map(|t| {
+                    if upload {
+                        t.upload_speed
+                    } else {
+                        t.download_speed
+                    }
+                })
                 .unwrap_or(0)
         };
         indexed.sort_by(|a, b| {
@@ -9849,6 +9829,7 @@ fn populate_apps_tab(state: &WndState) {
     drop(profile);
     refresh_apps_group_headers(lv);
     end_listview_refill(lv, saved, row);
+    autosize_slot_if_visible(state, 0);
 }
 
 /// Populate the Apps → Services tab from the cached SCM enumeration
@@ -9877,9 +9858,7 @@ fn populate_services_tab(state: &WndState) {
         } else {
             svc.display_name.as_str()
         };
-        if !search_match(name_for_display, &filter)
-            && !search_match(&svc.service_name, &filter)
-        {
+        if !search_match(name_for_display, &filter) && !search_match(&svc.service_name, &filter) {
             continue;
         }
         let i = row;
@@ -9947,6 +9926,7 @@ fn populate_services_tab(state: &WndState) {
     drop(services);
     refresh_apps_group_headers(lv);
     end_listview_refill(lv, saved, row);
+    autosize_slot_if_visible(state, 1);
 }
 
 /// Populate the Apps → UWP tab from the cached registry walk
@@ -10018,6 +9998,7 @@ fn populate_uwp_tab(state: &WndState) {
     drop(packages);
     refresh_apps_group_headers(lv);
     end_listview_refill(lv, saved, row);
+    autosize_slot_if_visible(state, 2);
 }
 
 /// Re-walk SCM and the UWP repository, replacing the cached
@@ -10061,59 +10042,55 @@ fn format_timestamp_local(unix_ts: i64) -> String {
     )
 }
 
-/// Populate the Connections tab (`IDC_NETWORK`) from a fresh
-/// IP Helper enumeration. Each row covers the 12 columns set up
+/// Populate the Connections tab (`IDC_NETWORK`) from the latest
+/// complete background snapshot. Each row covers the 12 columns set up
 /// in `configure_listview` for IDC_NETWORK:
 ///   Name | Address(Source) | Host(Source) | Port(Source) |
 ///   Address(Destination) | Host(Destination) | Port(Destination) |
 ///   Protocol | State | ↓ Speed | ↑ Speed | Total
 /// Host(Source) / Host(Destination) are blank for now — DNS
 /// reverse-resolution is async and would block the UI thread. The
-/// three traffic columns come from per-connection TCP ESTATS via
-/// `state.traffic_monitor` (upstream PR #2100).
+/// three traffic columns come from the cached worker ESTATS/ETW sample
+/// (upstream PR #2100). Repainting never walks IP Helper tables.
 fn populate_connections_tab(state: &WndState) {
     // Index 6 in TAB_LISTVIEW_IDS is IDC_NETWORK.
     let lv = state.listviews[6].get();
     if lv.0 == 0 {
         return;
     }
-    let mut conns = {
-        let mut monitor = state.traffic_monitor.borrow_mut();
-        super::connections::enumerate_with_traffic(&mut monitor)
-    };
-    // ESTATS covers TCP per-connection but exposes nothing for UDP. Fill
-    // the UDP rows (and any TCP row ESTATS couldn't stat) from the ETW
-    // per-endpoint meter, keyed by (is_udp, local_port) — so a µTP torrent
-    // finally shows its real UDP rate here too.
-    {
-        let etw = state
-            .net_meter
-            .borrow_mut()
-            .as_mut()
-            .map(|m| m.conn_rates())
-            .unwrap_or_default();
-        if !etw.is_empty() {
-            for c in conns.iter_mut() {
-                if c.has_stats {
-                    continue;
-                }
-                let is_udp = c.protocol == super::connections::Protocol::Udp;
-                if let Some(t) = etw.get(&(is_udp, c.local.port)) {
-                    c.download_speed = t.download;
-                    c.upload_speed = t.upload;
-                    c.total_bytes = t.total;
-                    c.has_stats = true;
-                }
-            }
-        }
-    }
+    let mut conns = state.network_snapshot.borrow().connections.clone();
     // Apply the user's column-header sort (default: enumeration order).
     // The row loop stamps each row's lParam with its index into this
     // now-sorted Vec, so right-click round-tripping stays consistent.
     sort_connections(&mut conns, state.network_sort.get());
 
-    let saved = begin_listview_refill(lv);
     let filter = state.search_text.borrow().clone();
+    let existing = row_identities(lv);
+    let expected: Vec<Vec<String>> = conns
+        .iter()
+        .filter(|c| search_match(&c.process, &filter))
+        .map(|c| {
+            vec![
+                c.process.clone(),
+                c.local.ip.to_string(),
+                c.local.port.to_string(),
+                if c.remote.ip.is_unspecified() {
+                    String::new()
+                } else {
+                    c.remote.ip.to_string()
+                },
+                if c.remote.port == 0 {
+                    String::new()
+                } else {
+                    c.remote.port.to_string()
+                },
+                c.protocol.label().to_string(),
+            ]
+        })
+        .collect();
+    let unchanged = existing.len() == expected.len()
+        && existing.iter().zip(&expected).all(|(a, b)| a.cells == *b);
+    let saved = (!unchanged).then(|| begin_listview_refill(lv));
     let resolve = state.app.settings.borrow().use_network_resolution;
     let mut row = 0i32;
     for (src_idx, c) in conns.iter().enumerate() {
@@ -10126,7 +10103,11 @@ fn populate_connections_tab(state: &WndState) {
         // Stamp the source index into lParam so a right-click round-trips
         // row → Connection despite search filtering (Fable #27).
         let item = LVITEMW {
-            mask: LVIF_TEXT | LVIF_PARAM,
+            mask: if unchanged {
+                LVIF_PARAM
+            } else {
+                LVIF_TEXT | LVIF_PARAM
+            },
             iItem: idx as i32,
             iSubItem: 0,
             pszText: PWSTR(name_buf.as_mut_ptr()),
@@ -10136,7 +10117,11 @@ fn populate_connections_tab(state: &WndState) {
         let _ = unsafe {
             SendMessageW(
                 lv,
-                LVM_INSERTITEMW,
+                if unchanged {
+                    windows::Win32::UI::Controls::LVM_SETITEMW
+                } else {
+                    LVM_INSERTITEMW
+                },
                 WPARAM(0),
                 LPARAM(&item as *const _ as isize),
             )
@@ -10171,18 +10156,36 @@ fn populate_connections_tab(state: &WndState) {
         // reading show a value; UDP / listeners / pre-baseline rows stay
         // blank, matching upstream PR #2100.
         if c.has_stats {
-            set_subitem(lv, idx as i32, 9, &super::connections::format_speed(c.download_speed));
-            set_subitem(lv, idx as i32, 10, &super::connections::format_speed(c.upload_speed));
-            set_subitem(lv, idx as i32, 11, &super::connections::format_bytesize(c.total_bytes));
+            set_subitem(
+                lv,
+                idx as i32,
+                9,
+                &super::connections::format_speed(c.download_speed),
+            );
+            set_subitem(
+                lv,
+                idx as i32,
+                10,
+                &super::connections::format_speed(c.upload_speed),
+            );
+            set_subitem(
+                lv,
+                idx as i32,
+                11,
+                &super::connections::format_bytesize(c.total_bytes),
+            );
         } else {
             set_subitem(lv, idx as i32, 9, "");
             set_subitem(lv, idx as i32, 10, "");
             set_subitem(lv, idx as i32, 11, "");
         }
     }
-    end_listview_refill(lv, saved, row);
+    if let Some(saved) = saved {
+        end_listview_refill(lv, saved, row);
+    }
     // Cache the snapshot the stamped lParams index into.
     *state.connections.borrow_mut() = conns;
+    autosize_slot_if_visible(state, 6);
 }
 
 /// Hostname-or-empty for one IP. When `resolve` is false we don't
@@ -10196,11 +10199,7 @@ fn populate_connections_tab(state: &WndState) {
 /// Skips loopback / unspecified / multicast IPs — looking those
 /// up just wastes worker cycles since they have no meaningful
 /// PTR record to surface.
-fn lookup_or_enqueue(
-    state: &WndState,
-    ip: std::net::IpAddr,
-    resolve: bool,
-) -> String {
+fn lookup_or_enqueue(state: &WndState, ip: std::net::IpAddr, resolve: bool) -> String {
     if !resolve {
         return String::new();
     }
@@ -10241,8 +10240,7 @@ fn populate_log_tab(state: &WndState) {
     let mut row = 0i32;
     for (event_idx, event) in log.iter().enumerate() {
         let details = match event {
-            crate::wfp::events::NetEvent::Drop(d)
-            | crate::wfp::events::NetEvent::Allow(d) => d,
+            crate::wfp::events::NetEvent::Drop(d) | crate::wfp::events::NetEvent::Allow(d) => d,
             // Other event types (IKE / IPsec / capability) don't
             // carry the per-packet info the Log tab columns expect
             // — skip rather than render rows full of blanks.
@@ -10332,22 +10330,18 @@ fn populate_log_tab(state: &WndState) {
             lv,
             i,
             11,
-            &details
-                .filter_id
-                .map(|f| f.to_string())
-                .unwrap_or_default(),
+            &details.filter_id.map(|f| f.to_string()).unwrap_or_default(),
         );
     }
     end_listview_refill(lv, saved, row);
+    autosize_slot_if_visible(state, 7);
 }
 
 /// Last component of an NT-form path
 /// (`\device\harddiskvolume3\…\chrome.exe` → `chrome.exe`). Returns
 /// the full input if there's no `\`.
 fn log_basename(path: &str) -> &str {
-    path.rsplit_once('\\')
-        .map(|(_, tail)| tail)
-        .unwrap_or(path)
+    path.rsplit_once('\\').map(|(_, tail)| tail).unwrap_or(path)
 }
 
 /// IP-protocol number → display label. Numbers we don't recognise
@@ -10377,18 +10371,14 @@ fn log_direction_label(d: Option<crate::wfp::events::NetDirection>) -> String {
 /// conversion fails (which it shouldn't for any sane time).
 fn format_event_time(t: std::time::SystemTime) -> String {
     use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
-    use windows::Win32::System::Time::{
-        FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime,
-    };
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 
-    let dur = t
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     // FILETIME = 100-ns intervals since 1601-01-01. Add the
     // 1601→1970 offset (11_644_473_600 s) to get from a UNIX-epoch
     // duration to a FILETIME value.
-    let intervals: u64 = (dur.as_secs() + 11_644_473_600) * 10_000_000
-        + (dur.subsec_nanos() as u64) / 100;
+    let intervals: u64 =
+        (dur.as_secs() + 11_644_473_600) * 10_000_000 + (dur.subsec_nanos() as u64) / 100;
     let ft = FILETIME {
         dwLowDateTime: (intervals & 0xFFFF_FFFF) as u32,
         dwHighDateTime: (intervals >> 32) as u32,
@@ -10401,7 +10391,10 @@ fn format_event_time(t: std::time::SystemTime) -> String {
     if unsafe { SystemTimeToTzSpecificLocalTime(None, &utc, &mut local) }.is_err() {
         return format!("{:02}:{:02}:{:02}", utc.wHour, utc.wMinute, utc.wSecond);
     }
-    format!("{:02}:{:02}:{:02}", local.wHour, local.wMinute, local.wSecond)
+    format!(
+        "{:02}:{:02}:{:02}",
+        local.wHour, local.wMinute, local.wSecond
+    )
 }
 
 /// EN_CHANGE on the rebar's search edit. Reads the new text,
@@ -10419,9 +10412,8 @@ fn on_search_changed(hwnd: HWND) {
         return;
     }
     let mut buf = [0u16; 256];
-    let n = unsafe {
-        windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(edit, &mut buf)
-    } as usize;
+    let n =
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(edit, &mut buf) } as usize;
     let new_text = String::from_utf16_lossy(&buf[..n]);
     *state.search_text.borrow_mut() = new_text;
 
@@ -10431,11 +10423,10 @@ fn on_search_changed(hwnd: HWND) {
     if tab.0 == 0 {
         return;
     }
-    let sel =
-        unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
+    let sel = unsafe { SendMessageW(tab, TCM_GETCURSEL, WPARAM(0), LPARAM(0)) }.0 as isize;
     let slot = if sel < 0 { 0 } else { sel as usize };
     repopulate_tab(state, slot);
-    on_tab_change(hwnd); // refreshes the count in the status bar
+    update_item_count(state, slot);
 }
 
 /// Re-run whichever populator covers the given tab slot.
@@ -10449,12 +10440,8 @@ fn repopulate_tab(state: &WndState, slot: usize) {
         5 => populate_user_rules(state),
         6 => populate_connections_tab(state),
         7 => populate_log_tab(state),
-        _ => return,
+        _ => (),
     }
-    // Content changed, so the widest cell may have too. Upstream
-    // re-fits from its listview update helpers for the same reason
-    // (listview.c:458, 524).
-    autosize_slot_if_visible(state, slot);
 }
 
 /// Case-insensitive substring match used by every populator.
@@ -10493,7 +10480,10 @@ fn populate_internal_rules(state: &WndState, id: i32) {
     let saved = begin_listview_refill(lv);
 
     let (rules, kind): (&[Rule], RuleKind) = match id {
-        IDC_RULES_BLOCKLIST => (&state.app.internal_profile.blocklist_rules, RuleKind::Blocklist),
+        IDC_RULES_BLOCKLIST => (
+            &state.app.internal_profile.blocklist_rules,
+            RuleKind::Blocklist,
+        ),
         IDC_RULES_SYSTEM => (&state.app.internal_profile.system_rules, RuleKind::System),
         _ => {
             end_listview_refill(lv, saved, 0);
@@ -10517,8 +10507,7 @@ fn populate_internal_rules(state: &WndState, id: i32) {
         // is still correct — the checkbox UI is consistent and a
         // future blocklist-toggle wire-up doesn't need a populator
         // change.
-        let effective_enabled =
-            overrides.effective_is_enabled(kind, &rule.name, rule.is_enabled);
+        let effective_enabled = overrides.effective_is_enabled(kind, &rule.name, rule.is_enabled);
         let state_image = if effective_enabled { 2u32 } else { 1u32 };
         let group_id = super::listview_groups::rule_group_id_with(rule, effective_enabled);
         let item = LVITEMW {
@@ -10560,9 +10549,13 @@ fn populate_internal_rules(state: &WndState, id: i32) {
     drop(overrides);
     refresh_rules_group_headers(lv);
     end_listview_refill(lv, saved, row);
+    autosize_slot_if_visible(state, if id == IDC_RULES_BLOCKLIST { 3 } else { 4 });
 }
 
 fn set_subitem(lv: HWND, row: i32, sub: i32, text: &str) {
+    if listview_item_text(lv, row, sub).as_deref() == Some(text) {
+        return;
+    }
     let mut buf = wide(text);
     let item = LVITEMW {
         mask: LVIF_TEXT,
@@ -10631,10 +10624,8 @@ fn format_window_title(path: &std::path::Path) -> String {
 pub(super) fn set_window_title(hwnd: HWND, path: &std::path::Path) {
     let title = wide(&format_window_title(path));
     unsafe {
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
-            hwnd,
-            PCWSTR(title.as_ptr()),
-        );
+        let _ =
+            windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
     }
 }
 
@@ -10703,14 +10694,26 @@ const fn windows_lvm_getitemcount() -> u32 {
 mod tests {
     use super::*;
 
-    fn conn(process: &str, port: u16, down: u64, up: u64, total: u64) -> super::super::connections::Connection {
-        use std::net::{IpAddr, Ipv4Addr};
+    fn conn(
+        process: &str,
+        port: u16,
+        down: u64,
+        up: u64,
+        total: u64,
+    ) -> super::super::connections::Connection {
         use super::super::connections::{Connection, Endpoint, Protocol};
+        use std::net::{IpAddr, Ipv4Addr};
         Connection {
             process: process.to_string(),
             pid: 0,
-            local: Endpoint { ip: IpAddr::V4(Ipv4Addr::LOCALHOST), port },
-            remote: Endpoint { ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), port: 443 },
+            local: Endpoint {
+                ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port,
+            },
+            remote: Endpoint {
+                ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+                port: 443,
+            },
             protocol: Protocol::Tcp,
             state: "ESTABLISHED",
             download_speed: down,
@@ -10739,38 +10742,73 @@ mod tests {
 
         // Column -1 (default) leaves enumeration order untouched.
         let mut v = base.clone();
-        sort_connections(&mut v, NetworkSortState { column: -1, ascending: false });
-        assert_eq!(v.iter().map(|c| c.process.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        sort_connections(
+            &mut v,
+            NetworkSortState {
+                column: -1,
+                ascending: false,
+            },
+        );
+        assert_eq!(
+            v.iter().map(|c| c.process.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
 
         // Download speed (col 9), first click = descending -> b(300) c(200) a(100).
         let mut v = base.clone();
-        sort_connections(&mut v, NetworkSortState { column: 9, ascending: false });
-        assert_eq!(v.iter().map(|c| c.download_speed).collect::<Vec<_>>(), [300, 200, 100]);
+        sort_connections(
+            &mut v,
+            NetworkSortState {
+                column: 9,
+                ascending: false,
+            },
+        );
+        assert_eq!(
+            v.iter().map(|c| c.download_speed).collect::<Vec<_>>(),
+            [300, 200, 100]
+        );
 
         // Same column ascending -> a(100) c(200) b(300).
         let mut v = base.clone();
-        sort_connections(&mut v, NetworkSortState { column: 9, ascending: true });
-        assert_eq!(v.iter().map(|c| c.download_speed).collect::<Vec<_>>(), [100, 200, 300]);
+        sort_connections(
+            &mut v,
+            NetworkSortState {
+                column: 9,
+                ascending: true,
+            },
+        );
+        assert_eq!(
+            v.iter().map(|c| c.download_speed).collect::<Vec<_>>(),
+            [100, 200, 300]
+        );
 
         // Total (col 11) descending is numeric, not lexicographic (1000 > 700 > 50).
         let mut v = base.clone();
-        sort_connections(&mut v, NetworkSortState { column: 11, ascending: false });
-        assert_eq!(v.iter().map(|c| c.total_bytes).collect::<Vec<_>>(), [1000, 700, 50]);
+        sort_connections(
+            &mut v,
+            NetworkSortState {
+                column: 11,
+                ascending: false,
+            },
+        );
+        assert_eq!(
+            v.iter().map(|c| c.total_bytes).collect::<Vec<_>>(),
+            [1000, 700, 50]
+        );
 
         // Local port (col 3) ascending.
         let mut v = base.clone();
-        sort_connections(&mut v, NetworkSortState { column: 3, ascending: true });
-        assert_eq!(v.iter().map(|c| c.local.port).collect::<Vec<_>>(), [10, 20, 30]);
-    }
-
-    #[test]
-    fn revocation_policy_maps_allow_vs_display() {
-        // Security audit finding F.2: the auto-ALLOW path must verify
-        // with whole-chain revocation (fails closed on a revoked cert);
-        // the display-only worker keeps the fast no-revocation path.
-        use windows::Win32::Security::WinTrust::{WTD_REVOKE_NONE, WTD_REVOKE_WHOLECHAIN};
-        assert_eq!(revocation_checks(true).0, WTD_REVOKE_WHOLECHAIN.0);
-        assert_eq!(revocation_checks(false).0, WTD_REVOKE_NONE.0);
+        sort_connections(
+            &mut v,
+            NetworkSortState {
+                column: 3,
+                ascending: true,
+            },
+        );
+        assert_eq!(
+            v.iter().map(|c| c.local.port).collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
     }
 
     #[test]
@@ -10795,7 +10833,10 @@ mod tests {
         // preset row (negative lParam sentinel) from a user-added row,
         // and recover the user row's source index from lParam rather
         // than trusting the visual row (shifted by presets + search).
-        assert_eq!(classify_user_rule_row(USER_RULE_ROW_PRESET), UserRuleRow::Preset);
+        assert_eq!(
+            classify_user_rule_row(USER_RULE_ROW_PRESET),
+            UserRuleRow::Preset
+        );
         assert_eq!(classify_user_rule_row(-1), UserRuleRow::Preset);
         assert_eq!(classify_user_rule_row(-42), UserRuleRow::Preset);
         assert_eq!(classify_user_rule_row(0), UserRuleRow::User(0));
@@ -10832,42 +10873,98 @@ mod tests {
 
     #[test]
     fn purge_keeps_an_enabled_app_that_exists() {
-        assert!(!is_app_unused(false, AppKind::File, true, false, true, false));
+        assert!(!is_app_unused(
+            false,
+            AppKind::File,
+            true,
+            false,
+            true,
+            false
+        ));
     }
 
     #[test]
     fn purge_removes_a_disabled_app_whose_file_is_gone() {
         // The genuine "uninstalled app" case purge exists for.
-        assert!(is_app_unused(false, AppKind::File, false, false, false, false));
+        assert!(is_app_unused(
+            false,
+            AppKind::File,
+            false,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn purge_removes_an_existing_but_wholly_unreferenced_app() {
-        assert!(is_app_unused(false, AppKind::File, false, false, true, false));
+        assert!(is_app_unused(
+            false,
+            AppKind::File,
+            false,
+            false,
+            true,
+            false
+        ));
     }
 
     #[test]
     fn purge_never_touches_an_undeletable_app() {
         // Undeletable wins over every other signal, including missing.
-        assert!(!is_app_unused(true, AppKind::File, false, false, false, false));
+        assert!(!is_app_unused(
+            true,
+            AppKind::File,
+            false,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn purge_never_calls_a_service_or_uwp_entry_missing() {
         // Their "path" is a service short name / package SID, so there
         // is no file to find. Only the used/unused test may apply.
-        assert!(!is_app_unused(false, AppKind::Service, true, false, false, false));
-        assert!(!is_app_unused(false, AppKind::Uwp, true, false, false, false));
+        assert!(!is_app_unused(
+            false,
+            AppKind::Service,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(!is_app_unused(
+            false,
+            AppKind::Uwp,
+            true,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn purge_keeps_an_app_only_a_rule_references() {
-        assert!(!is_app_unused(false, AppKind::File, false, false, true, true));
+        assert!(!is_app_unused(
+            false,
+            AppKind::File,
+            false,
+            false,
+            true,
+            true
+        ));
     }
 
     #[test]
     fn purge_keeps_a_silent_app() {
-        assert!(!is_app_unused(false, AppKind::File, false, true, true, false));
+        assert!(!is_app_unused(
+            false,
+            AppKind::File,
+            false,
+            true,
+            true,
+            false
+        ));
     }
 
     #[test]
@@ -10911,6 +11008,9 @@ mod tests {
     #[test]
     fn path_match_key_leaves_uwp_sids_alone() {
         let sid = "S-1-15-2-1234567890-1234567890";
-        assert_eq!(path_match_key(std::path::Path::new(sid)), sid.to_ascii_lowercase());
+        assert_eq!(
+            path_match_key(std::path::Path::new(sid)),
+            sid.to_ascii_lowercase()
+        );
     }
 }

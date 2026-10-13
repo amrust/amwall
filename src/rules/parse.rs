@@ -559,9 +559,8 @@ mod proptests {
     }
 
     fn port_range() -> impl Strategy<Value = (u16, u16)> {
-        (any::<u16>(), any::<u16>()).prop_map(|(x, y)| {
-            if x <= y { (x, y) } else { (y, x) }
-        })
+        // Valid syntax requires 1 <= low < high, including while shrinking.
+        (1u16..u16::MAX).prop_flat_map(|low| (Just(low), low + 1..=u16::MAX))
     }
 
     fn addr_spec() -> impl Strategy<Value = AddrSpec> {
@@ -576,7 +575,7 @@ mod proptests {
 
     fn port_spec() -> impl Strategy<Value = PortSpec> {
         prop_oneof![
-            any::<u16>().prop_map(PortSpec::Single),
+            (1u16..=u16::MAX).prop_map(PortSpec::Single),
             port_range().prop_map(|(a, b)| PortSpec::Range(a, b)),
         ]
     }
